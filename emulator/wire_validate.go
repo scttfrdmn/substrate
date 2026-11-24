@@ -11,9 +11,11 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -85,6 +87,9 @@ type inputView interface {
 	scalar() (string, bool)
 	// blobLen returns a blob's length in bytes, and false when it cannot be read as one.
 	blobLen() (int, bool)
+	// fits reports whether the value can be a value of kind. A view that cannot tell, because
+	// its wire format does not type its values, answers true.
+	fits(kind wireKind) bool
 }
 
 // validateRequest checks req against the input constraints of its operation, for a service
@@ -104,7 +109,7 @@ func validateRequest(req *AWSRequest) *AWSError {
 	}
 	w := wireWalker{rules: rules}
 	w.structure(view, op.Input, "")
-	if len(w.failures) == 0 {
+	if w.unreadable || len(w.failures) == 0 {
 		return nil
 	}
 	return rules.refusal(w.failures)
@@ -121,27 +126,38 @@ func wireValidates(req *AWSRequest) bool {
 	return ok
 }
 
-// requestView picks the adapter for the request's protocol. A JSON request always names its
-// target, so a request to a JSON-protocol model that names none is the Query form a
-// query-compatible service such as SQS also accepts, whose parameter names the JSON model does
-// not describe; it is not validated.
+// requestView picks the adapter for the request's wire format — a Smithy-Protocol header for CBOR,
+// a target or a JSON content type for JSON, form parameters otherwise — among the protocols the
+// model serves (metadata.protocols), so CloudWatch, which serves CBOR, JSON and Query, is read in
+// whichever its caller sent. A request in a format the model does not list is not validated: SQS's
+// model lists JSON alone, and its Query form, whose parameter names the JSON model does not
+// describe, is left to the plugin.
 func requestView(req *AWSRequest, op wireOperation) (inputView, bool) {
 	model := wireModels[op.Model]
+	speaks := func(protocol string) bool { return slices.Contains(model.Protocols, protocol) }
 	switch {
 	case strings.EqualFold(headerValue(req.Headers, "Smithy-Protocol"), "rpc-v2-cbor"):
+		if !speaks("smithy-rpc-v2-cbor") {
+			return nil, false
+		}
 		v, err := cborDecode(req.Body)
 		if err != nil {
 			return nil, false
 		}
 		return jsonView{v: v}, true
-	case model.Protocol == "rest-json" || model.Protocol == "rest-xml":
-		return newRESTView(req, op, model.Protocol == "rest-xml")
+	case speaks("rest-json"):
+		return newRESTView(req, op, false)
+	case speaks("rest-xml"):
+		return newRESTView(req, op, true)
 	case headerValue(req.Headers, "X-Amz-Target") != "" ||
 		strings.Contains(headerValue(req.Headers, "Content-Type"), "x-amz-json"):
+		if !speaks("json") {
+			return nil, false
+		}
 		return newJSONView(req.Body)
-	case model.Protocol == "ec2":
+	case speaks("ec2"):
 		return queryView{params: req.Params, ec2: true}, true
-	case model.Protocol == "query":
+	case speaks("query"):
 		return queryView{params: req.Params}, true
 	}
 	return nil, false
@@ -163,14 +179,21 @@ func headerValue(headers map[string]string, name string) string {
 
 // wireWalker collects failures while walking a request against its input shape.
 type wireWalker struct {
-	rules    wireServiceRules
-	failures []wireFailure
+	// unreadable is set when a value is of the wrong kind for its shape, a string where a
+	// structure belongs; the walk stops and the request is left to the plugin, whose answer for
+	// a body it cannot decode is the service's.
+	unreadable bool
+	rules      wireServiceRules
+	failures   []wireFailure
 }
 
 // structure checks each constrained member of the structure at view.
 func (w *wireWalker) structure(view inputView, shape int, path string) {
 	sh := &wireShapes[shape]
 	for i := range sh.Members {
+		if w.unreadable {
+			return
+		}
 		m := &sh.Members[i]
 		msh := &wireShapes[m.Shape]
 		child := lowerFirst(m.Name)
@@ -192,6 +215,10 @@ func (w *wireWalker) structure(view inputView, shape int, path string) {
 // value checks one present value against its shape.
 func (w *wireWalker) value(v inputView, m *wireMember, shape int, path string) {
 	sh := &wireShapes[shape]
+	if sh.Kind != 0 && !v.fits(sh.Kind) {
+		w.unreadable = true
+		return
+	}
 	fail := func(kind wireFailureKind, constraint string) {
 		f := wireFailure{kind: kind, path: path, constraint: constraint}
 		if m != nil {
@@ -212,6 +239,9 @@ func (w *wireWalker) value(v inputView, m *wireMember, shape int, path string) {
 		}
 		if el.Kind == wireStructure || el.Kind == wireList || el.Kind == wireMap {
 			for i, e := range elems {
+				if w.unreadable {
+					return
+				}
 				w.value(e, nil, sh.Member.Shape, fmt.Sprintf("%s.%d.member", path, i+1))
 			}
 			return
@@ -221,6 +251,10 @@ func (w *wireWalker) value(v inputView, m *wireMember, shape int, path string) {
 		for _, e := range elems {
 			sub := wireWalker{rules: w.rules}
 			sub.value(e, nil, sh.Member.Shape, path)
+			if sub.unreadable {
+				w.unreadable = true
+				return
+			}
 			if len(sub.failures) > 0 {
 				fail(wireElementInvalid, "Member must satisfy constraint: ["+
 					strings.Join(wireElementConstraints(el), ", ")+"]")
@@ -252,6 +286,11 @@ func (w *wireWalker) value(v inputView, m *wireMember, shape int, path string) {
 		if !ok {
 			return
 		}
+		// The range clauses are AWS's: "Value '3600000000000' at
+		// 'changeBatch.changes.1.member.resourceRecordSet.tTL' failed to satisfy constraint: Member
+		// must have value less than or equal to 2147483647" (Route 53, caddy-dns/route53#17) and
+		// "Member must have value greater than or equal to 300" (SESv2,
+		// hashicorp/terraform-provider-aws#40591).
 		if sh.Min != "" && wireCompare(text, sh.Min) < 0 {
 			fail(wireTooSmall, "Member must have value greater than or equal to "+sh.Min)
 		}
@@ -359,16 +398,27 @@ func wireCompare(value, bound string) int {
 	return a.Cmp(b)
 }
 
-// wirePattern compiles a model pattern, anchored at both ends because a model's pattern
-// constrains the whole value. A pattern Go's RE2 cannot compile — botocore's are Java
-// expressions, and lookaround such as (?!-) has no RE2 form — returns nil and is not checked.
+// wirePattern returns a model pattern compiled, or nil for one Go's RE2 cannot compile —
+// botocore's are Java expressions, and lookaround such as (?!-) has no RE2 form — which is not
+// checked.
 func wirePattern(idx int) *regexp.Regexp {
-	re, err := regexp.Compile("^(?:" + wirePatterns[idx] + ")$")
-	if err != nil {
-		return nil
-	}
-	return re
+	return wireCompiledPatterns()[idx]
 }
+
+// wireCompiledPatterns compiles every model pattern on first use, anchored at both ends because
+// a model's pattern constrains the whole value. The slice is built once and never written again.
+var wireCompiledPatterns = sync.OnceValue(func() []*regexp.Regexp { //nolint:gochecknoglobals // immutable once built
+	out := make([]*regexp.Regexp, len(wirePatterns))
+	for i, p := range wirePatterns {
+		if i == 0 {
+			continue
+		}
+		if re, err := regexp.Compile("^(?:" + p + ")$"); err == nil {
+			out[i] = re
+		}
+	}
+	return out
+})
 
 // wireName is a member's serialized name outside the EC2 protocol.
 func wireName(m *wireMember) string {
@@ -434,6 +484,24 @@ func (j jsonView) entries(*wireShape) int {
 		return 0
 	}
 	return len(obj)
+}
+
+func (j jsonView) fits(kind wireKind) bool {
+	switch j.v.(type) {
+	case map[string]any:
+		return kind == wireStructure || kind == wireMap
+	case []any:
+		return kind == wireList
+	case string:
+		return kind == wireString || kind == wireBlob || kind == wireTimestamp
+	case []byte:
+		return kind == wireBlob
+	case json.Number, int64, float64:
+		return kind == wireInteger || kind == wireFloat || kind == wireTimestamp
+	case bool:
+		return kind == wireBoolean
+	}
+	return true
 }
 
 func (j jsonView) scalar() (string, bool) {
@@ -580,6 +648,8 @@ func (q queryView) entries(sh *wireShape) int {
 	}
 	return len(q.indexes(base))
 }
+
+func (q queryView) fits(wireKind) bool { return true }
 
 func (q queryView) scalar() (string, bool) {
 	v, ok := q.params[q.key]
@@ -782,6 +852,8 @@ func (l leafView) elems(*wireShape) []inputView {
 
 func (l leafView) entries(*wireShape) int { return l.count }
 
+func (l leafView) fits(wireKind) bool { return true }
+
 func (l leafView) scalar() (string, bool) {
 	if l.isRaw {
 		return string(l.raw), true
@@ -868,11 +940,10 @@ func (x xmlView) field(m *wireMember, sh *wireShape) (inputView, bool) {
 	if parent == nil {
 		return nil, false
 	}
+	// A flattened list's elements carry the member's own serialized name, as botocore's REST-XML
+	// serializer writes them; the list member's locationName names a wrapped list's elements.
 	name := wireName(m)
 	if sh.Kind == wireList && (m.Flat || sh.Flat) {
-		if sh.Member.LocationName != "" {
-			name = sh.Member.LocationName
-		}
 		var run []*xmlNode
 		for _, c := range parent.children {
 			if c.name == name {
@@ -930,6 +1001,8 @@ func (x xmlView) entries(sh *wireShape) int {
 	}
 	return n
 }
+
+func (x xmlView) fits(wireKind) bool { return true }
 
 func (x xmlView) scalar() (string, bool) {
 	n := x.one()

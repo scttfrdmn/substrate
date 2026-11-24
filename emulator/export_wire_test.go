@@ -38,6 +38,9 @@ func wireFailuresForTest(req *AWSRequest) []wireFailure {
 	}
 	w := wireWalker{rules: wireServiceRules{enum: true, pattern: true}}
 	w.structure(view, op.Input, "")
+	if w.unreadable {
+		return nil
+	}
 	if w.failures == nil {
 		return []wireFailure{}
 	}

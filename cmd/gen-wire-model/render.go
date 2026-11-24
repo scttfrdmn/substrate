@@ -148,8 +148,17 @@ func render(snap *snapshot) ([]byte, stats, error) {
 	b.WriteString("var wireModels = []wireModelInfo{ //nolint:gochecknoglobals // generated immutable table\n")
 	for _, n := range modelNamesSorted {
 		m := snap.models[n]
-		fmt.Fprintf(&b, "\t{Name: %q, APIVersion: %q, Protocol: %q},\n", n, m.apiVersion,
-			m.service.get("metadata").get("protocol").str())
+		meta := m.service.get("metadata")
+		protocols := meta.get("protocols").strings()
+		if len(protocols) == 0 {
+			protocols = []string{meta.get("protocol").str()}
+		}
+		quoted := make([]string, len(protocols))
+		for i, p := range protocols {
+			quoted[i] = strconv.Quote(p)
+		}
+		fmt.Fprintf(&b, "\t{Name: %q, APIVersion: %q, Protocol: %q, Protocols: []string{%s}},\n", n, m.apiVersion,
+			meta.get("protocol").str(), strings.Join(quoted, ", "))
 	}
 	b.WriteString("}\n\n")
 

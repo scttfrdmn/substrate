@@ -47,7 +47,24 @@ func fixtureSnapshot(t *testing.T) string {
 		}
 		writeGzip(t, filepath.Join(dir, name+".json.gz"), doc)
 	}
+	writeManifest(t, dir, "sns", "ec2")
 	return dir
+}
+
+// writeManifest writes the snapshot's manifest.json listing models.
+func writeManifest(t *testing.T, dir string, models ...string) {
+	t.Helper()
+	listed := map[string]any{}
+	for _, m := range models {
+		listed[m] = map[string]any{}
+	}
+	raw, err := json.Marshal(map[string]any{"botocore": "test", "models": listed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeGzip(t *testing.T, path string, data []byte) {
@@ -74,6 +91,7 @@ func TestGenerate_Refusals(t *testing.T) {
 		"not json": nil, // gzipped below
 	} {
 		dir := t.TempDir()
+		writeManifest(t, dir, "sns")
 		path := filepath.Join(dir, "sns.json.gz")
 		if data == nil {
 			writeGzip(t, path, []byte("{not json"))
@@ -85,9 +103,7 @@ func TestGenerate_Refusals(t *testing.T) {
 		}
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sns.json.gz"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeManifest(t, dir, "sns")
 	trunc := filepath.Join(dir, "sns.json.gz")
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
@@ -98,6 +114,23 @@ func TestGenerate_Refusals(t *testing.T) {
 	}
 	if _, err := generate(dir, fixtureServices[:1]); err == nil {
 		t.Error("a truncated model must fail")
+	}
+
+	// A model file the manifest does not list, as a refresh might leave behind.
+	unlisted := fixtureSnapshot(t)
+	writeManifest(t, unlisted, "ec2")
+	if _, err := generate(unlisted, fixtureServices[:1]); err == nil || !strings.Contains(err.Error(), "does not list sns") {
+		t.Errorf("a model the manifest does not list must fail, got %v", err)
+	}
+	if _, err := generate(t.TempDir(), fixtureServices[:1]); err == nil {
+		t.Error("a snapshot with no manifest must fail")
+	}
+	bad := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bad, "manifest.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generate(bad, fixtureServices[:1]); err == nil {
+		t.Error("a manifest that does not parse must fail")
 	}
 }
 

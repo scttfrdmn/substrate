@@ -315,6 +315,9 @@ func writeSnapshot(dir, tag string, files map[string]*upstreamModel, stdout io.W
 			}
 		}
 	}
+	if err := removeStale(dir, man); err != nil {
+		return err
+	}
 	encoded, err := json.MarshalIndent(man, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode manifest: %w", err)
@@ -324,6 +327,25 @@ func writeSnapshot(dir, tag string, files map[string]*upstreamModel, stdout io.W
 		return fmt.Errorf("write %s: %w", p, err)
 	}
 	_, _ = fmt.Fprintf(stdout, "fetched botocore %s into %s: %d models, %d bytes gzipped\n", tag, dir, len(man.Models), total)
+	return nil
+}
+
+// removeStale deletes each vendored model the new manifest no longer lists, so a model a
+// mapping change or a re-prune drops does not linger beside the snapshot that replaced it.
+func removeStale(dir string, man manifest) error {
+	existing, err := filepath.Glob(filepath.Join(dir, "*.json.gz"))
+	if err != nil {
+		return fmt.Errorf("list %s: %w", dir, err)
+	}
+	for _, p := range existing {
+		name := strings.TrimSuffix(filepath.Base(p), ".json.gz")
+		if _, ok := man.Models[name]; ok {
+			continue
+		}
+		if err := os.Remove(p); err != nil {
+			return fmt.Errorf("remove stale %s: %w", p, err)
+		}
+	}
 	return nil
 }
 

@@ -1106,8 +1106,8 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			WithStateHashes(stateBefore, s.recordedStateHash(ctx)), gate.recordOption()); recordErr != nil {
 			s.logger.Warn("failed to record refused event", "step", string(gate.step), "err", recordErr)
 		}
-		// Only two of the four steps have ever had a counter of their own; the switch
-		// says which rather than every gate publishing one it does not have.
+		// Quota and consistency have counters of their own and validation counts as a request; the
+		// switch says which rather than every gate publishing one it does not have.
 		if s.opts.Metrics != nil {
 			switch gate.step {
 			case stepQuota:
@@ -1120,7 +1120,11 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			case stepConsistency:
 				s.opts.Metrics.RecordConsistencyDelay(req.Service)
 				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, refusalErrorCode(gate.err))
-			case stepAuth, stepFault, stepValidate:
+			case stepValidate:
+				// A validation refusal is the service's own answer, so it is counted as one, under
+				// the code the service answered.
+				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, refusalErrorCode(gate.err))
+			case stepAuth, stepFault:
 			}
 		}
 		s.writeError(w, gate.err, r, req.Service, reqCtx.RequestID)

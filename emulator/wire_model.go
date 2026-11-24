@@ -116,6 +116,9 @@ type wireModelInfo struct {
 	Name string
 	// APIVersion is the model's API version.
 	APIVersion string
-	// Protocol is the model's metadata.protocol.
+	// Protocol is the model's metadata.protocol, its primary protocol.
 	Protocol string
+	// Protocols is the model's metadata.protocols: every protocol the service serves, which
+	// [requestView] chooses among by the request's wire format.
+	Protocols []string
 }

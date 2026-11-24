@@ -8,9 +8,12 @@ package emulator_test
 // refuses it.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -153,6 +156,72 @@ func TestWireValidation_ThePluginsOwnChecksAnswerInTheGatesWords(t *testing.T) {
 			assert.Equal(t, gateMessage, awsErr.Message)
 		})
 	}
+}
+
+// TestWireValidation_WithItOffThePluginStillRefuses pins that turning the gate off removes no
+// refusal the plugin makes: a CertificateArn out of length or off the pattern, and a
+// RequestCertificate without a DomainName, are refused by ACM's handler in the gate's words.
+func TestWireValidation_WithItOffThePluginStillRefuses(t *testing.T) {
+	on := emulator.StartTestServer(t)
+	off := emulator.StartTestServer(t, emulator.WithoutWireValidation())
+	for _, tc := range []struct{ name, op, body string }{
+		{"an over-length CertificateArn", "DescribeCertificate",
+			`{"CertificateArn":"arn:aws:acm:us-east-1:123456789012:certificate/` + strings.Repeat("a", 2048) + `"}`},
+		{"a CertificateArn off the pattern", "DeleteCertificate", `{"CertificateArn":"not-an-arn-but-long-enough"}`},
+		{"a missing DomainName", "RequestCertificate", `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			onStatus, onBody := wireACMCall(t, on, tc.op, tc.body, nil)
+			offStatus, offBody := wireACMCall(t, off, tc.op, tc.body, nil)
+			require.Equal(t, http.StatusBadRequest, offStatus, string(offBody))
+			assert.Equal(t, onStatus, offStatus)
+			onCode, onMessage := wireACMError(t, onBody)
+			offCode, offMessage := wireACMError(t, offBody)
+			assert.Equal(t, "ValidationException", offCode)
+			assert.Equal(t, onCode, offCode)
+			assert.Equal(t, onMessage, offMessage)
+		})
+	}
+}
+
+// TestWireValidation_AWrongKindOfValueIsThePlugins pins that a value of the wrong kind — a string
+// where the Tags list belongs — is not reported as a list of missing members: the gate stops and
+// the plugin answers its own refusal for a body it cannot decode.
+func TestWireValidation_AWrongKindOfValueIsThePlugins(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	arn := wireACMCertificate(t, ts, "example.com")
+	status, body := wireACMCall(t, ts, "AddTagsToCertificate", `{"CertificateArn":"`+arn+`","Tags":"nope"}`, nil)
+	require.Equal(t, http.StatusBadRequest, status, string(body))
+	code, message := wireACMError(t, body)
+	assert.Equal(t, "ValidationError", code, "ACM's answer for a body it cannot decode")
+	assert.NotContains(t, message, "validation error detected")
+}
+
+// TestWireValidation_ARefusalIsCounted pins that a request the gate refuses is counted in the
+// request metrics, under the code the service answered.
+func TestWireValidation_ARefusalIsCounted(t *testing.T) {
+	cfg := emulator.DefaultConfig()
+	cfg.Metrics.Enabled = true
+	registry := emulator.NewPluginRegistry()
+	registry.Register(&serverPlugin{serviceName: "acm"})
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	metrics := emulator.NewMetricsCollector()
+	srv := emulator.NewServer(*cfg, registry, store, emulator.NewMemoryStateManager(),
+		emulator.NewTimeController(time.Now()), emulator.NewDefaultLogger(slog.LevelError, false),
+		emulator.ServerOptions{Metrics: metrics})
+
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	r.Host = "acm.us-east-1.amazonaws.com"
+	r.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	r.Header.Set("X-Amz-Target", "CertificateManager.RequestCertificate")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+	var out bytes.Buffer
+	metrics.Render(&out, nil)
+	assert.Contains(t, out.String(), `substrate_requests_total{service="acm",operation="RequestCertificate",status="error"} 1`)
+	assert.Contains(t, out.String(), `substrate_request_errors_total{service="acm",error_code="ValidationException"} 1`)
 }
 
 // TestWireValidation_AnUnreadableBodyIsThePlugins pins that validation leaves a body that will

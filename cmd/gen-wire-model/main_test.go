@@ -215,6 +215,7 @@ func TestFetch_PrunesStripsAndRenders(t *testing.T) {
 	gen := strings.Join(strings.Fields(string(src)), " ")
 	for _, want := range []string{
 		`const wireModelVersion = "botocore/9.9.9"`,
+		`{Name: "acm", APIVersion: "2015-12-08", Protocol: "json", Protocols: []string{"json"}}`,
 		`"RequestCertificate": {Model: 0, Input: 1}`,
 		`{Name: "Zeta", Shape: 2, Required: true}`,
 		`{Kind: wireString, Min: "1", Max: "5", Enum: 1, Pattern: 1}`,
@@ -244,6 +245,18 @@ func TestFetch_PrunesStripsAndRenders(t *testing.T) {
 	}
 	if code := run([]string{"-data", dir, "-out", out, "-check"}, &stdout, &stderr); code == 0 {
 		t.Fatal("-check of a stale file must fail")
+	}
+
+	// A refresh removes a vendored model the new manifest does not list.
+	stale := filepath.Join(dir, "gone.json.gz")
+	if err := os.WriteFile(stale, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"-fetch", "-data", dir, "-tag", "9.9.9", "-url", srv.URL}, &stdout, &stderr); code != 0 {
+		t.Fatalf("third fetch: %s", stderr.String())
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("a model the manifest no longer lists was left behind: %v", err)
 	}
 
 	// A local tarball path refreshes the same way.

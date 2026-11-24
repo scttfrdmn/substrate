@@ -301,8 +301,22 @@ func literal(h hint) string {
 }
 
 // loadModel reads one model from the snapshot: name.json.gz, whose "service" member is botocore's
-// service-2.json pruned to the routed operations.
+// service-2.json pruned to the routed operations. A model the snapshot's manifest.json does not
+// list is refused, so a file a refresh left behind cannot feed the table.
 func loadModel(dir, name string) (*model, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "manifest.json")) //nolint:gosec // the snapshot's fixed index.
+	if err != nil {
+		return nil, fmt.Errorf("read the snapshot manifest under %s: %w", dir, err)
+	}
+	var man struct {
+		Models map[string]json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &man); err != nil {
+		return nil, fmt.Errorf("decode the snapshot manifest under %s: %w", dir, err)
+	}
+	if _, ok := man.Models[name]; !ok {
+		return nil, fmt.Errorf("the snapshot manifest under %s does not list %s", dir, name)
+	}
 	path := filepath.Join(dir, name+".json.gz")
 	f, err := os.Open(path) //nolint:gosec // path is under the snapshot directory.
 	if err != nil {

@@ -31,9 +31,13 @@ are not.
 
 A request the tables do not cover passes untouched: a service not listed, an operation the
 models do not define, or an operation two of a plugin's models define (Elastic Load Balancing's
-classic and v2 APIs share names). So does a request whose body will not parse, because the
-service's answer to an unreadable body is the plugin's own refusal (see
-[Errors](/reference/concepts/errors)), and validation has nothing to add to it.
+classic and v2 APIs share names). So does a request whose body will not parse, or that carries a
+value of the wrong kind — a string where a list belongs — because the service's answer to a body
+it cannot decode is the plugin's own refusal (see [Errors](/reference/concepts/errors)), and
+validation has nothing to add to it. A request is read in the wire format it arrived in, among
+the protocols its model lists: CloudWatch serves CBOR, JSON and Query, and is read in each. A
+request in a format the model does not list, such as the Query form SQS accepts beside its JSON
+model, is not validated.
 
 ## Which services are validated
 
