@@ -3,7 +3,6 @@ package emulator
 import (
 	"context"
 	"fmt"
-	"time"
 )
 
 //go:generate go run ../cmd/gen-service-reference -out ../docs/services.md
@@ -92,8 +91,7 @@ func (w pluginWiring) register(ctx context.Context, plugin Plugin, name string, 
 // [StartTestServer] so the same plugin set is always available.
 // store is optional; pass nil when the EventStore is unavailable (e.g. in
 // test helpers that do not need cost-derived data in the Cost Explorer plugin).
-// cfg is optional; pass nil to disable all Docker-backed features (Lambda
-// Docker execution, RDS container engine).
+// cfg is optional; pass nil to use each plugin's own defaults.
 // Adding a plugin here also requires a metadata entry in cmd/gen-service-reference
 // (enforced by `make docs-reference-check` in CI).
 //
@@ -115,33 +113,11 @@ func RegisterDefaultPlugins(
 	for _, opt := range opts {
 		opt(&settings)
 	}
-	// Resolve optional Docker-backed executors from cfg.
-	var lambdaExec *LambdaExecutor
-	var rdsExec *RDSExecutor
-	if cfg != nil && cfg.Lambda.DockerEnabled {
-		ttl, err := time.ParseDuration(cfg.Lambda.WarmPoolTTL)
-		if err != nil {
-			ttl = 5 * time.Minute
-		}
-		lambdaExec = NewLambdaExecutor(LambdaExecCfg{
-			ReplayMode:  cfg.Lambda.ReplayMode,
-			WarmPoolTTL: ttl,
-		}, logger)
-	}
-	if cfg != nil && cfg.RDS.Engine == "container" {
-		rdsExec = NewRDSExecutor(logger)
-	}
-
 	w := pluginWiring{registry: registry, state: state, logger: logger, tc: tc}
 
 	// registryOpt is the options map for a plugin that dispatches into the registry
 	// rather than only serving its own requests.
 	registryOpt := map[string]any{"registry": registry}
-
-	lambdaOpts := map[string]any{"registry": registry}
-	if lambdaExec != nil {
-		lambdaOpts["lambda_exec"] = lambdaExec
-	}
 
 	ec2Opts := map[string]any{}
 	if settings.auth != nil {
@@ -195,11 +171,6 @@ func RegisterDefaultPlugins(
 		cloudwatchOpts[cwMaxDatapointsOption] = cfg.CloudWatch.MaxDatapointsPerSeries
 	}
 
-	rdsOpts := map[string]any{}
-	if rdsExec != nil {
-		rdsOpts["rds_executor"] = rdsExec
-	}
-
 	ceOpts := map[string]any{}
 	if store != nil {
 		ceOpts["event_store"] = store
@@ -212,7 +183,7 @@ func RegisterDefaultPlugins(
 	}{
 		{&IAMPlugin{}, "iam", nil},
 		{&STSPlugin{}, "sts", nil},
-		{&LambdaPlugin{}, "lambda", lambdaOpts},
+		{&LambdaPlugin{}, "lambda", registryOpt},
 		{&SQSPlugin{}, "sqs", nil},
 		{&DynamoDBPlugin{}, "dynamodb", nil},
 		{&EC2Plugin{}, "ec2", ec2Opts},
@@ -242,7 +213,7 @@ func RegisterDefaultPlugins(
 		{&CognitoIdentityPlugin{}, "cognito-identity", nil},
 		{&KinesisPlugin{}, "kinesis", nil},
 		{&CloudFrontPlugin{}, "cloudfront", nil},
-		{&RDSPlugin{}, "rds", rdsOpts},
+		{&RDSPlugin{}, "rds", nil},
 		{&ElastiCachePlugin{}, "elasticache", nil},
 		{&EFSPlugin{}, "efs", nil},
 		{&GluePlugin{}, "glue", nil},

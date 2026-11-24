@@ -58,12 +58,6 @@ type Config struct {
 	// Account controls the AWS account requests are attributed to.
 	Account AccountCfg `mapstructure:"account"`
 
-	// Lambda controls Lambda Docker execution behavior.
-	Lambda LambdaCfg `mapstructure:"lambda"`
-
-	// RDS controls RDS backend behavior.
-	RDS RDSCfg `mapstructure:"rds"`
-
 	// EC2 controls EC2 plugin behavior.
 	EC2 EC2Cfg `mapstructure:"ec2"`
 
@@ -74,6 +68,27 @@ type Config struct {
 
 	// Run controls deterministic-run mode: seeded request IDs and a pinned clock.
 	Run RunCfg `mapstructure:"run"`
+
+	// Warnings lists what [LoadConfig] noticed but did not refuse, one message per
+	// item: today, each removed key the file or environment still sets. It is never
+	// read from configuration; the CLI logs each entry at startup.
+	Warnings []string `mapstructure:"-"`
+}
+
+// removedConfigKeys returns the configuration keys substrate no longer reads, each
+// with the message [LoadConfig] reports when one is set. Unmarshal is not strict, so
+// without the report a removed key would be ignored silently.
+func removedConfigKeys() []struct{ key, reason string } {
+	const lambdaReason = "substrate no longer runs Lambda function code; seed a result " +
+		"with POST /v1/lambda/invoke-result or an error with POST /v1/lambda/invoke-error"
+	return []struct{ key, reason string }{
+		{"lambda.docker_enabled", lambdaReason},
+		{"lambda.replay_mode", lambdaReason},
+		{"lambda.warm_pool_ttl", lambdaReason},
+		{"rds.engine", "substrate no longer starts a database container; an RDS instance " +
+			"always reports a stub endpoint"},
+		{"replay.random_seed", "the replay engine has no random source to seed"},
+	}
 }
 
 // MetricsCfg controls Prometheus metrics exposure.
@@ -271,12 +286,6 @@ type ReplayCfg struct {
 	// resetting state. Default false, so a replay starts from empty state and
 	// re-executes the whole stream.
 	UseSnapshots bool `mapstructure:"use_snapshots"`
-
-	// RandomSeed seeds the replay's random source. Default 0, which leaves it
-	// unseeded, so [ReplayEngine.RandFloat64] and [ReplayEngine.RandInt64] fall
-	// back to the global source. Set it to make those two reproduce across runs;
-	// no plugin draws from them today, so it changes nothing else.
-	RandomSeed int64 `mapstructure:"random_seed"`
 }
 
 // ToReplayConfig converts ReplayCfg to the [ReplayConfig] type used by
@@ -646,29 +655,6 @@ type AccountCfg struct {
 	Default string `mapstructure:"default"`
 }
 
-// LambdaCfg controls Lambda Docker execution behavior.
-type LambdaCfg struct {
-	// DockerEnabled gates the Docker-based Lambda execution engine. Default false.
-	// When false (or when Docker is unavailable), a stub response is returned.
-	DockerEnabled bool `mapstructure:"docker_enabled"`
-
-	// ReplayMode selects how Lambda invocations are served: "live" executes the
-	// function container; "recorded" returns a cached result when available.
-	// Default "live".
-	ReplayMode string `mapstructure:"replay_mode"`
-
-	// WarmPoolTTL is the duration string (e.g. "5m") after which an idle Lambda
-	// container is stopped and removed. Default "5m".
-	WarmPoolTTL string `mapstructure:"warm_pool_ttl"`
-}
-
-// RDSCfg controls RDS backend behavior.
-type RDSCfg struct {
-	// Engine selects the RDS backend: "stub" returns synthetic endpoints;
-	// "container" starts a real Postgres Docker container. Default "stub".
-	Engine string `mapstructure:"engine"`
-}
-
 // EC2Cfg controls EC2 plugin behavior.
 type EC2Cfg struct {
 	// DefaultVPC seeds each account and Region with a default VPC — a default subnet per
@@ -776,10 +762,6 @@ func DefaultConfig() *Config {
 			// from a snapshot skips the events the snapshot already covers, so it
 			// verifies less than it appears to.
 			UseSnapshots: false,
-			// Zero leaves the engine's random source unseeded, which is the
-			// behavior every replay has had; a non-zero default would change the
-			// values an existing recorded stream replays with.
-			RandomSeed: 0,
 		},
 		Log: LogCfg{
 			Level:  "info",
@@ -833,14 +815,6 @@ func DefaultConfig() *Config {
 		Account: AccountCfg{
 			Default: defaultAccountID,
 		},
-		Lambda: LambdaCfg{
-			DockerEnabled: false,
-			ReplayMode:    "live",
-			WarmPoolTTL:   "5m",
-		},
-		RDS: RDSCfg{
-			Engine: "stub",
-		},
 		EC2: EC2Cfg{
 			DefaultVPC: true,
 		},
@@ -884,7 +858,6 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("replay.stop_on_error", defaults.Replay.StopOnError)
 	v.SetDefault("replay.validate_state", defaults.Replay.ValidateState)
 	v.SetDefault("replay.use_snapshots", defaults.Replay.UseSnapshots)
-	v.SetDefault("replay.random_seed", defaults.Replay.RandomSeed)
 	v.SetDefault("log.level", defaults.Log.Level)
 	v.SetDefault("log.format", defaults.Log.Format)
 	v.SetDefault("quotas.enabled", defaults.Quotas.Enabled)
@@ -907,10 +880,6 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("fault.seed", defaults.Fault.Seed)
 	v.SetDefault("region.default", defaults.Region.Default)
 	v.SetDefault("account.default", defaults.Account.Default)
-	v.SetDefault("lambda.docker_enabled", defaults.Lambda.DockerEnabled)
-	v.SetDefault("lambda.replay_mode", defaults.Lambda.ReplayMode)
-	v.SetDefault("lambda.warm_pool_ttl", defaults.Lambda.WarmPoolTTL)
-	v.SetDefault("rds.engine", defaults.RDS.Engine)
 	v.SetDefault("ec2.default_vpc", defaults.EC2.DefaultVPC)
 	v.SetDefault("cloudwatch.max_datapoints_per_series", defaults.CloudWatch.MaxDatapointsPerSeries)
 	v.SetDefault("cloudformation.lenient", defaults.CloudFormation.Lenient)
@@ -949,6 +918,14 @@ func LoadConfig(path string) (*Config, error) {
 	// cloudformation.strict: false (#1605).
 	if !v.GetBool("cloudformation.strict") {
 		cfg.CloudFormation.Lenient = true
+	}
+	// No default is registered for a removed key, so IsSet is true only when the file
+	// or a SUBSTRATE_ environment variable sets it.
+	for _, removed := range removedConfigKeys() {
+		if v.IsSet(removed.key) {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+				"config key %s was removed and is ignored: %s (#1611)", removed.key, removed.reason))
+		}
 	}
 
 	if err := Validate(&cfg); err != nil {
@@ -1065,27 +1042,11 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("tracing.otlp_endpoint must be set when tracing.exporter is otlp_http")
 	}
 
-	validReplayModes := map[string]bool{"live": true, "recorded": true}
-	if !validReplayModes[cfg.Lambda.ReplayMode] {
-		return fmt.Errorf("lambda.replay_mode %q is not valid; choose live or recorded", cfg.Lambda.ReplayMode)
-	}
-
-	if cfg.Lambda.WarmPoolTTL != "" {
-		if _, err := time.ParseDuration(cfg.Lambda.WarmPoolTTL); err != nil {
-			return fmt.Errorf("lambda.warm_pool_ttl %q is not a valid duration: %w", cfg.Lambda.WarmPoolTTL, err)
-		}
-	}
-
 	// An empty value keeps the built-in default; anything else must be a real
 	// account ID, because it lands in every ARN the server hands back and a
 	// malformed one is a fixture that cannot be compared against AWS.
 	if cfg.Account.Default != "" && !isAccountID(cfg.Account.Default) {
 		return fmt.Errorf("account.default %q is not valid; an AWS account ID is 12 digits", cfg.Account.Default)
-	}
-
-	validRDSEngines := map[string]bool{"stub": true, "container": true}
-	if !validRDSEngines[cfg.RDS.Engine] {
-		return fmt.Errorf("rds.engine %q is not valid; choose stub or container", cfg.RDS.Engine)
 	}
 
 	for i, rule := range cfg.Fault.Rules {

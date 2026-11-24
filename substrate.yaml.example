@@ -75,8 +75,6 @@ replay:
   # Start from the nearest stored snapshot instead of replaying from empty state.
   # A snapshot skips the events it already covers, so the replay verifies less.
   use_snapshots: false
-  # Seeds the replay engine's random source. 0 leaves it unseeded.
-  random_seed: 0
 
 log:
   # Log level: debug | info | warn | error

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // lambdaCtrlNamespace is the state namespace for Lambda control-plane (seed) data.
@@ -150,7 +151,13 @@ func (s *Server) handleLambdaClearInvokeError(w http.ResponseWriter, r *http.Req
 		writeJSONDebug(w, s.logger, map[string]any{"ok": true})
 		return
 	}
-	keys, err := s.state.List(r.Context(), lambdaCtrlNamespace, "invoke-error:")
+	s.clearLambdaSeeds(w, r, "invoke-error:")
+}
+
+// clearLambdaSeeds deletes every Lambda seed whose key starts with prefix and
+// answers the DELETE.
+func (s *Server) clearLambdaSeeds(w http.ResponseWriter, r *http.Request, prefix string) {
+	keys, err := s.state.List(r.Context(), lambdaCtrlNamespace, prefix)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -162,4 +169,94 @@ func (s *Server) handleLambdaClearInvokeError(w http.ResponseWriter, r *http.Req
 		}
 	}
 	writeJSONDebug(w, s.logger, map[string]any{"ok": true})
+}
+
+// lambdaSeededResult is a seeded successful Invoke result. Substrate does not run
+// the handler, so without a seed an invoke answers a fixed stub payload; a seed
+// sets the payload a caller's success branch reads. Keyed by function name or the
+// "*" wildcard. A seeded error for the same function takes precedence.
+type lambdaSeededResult struct {
+	// FunctionName the seed applies to, or "*" for any function.
+	FunctionName string `json:"functionName"`
+
+	// Payload is any JSON value, returned verbatim as the invoke response body.
+	Payload json.RawMessage `json:"payload"`
+}
+
+// lambdaResultKey returns the state key for a seeded result. Function-scoped
+// seeds use "invoke-result:{name}"; the wildcard uses "invoke-result:*".
+func lambdaResultKey(functionName string) string {
+	if functionName == "" {
+		functionName = "*"
+	}
+	return "invoke-result:" + functionName
+}
+
+// resolveSeededResult returns the seeded result for a function, matching by
+// exact name first then the "*" wildcard. It returns (nil, nil) when no seed
+// applies, so the caller answers the stub payload.
+func (p *LambdaPlugin) resolveSeededResult(functionName string) (*lambdaSeededResult, error) {
+	goCtx := context.Background()
+	for _, key := range []string{lambdaResultKey(functionName), lambdaResultKey("*")} {
+		data, err := p.state.Get(goCtx, lambdaCtrlNamespace, key)
+		if err != nil {
+			return nil, fmt.Errorf("lambda resolveSeededResult get: %w", err)
+		}
+		if data == nil {
+			continue
+		}
+		var seed lambdaSeededResult
+		if err := json.Unmarshal(data, &seed); err != nil {
+			return nil, fmt.Errorf("lambda resolveSeededResult unmarshal: %w", err)
+		}
+		return &seed, nil
+	}
+	return nil, nil //nolint:nilnil // (nil, nil) = "no seed applies", handled by caller.
+}
+
+// body returns the seeded payload as the invoke response body.
+func (s *lambdaSeededResult) body() []byte {
+	return bytes.TrimSpace(s.Payload)
+}
+
+// handleLambdaSeedInvokeResult handles POST /v1/lambda/invoke-result. It seeds
+// the payload a successful Invoke returns for the given function (default "*").
+// The response carries no X-Amz-Function-Error, and a seeded invoke-error for the
+// same function still wins. Body: {"functionName","payload"}, where payload is any
+// JSON value and is required.
+func (s *Server) handleLambdaSeedInvokeResult(w http.ResponseWriter, r *http.Request) {
+	var seed lambdaSeededResult
+	if err := json.NewDecoder(r.Body).Decode(&seed); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	if len(bytes.TrimSpace(seed.Payload)) == 0 {
+		http.Error(w, `{"error":"payload is required"}`, http.StatusBadRequest)
+		return
+	}
+	data, err := json.Marshal(seed)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	key := lambdaResultKey(seed.FunctionName)
+	if err := s.state.Put(r.Context(), lambdaCtrlNamespace, key, data); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSONDebug(w, s.logger, map[string]any{"ok": true, "functionName": strings.TrimPrefix(key, "invoke-result:")})
+}
+
+// handleLambdaClearInvokeResult handles DELETE /v1/lambda/invoke-result. With
+// ?functionName=... it removes that seed; without it removes all.
+func (s *Server) handleLambdaClearInvokeResult(w http.ResponseWriter, r *http.Request) {
+	if name := r.URL.Query().Get("functionName"); name != "" {
+		if err := s.state.Delete(r.Context(), lambdaCtrlNamespace, lambdaResultKey(name)); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		writeJSONDebug(w, s.logger, map[string]any{"ok": true})
+		return
+	}
+	s.clearLambdaSeeds(w, r, "invoke-result:")
 }

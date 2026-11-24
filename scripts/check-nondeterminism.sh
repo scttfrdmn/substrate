@@ -71,10 +71,6 @@ ALLOWED=(
   # rule fires on the same requests every run.
   "emulator/fault.go:import"
 
-  # The replay engine's random source is seeded from replay.random_seed and reaches no
-  # response; #1611 removes it.
-  "emulator/replay.go:import"
-
   # Bookkeeping no AWS call observes: event and snapshot IDs, replay and recording
   # session IDs and their start times and durations (#1598's documented exceptions). An
   # event ID is unique by its sequence already; the nanoseconds keep two stores' IDs apart.
@@ -116,10 +112,6 @@ ALLOWED=(
   "emulator/pricing.go:CacheAge"
   "emulator/pricing.go:isCacheStale"
 
-  # The Docker executors run a real container and wait on it in real time; #1611 removes
-  # them.
-  "emulator/lambda_exec.go:*"
-  "emulator/rds_exec.go:*"
 )
 
 # CANDIDATE is the broad text a use can contain; offending decides.

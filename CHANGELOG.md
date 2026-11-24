@@ -7,9 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Lambda: `POST`/`DELETE /v1/lambda/invoke-result` seeds the payload a successful `Invoke` returns, with no `X-Amz-Function-Error` (#1611).
+- S3: `POST`/`DELETE /v1/s3/seeded-objects` seeds the object a read of an unwritten key observes, gated on `availableAt` (#1611).
+
 ### Changed
 
 - Code: release-named files renamed by domain (#1609).
+
+### Removed
+
+- Lambda, RDS, S3, replay: the Docker Lambda and RDS executors, the spore.host task-completion seed, and the inert `ReplayCfg.RandomSeed` (#1611).
+
+### Compatibility
+
+- Removed exported API: `LambdaExecutor`, `NewLambdaExecutor`, `LambdaExecCfg`, `RDSExecutor`, `NewRDSExecutor`, `RDSContainerHandle`, `LambdaCfg`, `RDSCfg`, `Config.Lambda`, `Config.RDS`, `ReplayCfg.RandomSeed`, `ReplayConfig.RandomSeed`, `ReplayEngine.RandFloat64`, `ReplayEngine.RandInt64` and `RDSPlugin.ResetForRun`, so `RDSPlugin` is no longer a `ResettablePlugin`.
+- Removed config keys `lambda.docker_enabled`, `lambda.replay_mode`, `lambda.warm_pool_ttl`, `rds.engine` and `replay.random_seed`, and their `SUBSTRATE_` environment variables. A configuration that still sets one loads, and logs a warning naming it.
+- `Invoke` now always answers a seeded error, a seeded result or the stub payload. An RDS instance always reports its stub endpoint.
+- The `/v1/spawn/task-completion` route is gone. A recorded stream containing it replays that event as a 404.
+- An unseeded `tasks/<id>/completion.json` is now `404 NoSuchKey`. spore.host must seed each record through `/v1/s3/seeded-objects`, for example `{"bucket":"results","key":"tasks/t1/completion.json","contentType":"application/json","body":{"task_id":"t1","exit_code":0,"state":"completed"},"availableAt":"2026-01-01T12:05:00Z"}`.
 
 ## [v0.131.0] - 2026-11-23
 

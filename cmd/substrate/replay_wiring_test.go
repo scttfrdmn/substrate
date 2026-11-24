@@ -603,8 +603,7 @@ func TestNewReplayEngineWiring_UsesTheConfiguredReplaySection(t *testing.T) {
 			"  speed_multiplier: 0\n"+
 			"  stop_on_error: true\n"+
 			"  validate_state: true\n"+
-			"  use_snapshots: false\n"+
-			"  random_seed: 4242\n")
+			"  use_snapshots: false\n")
 	cfg, err := substrate.LoadConfig(cfgPath)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
@@ -616,7 +615,7 @@ func TestNewReplayEngineWiring_UsesTheConfiguredReplaySection(t *testing.T) {
 	}
 	defer wiring.store.Close() //nolint:errcheck
 
-	want := substrate.ReplayConfig{StopOnError: true, ValidateState: true, RandomSeed: 4242}
+	want := substrate.ReplayConfig{StopOnError: true, ValidateState: true}
 	if wiring.config != want {
 		t.Errorf("engine config = %+v, want %+v — the configured section did not reach the engine",
 			wiring.config, want)

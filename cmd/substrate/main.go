@@ -362,6 +362,14 @@ func replayStateSummary(cfg substrate.ReplayConfig, results *substrate.ReplayRes
 	return fmt.Sprintf("MISMATCH (%d error(s))", len(results.StateErrors))
 }
 
+// logConfigWarnings logs each warning [substrate.LoadConfig] collected, such as a
+// removed key the configuration still sets.
+func logConfigWarnings(logger substrate.Logger, cfg *substrate.Config) {
+	for _, w := range cfg.Warnings {
+		logger.Warn(w)
+	}
+}
+
 func newServerCmd() *cobra.Command {
 	var configPath string
 	var address string
@@ -393,6 +401,7 @@ configured address will have their requests emulated and recorded.`,
 			logLevel := slog.LevelInfo
 			jsonLog := cfg.Log.Format == "json"
 			logger := substrate.NewDefaultLogger(logLevel, jsonLog)
+			logConfigWarnings(logger, cfg)
 
 			registry := substrate.NewPluginRegistry()
 			// Frozen at run.epoch when one is set, before any plugin is registered
@@ -559,6 +568,7 @@ any determinism differences.`,
 			}
 
 			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
+			logConfigWarnings(logger, cfg)
 			ctx := context.Background()
 
 			wiring, err := newReplayEngineWiring(ctx, cfg, logger)
@@ -655,6 +665,7 @@ Supports NDJSON (newline-delimited JSON) and CSV output formats.`,
 			}
 
 			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
+			logConfigWarnings(logger, cfg)
 			loadCtx := context.Background()
 			store, err := newLoadedEventStore(loadCtx, cfg,
 				substrate.NewTimeController(time.Now()), logger)
@@ -827,6 +838,7 @@ the event with that sequence ran.`,
 				return fmt.Errorf("load config: %w", err)
 			}
 			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
+			logConfigWarnings(logger, cfg)
 			ctx := context.Background()
 
 			// The configured backend, not a hardcoded memory one. A fresh memory
@@ -904,6 +916,7 @@ state before any event; a sequence past the last event is the final state.
 				return fmt.Errorf("load config: %w", err)
 			}
 			logger := substrate.NewDefaultLogger(slog.LevelError, cfg.Log.Format == "json")
+			logConfigWarnings(logger, cfg)
 			ctx := context.Background()
 
 			store, err := newLoadedEventStore(ctx, cfg, substrate.NewTimeController(time.Now()), logger)

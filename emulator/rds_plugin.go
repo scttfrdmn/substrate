@@ -11,13 +11,11 @@ import (
 
 // RDSPlugin emulates the Amazon RDS API using the AWS Query protocol.
 // It supports DB instances, snapshots, subnet groups, and parameter groups.
-// When an RDSExecutor is configured (rds.engine=container) real Postgres
-// containers are started for each CreateDBInstance call.
+// No database engine runs behind an instance: its endpoint is a stub address.
 type RDSPlugin struct {
-	state    StateManager
-	logger   Logger
-	tc       *TimeController
-	executor *RDSExecutor // nil when engine is "stub"
+	state  StateManager
+	logger Logger
+	tc     *TimeController
 }
 
 // Name returns the service name "rds".
@@ -32,41 +30,11 @@ func (p *RDSPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
-	if exec, ok := cfg.Options["rds_executor"].(*RDSExecutor); ok {
-		p.executor = exec
-	}
 	return nil
 }
 
-// Shutdown stops all active RDS containers if the executor is configured.
-func (p *RDSPlugin) Shutdown(ctx context.Context) error {
-	if p.executor != nil {
-		return p.executor.StopAll(ctx)
-	}
-	return nil
-}
-
-// ResetForRun stops the Postgres containers the executor is holding — the only state
-// RDS keeps outside the [StateManager]. It implements [ResettablePlugin]; see
-// [ReplayEngine.resetState] for why a replay needs it, and #903 for the decision.
-//
-// A container has to be stopped because the reset has just deleted the handle that
-// owned it: DeleteDBInstance stops a container by reading
-// "dbinstance_container:<scope>/<id>" back out of the state manager, so once that key
-// is gone nothing short of Shutdown can reach the container. It also still holds the
-// docker name substrate-rds-<id>, so a later run that creates the same instance
-// identifier fails to start its own container and falls back to a synthetic endpoint
-// — one request answering differently because of what ran before it, which is what a
-// reset exists to rule out.
-func (p *RDSPlugin) ResetForRun(ctx context.Context) error {
-	if p.executor == nil {
-		return nil
-	}
-	if err := p.executor.StopAll(ctx); err != nil {
-		return fmt.Errorf("stop rds containers: %w", err)
-	}
-	return nil
-}
+// Shutdown is a no-op for the RDS plugin.
+func (p *RDSPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches an RDS query-protocol request to the appropriate handler.
 func (p *RDSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -167,35 +135,6 @@ func (p *RDSPlugin) createDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 	if s := req.Params["AllocatedStorage"]; s != "" {
 		if n, err := strconv.Atoi(s); err == nil {
 			inst.AllocatedStorage = n
-		}
-	}
-
-	// When the container executor is configured, launch a real Postgres container.
-	if p.executor != nil {
-		masterUser := inst.MasterUsername
-		if masterUser == "" {
-			masterUser = "postgres"
-		}
-		masterPwd := req.Params["MasterUserPassword"]
-		if masterPwd == "" {
-			masterPwd = "substrate"
-		}
-		handle, startErr := p.executor.StartPostgres(context.Background(), id, masterUser, masterPwd)
-		if startErr != nil {
-			// Graceful degradation: log warning and keep synthetic endpoint.
-			p.logger.Warn("rds createDBInstance: container start failed, using synthetic endpoint",
-				"instance", id, "err", startErr)
-		} else {
-			inst.Endpoint = RDSEndpoint{Address: "localhost", Port: handle.HostPort}
-			// Persist the container handle for deletion.
-			handleData, err := json.Marshal(handle)
-			if err != nil {
-				return nil, fmt.Errorf("rds createDBInstance marshal: %w", err)
-			}
-			scope := reqCtx.AccountID + "/" + reqCtx.Region
-			if err := p.state.Put(context.Background(), rdsNamespace, "dbinstance_container:"+scope+"/"+id, handleData); err != nil {
-				return nil, fmt.Errorf("rds createDBInstance state.Put: %w", err)
-			}
 		}
 	}
 
@@ -342,21 +281,6 @@ func (p *RDSPlugin) deleteDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 	}
 	if err := p.removeFromIndex(scope, "dbinstance_ids", id); err != nil {
 		return nil, fmt.Errorf("rds deleteDBInstance removeFromIndex: %w", err)
-	}
-
-	// Stop the container if the executor is configured.
-	if p.executor != nil {
-		containerKey := "dbinstance_container:" + scope + "/" + id
-		handleData, _ := p.state.Get(context.Background(), rdsNamespace, containerKey)
-		if handleData != nil {
-			var h RDSContainerHandle
-			if json.Unmarshal(handleData, &h) == nil {
-				if err := p.executor.StopContainer(context.Background(), h.ContainerID); err != nil {
-					p.logger.Warn("rds deleteDBInstance: stop container", "instance", id, "err", err)
-				}
-			}
-			_ = p.state.Delete(context.Background(), rdsNamespace, containerKey)
-		}
 	}
 
 	type result struct {

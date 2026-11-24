@@ -103,6 +103,20 @@ func (l *recordingLogger) Warn(msg string, _ ...any) { l.warn = append(l.warn, m
 
 func (l *recordingLogger) Error(string, ...any) {}
 
+// TestLogConfigWarnings pins that a removed key a config file still sets reaches the
+// log as a warning, rather than being dropped by the non-strict unmarshal (#1611).
+func TestLogConfigWarnings(t *testing.T) {
+	cfg, err := substrate.LoadConfig(writeCLIConfig(t, t.TempDir(), "lambda:\n  docker_enabled: true\n"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	logger := &recordingLogger{}
+	logConfigWarnings(logger, cfg)
+	if len(logger.warn) != 1 || !strings.Contains(logger.warn[0], "lambda.docker_enabled was removed") {
+		t.Fatalf("warnings = %q, want one naming lambda.docker_enabled", logger.warn)
+	}
+}
+
 // TestNewCredentialWiring covers what `substrate server` does with the
 // credentials: section, which was decorative until #736: the shipped default must
 // change nothing, and the two flags must reach the server the way the section has

@@ -534,6 +534,8 @@ func (s *Server) buildRouter() *chi.Mux {
 		// Lambda control-plane endpoints (#393).
 		cp.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
 		cp.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)
+		cp.Post("/v1/lambda/invoke-result", s.handleLambdaSeedInvokeResult)
+		cp.Delete("/v1/lambda/invoke-result", s.handleLambdaClearInvokeResult)
 		cp.Post("/v1/lambda/layer-versions", s.handleLambdaSeedLayerVersions)
 		cp.Delete("/v1/lambda/layer-versions", s.handleLambdaClearLayerVersions)
 
@@ -611,10 +613,6 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Post("/v1/elb/account-limits", s.handleELBSeedAccountLimit)
 		cp.Delete("/v1/elb/account-limits", s.handleELBClearAccountLimit)
 
-		// spore.host spawn task-completion control-plane endpoints (#360).
-		cp.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
-		cp.Delete("/v1/spawn/task-completion", s.handleSpawnClearTaskCompletion)
-
 		// Bedrock Runtime control-plane endpoints.
 		cp.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
 		cp.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)
@@ -652,6 +650,9 @@ func (s *Server) buildRouter() *chi.Mux {
 		// a URL and writes nothing, so a replay has nothing to re-apply.
 		cp.Post("/v1/s3/conditional-conflict", s.handleS3SeedConditionalConflict)
 		cp.Delete("/v1/s3/conditional-conflict", s.handleS3ClearConditionalConflict)
+		// Objects a GET or HEAD observes at a key nothing has written (#1611).
+		cp.Post("/v1/s3/seeded-objects", s.handleS3SeedObject)
+		cp.Delete("/v1/s3/seeded-objects", s.handleS3ClearSeededObjects)
 	})
 
 	// Fault injection control-plane endpoints. Outside the recorded group: a rule lives
@@ -726,8 +727,7 @@ func (s *Server) handleLocalStackHealth(w http.ResponseWriter, _ *http.Request) 
 // same reason: a minting counter that survived the reset made the identifiers a
 // test case observes depend on how many test cases ran before it. It now also
 // releases what a plugin holds outside its own struct — S3's object payloads
-// (#902), Lambda's event-source-mapping pollers and warm containers, and RDS's
-// Postgres containers (#903).
+// (#902) and Lambda's event-source-mapping pollers (#903).
 //
 // The one exception is a filesystem a caller injected into the S3 plugin as
 // Options["filesystem"], which substrate does not own and leaves alone; it cannot

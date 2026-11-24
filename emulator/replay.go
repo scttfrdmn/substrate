@@ -3,7 +3,6 @@ package emulator
 import (
 	"context"
 	"fmt"
-	"math/rand/v2" // nosemgrep
 	"net/http"
 	"sort"
 	"strings"
@@ -37,10 +36,6 @@ type ReplayEngine struct {
 
 	// currentReplay is the in-progress replay session, if any.
 	currentReplay *ActiveReplay
-
-	// rng is the seeded random source for deterministic replay.
-	// It is nil when config.RandomSeed is zero (unseeded).
-	rng *rand.Rand
 }
 
 // ReplayConfig controls the behavior of a [ReplayEngine].
@@ -57,10 +52,6 @@ type ReplayConfig struct {
 
 	// UseSnapshots fast-forwards replay using the nearest stored snapshot.
 	UseSnapshots bool
-
-	// RandomSeed is the RNG seed used for deterministic replay.
-	// Zero disables seeded randomness.
-	RandomSeed int64
 }
 
 // ActiveReplay represents a replay session in progress.
@@ -473,9 +464,8 @@ func (r *ReplayEngine) begin(ctx context.Context, events []*Event) (*ActiveRepla
 	return replay, nil
 }
 
-// startOfRun brings the emulator to the state a run starts from, and re-seeds the
-// engine's random source from [ReplayConfig.RandomSeed]. A replay begins here, and a
-// backward jump with no snapshot to restore returns here.
+// startOfRun brings the emulator to the state a run starts from. A replay begins here,
+// and a backward jump with no snapshot to restore returns here.
 //
 // The state is always reset first: the state manager, what plugins keep on themselves,
 // and the pre-plugin controllers. Under [ReplayConfig.UseSnapshots] the stream's stored
@@ -490,9 +480,6 @@ func (r *ReplayEngine) startOfRun(ctx context.Context, replay *ActiveReplay) err
 		if err := r.loadFromSnapshot(ctx, replay.StreamID); err != nil {
 			return fmt.Errorf("load stored snapshot for stream %s: %w", replay.StreamID, err)
 		}
-	}
-	if r.config.RandomSeed != 0 {
-		r.rng = rand.New(rand.NewPCG(uint64(r.config.RandomSeed), 0)) //nolint:gosec
 	}
 	return nil
 }
@@ -1341,11 +1328,9 @@ func generateReplayID() string {
 // event log exists to rule out.
 //
 // It also releases what a plugin started rather than minted: S3's object payloads
-// (#902), and Lambda's event-source-mapping pollers, warm Lambda containers and RDS
-// Postgres containers (#903). A replay needs those gone for the same reason it needs
-// the counters rewound — a poller left over from the previous replay polls the queue
-// this one recreates, and a container left over holds the docker name the next
-// CreateDBInstance needs.
+// (#902) and Lambda's event-source-mapping pollers (#903). A replay needs those gone
+// for the same reason it needs the counters rewound — a poller left over from the
+// previous replay polls the queue this one recreates.
 //
 // The [FaultController] is rewound here too, for the same reason and with the same
 // consequence if it is not: its per-rule fired counts and PRNG positions are state a
@@ -1457,24 +1442,4 @@ func stateSnapshotHash(ctx context.Context, sm StateManager) string {
 		return ""
 	}
 	return hashBytes(data)
-}
-
-// RandFloat64 returns a pseudo-random float64 in [0, 1).
-// When a seed was configured via [ReplayConfig.RandomSeed] the result is
-// deterministic; otherwise it falls back to the global random source.
-func (r *ReplayEngine) RandFloat64() float64 {
-	if r.rng != nil {
-		return r.rng.Float64()
-	}
-	return rand.Float64()
-}
-
-// RandInt64 returns a non-negative pseudo-random int64.
-// When a seed was configured via [ReplayConfig.RandomSeed] the result is
-// deterministic; otherwise it falls back to the global random source.
-func (r *ReplayEngine) RandInt64() int64 {
-	if r.rng != nil {
-		return r.rng.Int64()
-	}
-	return rand.Int64()
 }

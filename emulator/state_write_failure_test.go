@@ -396,19 +396,6 @@ func TestStateWriteFailure_AnIndexRemovalRefusedFailsTheDelete(t *testing.T) {
 	assert.Contains(t, body, "InternalFailure")
 }
 
-// TestStateWriteFailure_AReplayThatCannotBeCachedIsReported covers lambda_exec.go's write, which
-// the sweep cannot reach: Invoke only caches a result after running the function in a container,
-// which a test without Docker never does. The cache write is exercised directly instead.
-func TestStateWriteFailure_AReplayThatCannotBeCachedIsReported(t *testing.T) {
-	t.Parallel()
-	state := newFailingPutStateManager()
-	p := emulator.NewLambdaPluginForTest(state, emulator.NewTimeController(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)))
-
-	state.failEvery()
-	err := p.SaveReplayForTest("arn:aws:lambda:us-east-1:123456789012:function:f", []byte(`{}`), []byte(`{}`))
-	require.ErrorIs(t, err, errStoreUnavailable)
-}
-
 // fatalRecorder is a testing.TB whose Fatalf records the failure instead of ending the test, so a
 // test can assert that a seed helper failed its caller.
 type fatalRecorder struct {

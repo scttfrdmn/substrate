@@ -22,9 +22,8 @@ package emulator_test
 // which is exactly the defect under test.
 //
 // The hook then turned out to owe more than a counter (#902, #903). A plugin also
-// holds state it *started* rather than minted — S3's object payloads, Lambda's
-// event-source-mapping pollers and warm containers, RDS's Postgres containers — and
-// none of it was reachable from a reset either, so the tests from
+// holds state it *started* rather than minted — S3's object payloads and Lambda's
+// event-source-mapping pollers — and none of it was reachable from a reset either, so the tests from
 // TestPluginReset_StateResetEmptiesS3ObjectPayloads on cover that second class.
 
 import (
@@ -509,11 +508,10 @@ func TestPluginReset_DefaultPluginsImplementingTheHook(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, []string{"lambda", "rds", "s3", "sesv2"}, got,
+	assert.Equal(t, []string{"lambda", "s3", "sesv2"}, got,
 		"the plugins holding mutable state outside the StateManager: S3's version-ID counter and "+
-			"object payloads (#886, #902), SES v2's message counter (#886; HealthOmics' random source "+
-			"moved onto the request mint in #1166), Lambda's event-source-mapping pollers and warm containers, and RDS's Postgres "+
-			"containers (#903)")
+			"object payloads (#886, #902), SES v2's message counter (#886), and Lambda's "+
+			"event-source-mapping pollers (#903)")
 }
 
 // resetS3PluginOf returns the S3 plugin ts serves from, so a test can look at the
@@ -710,60 +708,4 @@ func TestPluginReset_StateResetStopsEventSourceMappingPollers(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, status,
 		"the record a reset deletes is the one DeleteEventSourceMapping looks up, so after a reset "+
 			"no API call could have stopped the poller: %s", got)
-}
-
-// TestPluginReset_DrainPoolLeavesTheExecutorUsable pins the second half of #903's
-// Lambda story: a reset drops every warm container, because the pool is keyed by
-// function ARN alone and a function recreated under the same name would otherwise run
-// the previous run's code — but it must not use StopAll, which closes the channel the
-// eviction loop selects on and so leaves every container started afterwards warm until
-// Shutdown however long it sits idle.
-//
-// No container is injected, so nothing here shells out to Docker; the docker-gated
-// tests in lambda_exec_docker_test.go cover the stop path itself.
-func TestPluginReset_DrainPoolLeavesTheExecutorUsable(t *testing.T) {
-	t.Parallel()
-	e := emulator.NewLambdaExecutor(
-		emulator.LambdaExecCfg{ReplayMode: "live", WarmPoolTTL: time.Hour},
-		emulator.NewDefaultLogger(slog.LevelError, false),
-	)
-	t.Cleanup(e.StopAll)
-
-	require.False(t, e.EvictionStoppedForTest(), "a fresh executor evicts idle containers")
-
-	e.DrainPool()
-	assert.False(t, e.EvictionStoppedForTest(),
-		"a state reset must leave idle eviction running; the executor is reused for the next run")
-
-	e.StopAll()
-	assert.True(t, e.EvictionStoppedForTest(),
-		"a shutdown ends it — which is why a reset cannot call StopAll")
-}
-
-// TestPluginReset_RDSResetIsSafeWithoutAContainer covers the RDS half of #903 at the
-// plugin boundary, in the two configurations reachable without Docker: the default,
-// where the plugin holds no executor at all, and an executor holding no container.
-//
-// The container path needs a Postgres container to stop, so it is asserted in
-// rds_exec_test.go, where the existing tests are skipped when Docker is absent.
-func TestPluginReset_RDSResetIsSafeWithoutAContainer(t *testing.T) {
-	t.Parallel()
-	logger := emulator.NewDefaultLogger(slog.LevelError, false)
-
-	stub := &emulator.RDSPlugin{}
-	require.NoError(t, stub.Initialize(t.Context(), emulator.PluginConfig{
-		State:  emulator.NewMemoryStateManager(),
-		Logger: logger,
-	}))
-	require.NoError(t, stub.ResetForRun(t.Context()),
-		"the default RDS plugin holds no executor, so a reset has nothing to stop")
-
-	withExec := &emulator.RDSPlugin{}
-	require.NoError(t, withExec.Initialize(t.Context(), emulator.PluginConfig{
-		State:   emulator.NewMemoryStateManager(),
-		Logger:  logger,
-		Options: map[string]any{"rds_executor": emulator.NewRDSExecutor(logger)},
-	}))
-	require.NoError(t, withExec.ResetForRun(t.Context()),
-		"an executor holding no container must reset cleanly too")
 }

@@ -124,10 +124,10 @@ event log exists to rule out (#886). `ResetForRun` must be safe to call on a plu
 that has never handled a request, and safe to call while requests are in flight.
 
 The hook also owes whatever the plugin **started**, not only what it minted — a
-goroutine, a container, a buffer of bytes the `StateManager` only holds metadata for.
+goroutine, a poll schedule, a buffer of bytes the `StateManager` only holds metadata for.
 The test is whether a reset leaves the thing unreachable: if the only call that stops
 it looks up a record the reset just deleted, then after the reset nothing short of
-`Shutdown` can reach it, and it keeps acting on the next run (#902, #903). Three
+`Shutdown` can reach it, and it keeps acting on the next run (#902, #903). Two
 in-tree cases, each with the consequence that made it a defect:
 
 - **S3's object payloads.** The bytes live in an `afero` filesystem on the plugin and
@@ -137,12 +137,8 @@ in-tree cases, each with the consequence that made it a defect:
   success, leaves every file beneath readable and destroys the root entry.
 - **Lambda's event-source-mapping pollers.** `DeleteEventSourceMapping` is the only
   call that closes a poller's stop channel, and it answers `ResourceNotFoundException`
-  once the record is gone. The goroutine polls on a wall-clock ticker, and both the
-  queue URL and the function ARN are name-derived, so the poller consumed the *next*
-  run's messages and invoked its function.
-- **RDS's Postgres containers.** The container handle is read back out of the
-  `StateManager`, so a reset made the container unstoppable through the API while it
-  still held the `substrate-rds-<id>` Docker name the next `CreateDBInstance` needs.
+  once the record is gone. Both the queue URL and the function ARN are name-derived,
+  so the poller consumed the *next* run's messages and invoked its function.
 
 One exception, and it is about ownership rather than reachability: state the **caller**
 handed the plugin is the caller's to clear. S3 empties its filesystem only when it
@@ -169,7 +165,8 @@ A new operation defaults to its nominal success path. Alternate outcomes
 as **seedable** values a test sets via a control-plane endpoint, read at request
 time — never as nondeterministic behaviour. Follow the established pattern:
 `POST`/`DELETE /v1/{service}/...` keyed by an ID or the `"*"` wildcard. See
-`ssm_control.go`, `spawn_control.go`, Athena/SageMaker/Bedrock seeds for
+`ssm_control.go`, `lambda_control.go` (`/v1/lambda/invoke-result`),
+`s3_seeded_objects.go` (`/v1/s3/seeded-objects`), Athena/SageMaker/Bedrock seeds for
 worked examples, and register the routes in `server.go`'s `buildRouter`.
 
 ### Registration + service reference

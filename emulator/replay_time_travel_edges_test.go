@@ -205,7 +205,7 @@ func TestTimeTravel_AThrottledCallReplaysThrottled(t *testing.T) {
 
 // TestTimeTravel_ABackwardJumpRestartsTheRunAsReplayDid pins that a jump with no
 // snapshot to restore starts the run the way Replay started it: from the stream's stored
-// snapshot under UseSnapshots, and with the random source re-seeded.
+// snapshot under UseSnapshots.
 func TestTimeTravel_ABackwardJumpRestartsTheRunAsReplayDid(t *testing.T) {
 	ctx := t.Context()
 	setup := func(t *testing.T, cfg emulator.ReplayConfig) (*emulator.ReplayEngine, *emulator.MemoryStateManager) {
@@ -232,18 +232,6 @@ func TestTimeTravel_ABackwardJumpRestartsTheRunAsReplayDid(t *testing.T) {
 		got, err := state.Get(ctx, "marker", "from-snapshot")
 		require.NoError(t, err)
 		assert.Equal(t, "1", string(got), "the jump restarted from the stored snapshot, not from empty state")
-	})
-
-	t.Run("RandomSeed", func(t *testing.T) {
-		engine, _ := setup(t, emulator.ReplayConfig{RandomSeed: 42})
-		_, err := engine.Replay(ctx, "restart")
-		require.NoError(t, err)
-		require.NoError(t, engine.JumpToEvent(ctx, 0))
-		first := []float64{engine.RandFloat64(), engine.RandFloat64()}
-		require.NoError(t, engine.JumpToEvent(ctx, 3))
-		require.NoError(t, engine.JumpToEvent(ctx, 0))
-		assert.Equal(t, first, []float64{engine.RandFloat64(), engine.RandFloat64()},
-			"the random source restarts with the run")
 	})
 }
 

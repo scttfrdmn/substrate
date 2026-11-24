@@ -1217,12 +1217,16 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 	var obj S3Object
 	var body []byte
 	if data == nil {
-		// No real object at this key: a GET of tasks/<task_id>/completion.json may
-		// be a seedable spore.host task-completion observation (#360). A real
-		// staged object always wins, so this only runs when the key is absent.
+		// No real object at this key, so a seeded one may answer; see
+		// [S3Plugin.resolveSeededObject]. A seed has no version history, so a GET
+		// naming a version never reaches it.
 		var handled bool
 		if versionID == "" {
-			obj, body, handled = p.resolveTaskCompletion(ctx, key)
+			var seedErr error
+			obj, body, handled, seedErr = p.resolveSeededObject(ctx, bucket, key)
+			if seedErr != nil {
+				return nil, seedErr
+			}
 		}
 		if !handled {
 			return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
@@ -1314,19 +1318,18 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 
 	var obj S3Object
 	if data == nil {
-		// Mirror getObject: no real object at this key, so a HEAD of
-		// tasks/<task_id>/completion.json may be a seedable spore.host
-		// task-completion observation (#360). HEAD has to consult the same resolver
-		// GET does, because HEAD and GET disagreeing about whether a key exists is
-		// something real S3 never does — and `aws s3 cp` HEADs before it GETs, so a
-		// HEAD-only 404 made a synthesized record unreadable through the CLI (#457).
-		//
-		// The body is discarded: the resolver returns a fully-populated S3Object, so
-		// Content-Length, ETag and Content-Type below match what GET reports, and the
-		// clock gate that makes a not-yet-complete record absent applies identically.
+		// Mirror getObject: a seeded object may answer. HEAD consults the same
+		// resolver GET does, because HEAD and GET disagreeing about whether a key
+		// exists is something real S3 never does, and `aws s3 cp` HEADs before it
+		// GETs (#457). The body is discarded; the resolver's S3Object carries the
+		// Content-Length, ETag and Content-Type GET reports.
 		var handled bool
 		if versionID == "" {
-			obj, _, handled = p.resolveTaskCompletion(ctx, key)
+			var seedErr error
+			obj, _, handled, seedErr = p.resolveSeededObject(ctx, bucket, key)
+			if seedErr != nil {
+				return nil, seedErr
+			}
 		}
 		if !handled {
 			return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil

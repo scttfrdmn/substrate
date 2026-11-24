@@ -3,7 +3,6 @@ package emulator_test
 import (
 	"net/http"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -270,26 +269,6 @@ func TestS3_GetObject_Range_HeaderCaseInsensitive(t *testing.T) {
 			assert.Equal(t, "bytes 0-9/1000", w.Header().Get("Content-Range"))
 		})
 	}
-}
-
-func TestS3_GetObject_Range_TaskCompletionRecord(t *testing.T) {
-	srv, _ := newS3TestServer(t)
-	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
-
-	// The synthesized spore.host completion record now flows through the same
-	// response path as a stored object, so it is rangeable too (#360, #396).
-	full := s3Request(t, srv, http.MethodGet, "/results/tasks/task-r/completion.json", nil, nil)
-	require.Equal(t, http.StatusOK, full.Code)
-	require.Contains(t, full.Body.String(), `"state":"completed"`)
-	assert.Equal(t, "bytes", full.Header().Get("Accept-Ranges"))
-
-	w := s3Request(t, srv, http.MethodGet, "/results/tasks/task-r/completion.json", nil,
-		map[string]string{"Range": "bytes=0-3"})
-	require.Equal(t, http.StatusPartialContent, w.Code)
-	assert.Equal(t, full.Body.String()[:4], w.Body.String())
-	assert.Equal(t, strconv.Itoa(full.Body.Len()),
-		strings.SplitN(w.Header().Get("Content-Range"), "/", 2)[1],
-		"the /total in Content-Range is the whole record's length")
 }
 
 func TestS3_ErrorResponse_DetailElements(t *testing.T) {

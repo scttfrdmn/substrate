@@ -5856,8 +5856,8 @@ STS operations are free.
 | DeleteBucket | |
 | ListBuckets | Honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`; reports `Owner` and a conditional `BucketRegion` — see [Listing buckets](#listing-buckets) |
 | PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes, including a seedable `409 ConditionalRequestConflict` — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption); stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists); records the tag set `x-amz-tagging` names — see [Tag sets](#tag-sets) |
-| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption); `x-amz-tagging-count` on a tagged object — see [Tag sets](#tag-sets) |
-| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption); `x-amz-tagging-count` on a tagged object — see [Tag sets](#tag-sets) |
+| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); serves a seeded object at a key nothing has written — see [Seeded objects](#seeded-objects); echoes recorded encryption — see [Server-side encryption](#server-side-encryption); `x-amz-tagging-count` on a tagged object — see [Tag sets](#tag-sets) |
+| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a seeded object exactly as `GetObject` does — see [Seeded objects](#seeded-objects); echoes recorded encryption — see [Server-side encryption](#server-side-encryption); `x-amz-tagging-count` on a tagged object — see [Tag sets](#tag-sets) |
 | DeleteObject | Fires S3 notifications if configured |
 | DeleteObjects | `POST /{bucket}?delete`; deletes each `<Object>` through the same path as `DeleteObject`, so notifications, versioning and delete markers behave identically; honours `<Quiet>`; an `<Object>` with an empty `<Key>` is skipped rather than reported; a key that fails is reported per-key as `<Error><Code>InternalError</Code>` and does not abort the rest |
 | CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions, including a seedable `409 ConditionalRequestConflict` on the destination — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); takes its encryption from the request or the **destination** bucket's default, never the source's — see [Copying objects](#copying-objects) and [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
@@ -6610,51 +6610,54 @@ round-trip assertion pass whether or not the consumer's writer actually sends a
 checksum — the exact defect this support was added to expose. An absent checksum in
 substrate means "your writer sent none".
 
-### Task-completion records
+### Seeded objects
 
-A read of `tasks/<task_id>/completion.json` on any bucket resolves to a synthesized
-spore.host task-completion record when no real object exists at that key. Substrate
-does not run the task — this is the seedable completion *observation* only, so a
-consumer's poll-until-done loop can be exercised instantly and reproducibly.
+A seeded object is what a read of a key returns when nothing in the emulated account has
+written it. It stands in for an object that something outside the account writes, such as a
+result file a job uploads when it finishes. Substrate does not run that writer, so a seed sets
+the object it would have written, and `availableAt` sets when it appears on the simulated
+clock. A consumer's poll-until-present loop can then be exercised instantly and reproducibly.
 
-Absent a seed the key resolves to the nominal success record, so the happy path needs
-no setup:
+```
+POST   /v1/s3/seeded-objects   {"bucket","key","body","bodyBase64","contentType","availableAt"}
+DELETE /v1/s3/seeded-objects?bucket=<b>&key=<k>   (key alone clears the "*" seed; no query clears all)
+```
+
+- **`bucket`** is a bucket name or `"*"` for any bucket; empty means `"*"`. An exact-bucket
+  seed wins over the wildcard. The bucket itself must exist: a read in a missing bucket is
+  still `404 NoSuchBucket`.
+- **`key`** is the exact object key, and is required.
+- **`body`** is a JSON value. A JSON string is served as its text; an object, array or number
+  is served as its compact JSON encoding. **`bodyBase64`** is the alternative for bytes that are
+  not text. Give at most one; with neither the object is empty.
+- **`contentType`** defaults to `application/octet-stream`, as `PutObject`'s does.
+- **`availableAt`** is an RFC 3339 instant on the simulated clock. Before it the key reads as
+  absent (`404 NoSuchKey`), which is the "not finished yet" observation a poll loop waits on.
+  At or after it the object is served, with `Last-Modified` set to `availableAt`. Without it the
+  object is served immediately, with `Last-Modified` set to the time of the seed.
 
 ```console
+$ curl -X POST http://localhost:4566/v1/s3/seeded-objects -d '{
+    "bucket": "results", "key": "tasks/t1/completion.json", "contentType": "application/json",
+    "body": {"task_id": "t1", "exit_code": 0, "state": "completed"},
+    "availableAt": "2026-01-01T12:05:00Z"}'
 $ aws s3api get-object --bucket results --key tasks/t1/completion.json /dev/stdout
-{"task_id":"t1","exit_code":0,"state":"completed","started_at":"…","ended_at":"…"}
+{"exit_code":0,"state":"completed","task_id":"t1"}
 ```
 
-Seed an alternate outcome — a non-zero exit, a `failed` state, or a completion time in
-the simulated future:
+**A seed is used only when no real object exists at the key.** A `PutObject` to the key wins
+from then on. A read naming an explicit `versionId` never resolves to a seed, because a seed
+has no version history. An unseeded key is an ordinary `404 NoSuchKey`, whatever its shape.
 
-```
-POST   /v1/spawn/task-completion   {"task_id","exit_code","state","started_at","ended_at"}
-DELETE /v1/spawn/task-completion?taskId=<id>   (or with no query, clear all)
-```
+**The seed is served through the normal object path.** `HeadObject` reports the same
+`Content-Length`, `ETag` (an MD5 of the body), `Content-Type` and `Last-Modified` as `GetObject`,
+under the same clock gate, which matters because `aws s3 cp` HEADs before it GETs. Ranged and
+conditional reads apply to a seed as to any other object.
 
-**`ended_at` gates presence on the simulated clock.** Before that time the record
-reads as absent — `404 NoSuchKey` — which is the "still running" observation a poll
-loop needs in order to loop at all. After it, the record is served.
+**`ListObjectsV2` does not enumerate seeds.** A seed describes what a keyed read observes;
+listing one would claim the object was written into the bucket.
 
-**`HeadObject` resolves the record exactly as `GetObject` does**, reporting the same
-`Content-Length`, `ETag`, `Content-Type` and `Last-Modified`, and honoring the same
-clock gate. This matters because `aws s3 cp` and `aws s3 sync` HEAD before they GET,
-so a HEAD that 404'd made the record unreadable through the CLI even though the GET
-worked; an SDK `HeadObject` existence poll had the same problem in the worse
-direction, since absence reads as "still running" and the loop never terminates.
-
-**A real object always wins.** Staging an actual object at the completion key serves
-it verbatim; the resolver only runs when the key is absent. A read naming an explicit
-`versionId` never resolves either, since a synthesized record has no version history.
-Both reads and the resolver's response path are otherwise ordinary, so ranged and
-conditional reads apply to a synthesized record as to any other object.
-
-**`ListObjectsV2` deliberately does not enumerate synthesized records.** A keyed read
-works because the caller names the task, so the resolver has something to answer
-about. A list is unkeyed, and substrate cannot enumerate the set of task IDs a
-consumer might ask about — a list that invented entries would be a wrong answer, not a
-more complete one. This asymmetry is a decision, not an oversight.
+A seed is a recorded control-plane write, so a replay re-applies it in position.
 
 ### Block Public Access
 
@@ -7280,12 +7283,12 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package, and `TracingConfig.Mode` (`Active` or `PassThrough`) as recorded intent |
 | GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image), and the function's `Tags` beside `Configuration`. Every configuration reports `Version: $LATEST` and `TracingConfig.Mode` (#1519) |
 | UpdateFunctionCode | Re-derives [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the new package; an update carrying no package changes neither |
-| UpdateFunctionConfiguration | [Drops the function's warm container](#which-operations-drop-a-warm-container) when `Handler`, `Runtime` or `Environment` changes; also updates `TracingConfig.Mode` |
+| UpdateFunctionConfiguration | Also updates `TracingConfig.Mode` |
 | DeleteFunction | |
 | ListFunctions | |
 | ListVersionsByFunction | `$LATEST` alone, with the qualified `FunctionArn`, since substrate publishes no versions; `MaxItems` is checked against 1–10000 and any `Marker` is refused, since none is ever issued (#1519) |
 | GetFunctionCodeSigningConfig | An empty `CodeSigningConfigArn`, since substrate models no code-signing configurations. Published under `2020-06-30` (#1519) |
-| Invoke | Answers the stub `{"statusCode":200,"body":"null"}` when no container executor is available; a **seeded** failure (`POST`/`DELETE /v1/lambda/invoke-error`) short-circuits every path and still answers `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
+| Invoke | Never runs the function's code. Answers a [seeded error, a seeded result, or the stub](#invoke-answers-a-seed-or-a-stub) `{"statusCode":200,"body":"null"}`, always with `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
 | InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference, and is published under [its own API version date](#each-operation-is-published-under-its-own-api-version-date), `2014-11-13` |
 | AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up). `Principal` takes AddPermission's output forms — a service as `{"Service": …}`, an account ID as `{"AWS": "arn:aws:iam::{account}:root"}`, an ARN as `{"AWS": …}`, `*` as `"*"` — and `SourceArn`, `SourceAccount`, `PrincipalOrgID`, `EventSourceToken`, `FunctionUrlAuthType` and `InvokedViaFunctionUrl` become the statement's `Condition` with the keys the developer guide's resource-based policy examples use. A `Qualifier` makes the statement's `Resource` the qualified ARN; aliases are not modeled, so it is not looked up (#1605) |
 | RemovePermission | Removes the statement by `StatementId`; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
@@ -7454,7 +7457,7 @@ claim a caller can act on and be wrong about.
 An enabled SQS event-source mapping consumes its queue: it receives a batch, invokes the function
 with it, and deletes the batch if the invocation succeeded. A failed invocation leaves the batch on
 the queue until its visibility timeout passes, which is how a real mapping retries it. Substrate does
-not run the function's code (see [Docker execution](#docker-execution-runs-an-image-never-a-zip)); the
+not run the function's code (see [Invoke answers a seed or a stub](#invoke-answers-a-seed-or-a-stub)); the
 observable effect is the queue's.
 
 Until #1292 a goroutine drove each mapping from a one-second **wall-clock** ticker. A frozen or scaled
@@ -7528,107 +7531,38 @@ worth comparing.
 forwarded as the API spells them, and each goes through the template's `Ref` and
 pseudo-parameter resolution like every other property.
 
-### Docker execution runs an image, never a ZIP
+### Invoke answers a seed or a stub
 
-Docker execution is **off unless `lambda.docker_enabled` is set**, which is the default and
-every CI run. With it unset no executor is constructed, no container is ever started, and
-`Invoke` answers the stub payload `{"statusCode":200,"body":"null"}` — or a seeded failure,
-which short-circuits every path (see the `Invoke` row above). Everything in this subsection and
-the next applies only to the configured case.
+Substrate never runs a function's code. Running a handler is the workload behind the API rather
+than an observation through it, so per the scope rule it is out of scope. `Invoke` instead answers
+the first of these that applies:
 
-With it set, there are two paths and they are not equally capable:
+1. **A seeded error**, through `POST`/`DELETE /v1/lambda/invoke-error`. The response carries
+   `X-Amz-Function-Error` (`Handled` or `Unhandled`, default `Unhandled`) and an error payload, or the
+   seed's own `payload` verbatim.
+2. **A seeded result**, through `POST`/`DELETE /v1/lambda/invoke-result`. The seed's `payload`, any
+   JSON value, is returned verbatim with no `X-Amz-Function-Error`.
+3. **The stub** `{"statusCode":200,"body":"null"}`, with no `X-Amz-Function-Error`.
 
-| `PackageType` | What the container runs |
-|---|---|
-| `Image` | The image's own code, which substrate neither builds nor inspects |
-| `Zip` (or unset) | **Nothing.** The archive is mounted, not extracted |
+```
+POST   /v1/lambda/invoke-result   {"functionName","payload"}
+DELETE /v1/lambda/invoke-result?functionName=<name>   (or with no query, clear all)
+```
 
-The ZIP path writes the stored deployment package into a temporary directory as a single file
-named `function.zip` and mounts that directory at `/var/task:ro`. The Lambda runtime interface
-expects `/var/task` to hold the module tree, so the container sees one archive and no
-`index.py` — the handler cannot be imported whatever the ZIP contains.
+Both seeds are keyed by function name, or by `"*"` for any function, and an exact name wins over
+the wildcard. `functionName` defaults to `"*"`, and `payload` is required. Clearing result seeds
+leaves error seeds in place, and the reverse. Every path that invokes a function reads the same
+seeds, including an event-source mapping's poll, a Step Functions task, a Scheduler target and an
+API Gateway proxy integration.
 
-**What a caller observes is not a stub, and that is the part worth knowing.** `docker run`
-succeeds, the container passes its readiness check, it is pooled, and the invoke returns what
-the runtime interface answered: **HTTP 200 with an import-error body and
-`X-Amz-Function-Error: Unhandled`**, which substrate forwards verbatim. So `Invoke` reports
-that *the caller's handler raised* — for code that was never loaded, and indistinguishable
-from a genuine `Runtime.ImportModuleError`. The stub is returned only when the `docker` binary
-cannot be run or the container fails to start.
+```console
+$ curl -X POST http://localhost:4566/v1/lambda/invoke-result \
+    -d '{"functionName":"resize","payload":{"statusCode":200,"body":"{\"width\":640}"}}'
+```
 
-Extraction is deliberately not implemented
-([#1079](https://github.com/scttfrdmn/substrate/issues/1079)). Running a caller's handler is
-outside substrate's scope by name — it is the workload behind the API rather than an
-observation through it — and a test of it could not avoid container-start latency, the
-handler's own I/O
-and clock, and an image pull over the network, all of which this project forbids a test to
-depend on. The ZIP write stays as the **recorded intent** the same boundary asks for: the
-bytes are what `GetFunction`'s `CodeSha256` and `CodeSize` are computed from, and they are
-what an `UpdateFunctionCode` changes.
-
-So the execution semantics a real Lambda has — a timeout firing, a handler exception becoming
-`Handled`, an `Environment` variable reaching the code — are not reachable through either path
-here. `X-Amz-Function-Error` and a function-error payload are still fully testable, because
-they are **seedable** through `POST`/`DELETE /v1/lambda/invoke-error` — which is the mechanism
-substrate offers in place of running the work, and which answers instantly and reproducibly
-where a real handler would not.
-
-**A cold start costs the caller nothing beyond its own invoke.** The readiness check is an HTTP
-request to a path the runtime interface emulator does not route, which its HTTP server answers 404
-without reaching the function. Until [#1129](https://github.com/scttfrdmn/substrate/issues/1129) the
-check POSTed `{}` to the invocation endpoint, so on the image path every cold start ran the handler
-once with an event the caller never sent, before the caller's own. The emulator publishes no
-readiness endpoint, and its invocation handler runs the function for any method, so the probe cannot
-be that endpoint.
-
-### Which operations drop a warm container
-
-This applies only when Docker execution is configured. Without it there is no executor
-and no pool, which is the default and every CI run.
-
-A warm container is pooled by **function ARN alone**, and the handle records no code
-identity — no `CodeSha256`, no `RevisionId`, no image URI — so nothing in the invoke
-path can notice that a container is running code the function no longer has. Until
-[#1035](https://github.com/scttfrdmn/substrate/issues/1035) only a shutdown, a state
-reset and the idle TTL ever dropped an entry, and the TTL measures **idle** time, so a
-function invoked in a loop kept its stale container indefinitely: `GetFunction` reported
-the new `CodeSha256` while `Invoke` returned the previous code's output, and the response
-a caller was asserting on was the stale one.
-
-Three operations now drop the container for the function they name, and the line between
-them and the rest of the plugin is what a container is started from rather than what the
-API publishes as mutable:
-
-| Operation | Why |
-|-----------|-----|
-| `UpdateFunctionCode` | The old package is mounted into the container, or the old image URI is baked into its `docker run` |
-| `UpdateFunctionConfiguration` | `Runtime` chooses the image, `Handler` is both an environment variable and the container's command argument, and each `Environment` entry is a `-e` flag — all fixed at start |
-| `DeleteFunction` | The ARN is derived from account, Region and name, so a function recreated under the same name would inherit the dead one's entry |
-
-`MemorySize` and `Timeout` are the two `UpdateFunctionConfiguration` members that reach
-no container at all, so they would not need the eviction. It happens anyway:
-distinguishing them means comparing five members against a handle that stores none of
-them, and dropping a container costs one cold start where keeping a stale one serves the
-wrong answer. The eviction is **per ARN** — one function's update leaves every other
-function's container alone — and it runs **after** the write, so a refused update
-disturbs nothing.
-
-`PublishVersion` and the alias operations do not drop a container: the pool is keyed by
-the unqualified ARN and the invoke path resolves a qualifier to the same function record,
-so neither changes what a container should be running.
-
-`DeleteFunction` also releases the stored deployment package, which it did not before
-#1035. No stale read followed from that — the invoke path is gated on whether a package
-is staged, which a recreated function sets for itself — so it was a leak rather than a
-wrong answer.
-
-**A caveat on all of the above:** substrate writes a ZIP package into the mounted
-directory without extracting it, so the runtime interface never finds a module tree and
-no container down that path runs a caller's handler at all. Per this repository's scope
-boundary, running a Lambda's code is out of scope; whether the path should therefore be
-documented as inert or completed is
-[#1079](https://github.com/scttfrdmn/substrate/issues/1079). The invalidation above is
-about container *identity*, which is observable either way.
+The deployment package is still stored. Its bytes are what `GetFunction`'s `CodeSha256` and
+`CodeSize` report, and an `UpdateFunctionCode` changes them. A timeout firing, a handler exception or
+an `Environment` variable reaching the code are not modeled; seed the outcome each would produce.
 
 ### The tag bookkeeping a function carries reaches no response
 

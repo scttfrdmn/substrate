@@ -3590,7 +3590,7 @@ func cfnLambdaCode(body, props map[string]interface{}, cctx *cfnContext) {
 // Python)", so Python's .py is the only other case. An unrecognized runtime gets a
 // bare index rather than a guess; the archive's size and digest, which is what this
 // exists to make right, do not depend on the name being executable, and substrate
-// does not run an inline package unless Docker is present.
+// never runs the package.
 func cfnInlineZipPackage(source, runtime string) ([]byte, error) {
 	name := "index"
 	switch {
