@@ -50,7 +50,7 @@ package emulator
 // AccessDeniedException is also published at 400 by ACM while substrate answers it at 403. That is
 // not fixed here: the 403 comes from the central authorization check every service shares, and
 // making it per-service would have the emulator answer two statuses for one decision. It is
-// recorded in docs/services.md rather than silently skipped.
+// recorded in docs/reference/acm.md rather than silently skipped.
 
 import (
 	"fmt"

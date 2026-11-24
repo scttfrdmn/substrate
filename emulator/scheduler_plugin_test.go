@@ -292,10 +292,11 @@ func TestScheduler_ListSchedulesReadsThePublishedQueryKeys(t *testing.T) {
 // TestScheduler_ListSchedulesMaxResultsReadings pins the two page-size readings that are substrate's
 // own rather than the page's, now that MaxResults is read at all (#1226).
 //
-// API_ListSchedules publishes a Valid Range of 1–100 and **no default**. Substrate answers 20 when the
-// parameter is absent or unusable, and clamps a larger request to 100 rather than refusing it — both
-// recorded in docs/services.md as divergences. They are asserted here because an unasserted reading is
-// how the lowerCamel keys survived: nothing observed what the operation actually did.
+// API_ListSchedules publishes a Valid Range of 1–100 and **no default**. Substrate answers 20 when
+// the parameter is absent or unusable, and clamps a larger request to 100 rather than refusing it —
+// both recorded in docs/reference/scheduler.md as divergences. They are asserted here because an
+// unasserted reading is how the lowerCamel keys survived: nothing observed what the operation
+// actually did.
 //
 // A clamp is only observable above the maximum, so this needs more than 100 schedules; that is why it
 // is a separate test from the query-key one rather than another subtest of it.

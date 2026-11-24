@@ -69,7 +69,7 @@ type S3ServerSideEncryption struct {
 	// the sent form. Resolving it would require modeling KMS key aliases and
 	// cross-account ARNs to answer a question no consumer asked.
 	//
-	// The divergence is observable and is documented in docs/services.md beside the
+	// The divergence is observable and is documented in docs/reference/s3.md beside the
 	// behavior, in the same spirit as the CopyObject MetadataDirective asymmetry in
 	// s3_copy_metadata.go. If key resolution is ever modeled, this decision has to
 	// be revisited rather than silently overtaken.

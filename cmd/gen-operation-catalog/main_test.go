@@ -201,10 +201,9 @@ func (p *ThingPlugin) render(req *AWSRequest) error {
 // "GetInvalidation:"+invalidationID so the handler can take both ids from one value, and a
 // strings.HasPrefix guard ahead of the switch routes it.
 //
-// The first version of this generator missed it and reported 1017 operations rather than 1018.
-// What found the miss was the reverse of #1015's check — docs/services.md claims
-// GetInvalidation in CloudFront's operation table and the catalog did not list it — which is
-// the argument for having both directions rather than either.
+// A generator that missed it would be caught by the reverse of #1015's check: the operation
+// table in docs/reference/cloudfront.md claims GetInvalidation, and the catalog would not list
+// it — the argument for having both directions rather than either.
 func TestBuildFrom_ReadsAPrefixGuard(t *testing.T) {
 	body := `	if strings.HasPrefix(op, "GetInvalidation:") {
 		return p.getInvalidation(strings.TrimPrefix(op, "GetInvalidation:"))

@@ -58,6 +58,6 @@ const schedListDefaultMaxResults = 20
 // schedListMaxMaxResults is the published maximum of ListSchedules' MaxResults Valid Range.
 //
 // Substrate clamps a larger request to it rather than refusing, which is a divergence from the
-// published range and is recorded in docs/services.md rather than fixed here — refusing it is the
-// page-size class, not this one.
+// published range and is recorded in docs/reference/scheduler.md rather than fixed here — refusing
+// it is the page-size class, not this one.
 const schedListMaxMaxResults = 100

@@ -514,7 +514,7 @@ func TestEC2_DescribeVolumes_TagFilters(t *testing.T) {
 			// A documented filter substrate keeps no state to answer is inert rather
 			// than refused, so the answer is every volume (#687). Refusing it would
 			// deny a filter real EC2 accepts; the accepted-but-unevaluated names are
-			// listed per operation in docs/services.md.
+			// listed per operation in docs/reference/ec2.md.
 			name: "a documented filter substrate cannot evaluate is inert",
 			filters: map[string]string{
 				"Filter.1.Name":    "encrypted",

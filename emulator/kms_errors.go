@@ -665,12 +665,13 @@ func kmsInvalidKeyUsageForOperation(key *KMSKey) *AWSError {
 // that division is what a caller matching on the shared code has to read to tell the two apart. Naming the
 // usage here would be actively wrong: the usage is the one thing about such a key that is correct.
 //
-// It names GenerateDataKeyPair too, because a refusal whose remedy is a different operation is otherwise
-// unactionable — AWS's own text sends an asymmetric caller there ("to generate an asymmetric data key pair,
-// use the GenerateDataKeyPair or GenerateDataKeyPairWithoutPlaintext operation"). Substrate implements
-// neither, and says so in the message rather than only in docs/services.md, because this refusal is the
-// one place a caller is standing when it needs to know: being sent to an operation that answers
-// unknownActionError would be worse than being told the truth here.
+// It names GenerateDataKeyPair too, because a refusal whose remedy is a different operation is
+// otherwise unactionable — AWS's own text sends an asymmetric caller there ("to generate an
+// asymmetric data key pair, use the GenerateDataKeyPair or GenerateDataKeyPairWithoutPlaintext
+// operation"). Substrate implements neither, and says so in the message rather than only in
+// docs/reference/kms.md, because this refusal is the one place a caller is standing when it needs
+// to know: being sent to an operation that answers unknownActionError would be worse than being
+// told the truth here.
 func kmsInvalidKeySpecForDataKey(key *KMSKey) *AWSError {
 	return &AWSError{
 		Code: "InvalidKeyUsageException",

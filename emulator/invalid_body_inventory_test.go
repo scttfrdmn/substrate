@@ -1178,11 +1178,11 @@ type memberService struct {
 // be made once. Adding a twelfth service here is the cheapest way to state that a plugin answers one
 // code for one class of caller error.
 //
-// These are the second half of the inventory in docs/services.md — the "+ N member" column. They matter
-// as much as the parse guards and are easier to miss: a parse guard is one literal per handler, while
-// these are scattered complaints about a missing member or a malformed identifier, and #950 corrected
-// them to the same per-service code precisely so that one plugin cannot answer two codes for one class
-// of caller error.
+// These are the second half of the inventory in docs/reference/concepts/errors.md — the "+ N
+// member" column. They matter as much as the parse guards and are easier to miss: a parse guard is
+// one literal per handler, while these are scattered complaints about a missing member or a
+// malformed identifier, and #950 corrected them to the same per-service code precisely so that one
+// plugin cannot answer two codes for one class of caller error.
 //
 // The body is "{}" wherever a member is being checked. That is deliberate and is the whole reason these
 // cases cannot live in the parse-guard table: "{}" *parses*, so it travels past the parse guard and
@@ -1801,11 +1801,12 @@ func TestOpenSearchInvalidBodyIsNotAnAWSError(t *testing.T) {
 // TestInvalidBodyBelowAResourceLookup covers the four sites no table above can reach — #1007's three
 // and #1066's one.
 //
-// Each sits below a lookup of the resource its path names, so against an empty server the lookup answers
-// first — NotFoundException for API Gateway v2, the loader's own error for AppSync and Backup — and the
-// parse guard never runs. That is the lookup-first convention recorded under "Whether a body is parsed
-// before the resource is looked up" in docs/services.md, not a defect in this slice; #1007's scope is that
-// a discarded decode error is checked, which these three now satisfy.
+// Each sits below a lookup of the resource its path names, so against an empty server the lookup
+// answers first — NotFoundException for API Gateway v2, the loader's own error for AppSync and
+// Backup — and the parse guard never runs. That is the lookup-first convention recorded under
+// "Whether a body is parsed before the resource is looked up" in docs/reference/concepts/errors.md,
+// not a defect in this slice; #1007's scope is that a discarded decode error is checked, which
+// these three now satisfy.
 //
 // It does mean a table of refusals against a bare server cannot see them, and a site no test reaches is a
 // site whose code has stopped being checked. So the prerequisite is created first and the refusal asserted
@@ -1936,11 +1937,12 @@ func jsonMemberAnyDepth(t *testing.T, raw, key string) string {
 // TestInvalidBodyTailIsFullyCovered asserts the sixty sites #1007's third slice changed are all accounted
 // for: covered by a table, or listed as uncovered with a reason.
 //
-// This is arithmetic rather than behavior, and it is here because the tables cannot state it themselves.
-// A site quietly dropped from a table still leaves every other assertion green, so the count is the only
-// thing that catches it — the same reason the per-service counts above are pinned to docs/services.md.
+// This is arithmetic rather than behavior, and it is here because the tables cannot state it
+// themselves. A site quietly dropped from a table still leaves every other assertion green, so the
+// count is the only thing that catches it — the same reason the per-service counts above are pinned
+// to docs/reference/concepts/errors.md.
 func TestInvalidBodyTailIsFullyCovered(t *testing.T) {
-	// The slice's own numbers, from the inventory in docs/services.md.
+	// The slice's own numbers, from the inventory in docs/reference/concepts/errors.md.
 	const (
 		tailSites       = 60
 		inServiceTables = 49 // POST-routed, refused with an AWSError
@@ -1965,7 +1967,7 @@ func TestInvalidBodyTailIsFullyCovered(t *testing.T) {
 // concrete: sso, backup ×2, redshift-data and appsync each got a constructor from that sweep and each kept
 // a leaking guard beside the site it was written for.
 func TestInvalidBodyDecoderTextLeaksAreFullyCovered(t *testing.T) {
-	// #1066's own numbers, from the per-file count in docs/services.md.
+	// #1066's own numbers, from the per-file count in docs/reference/concepts/errors.md.
 	const (
 		leakSites = 35
 		// The four services that had no row in this file at all, one leaking guard per handler:

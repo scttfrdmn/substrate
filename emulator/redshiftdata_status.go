@@ -20,8 +20,9 @@ var redshiftDataStatuses = []string{"SUBMITTED", "PICKED", "STARTED", "FINISHED"
 var redshiftDataTransientStatuses = []string{"SUBMITTED", "PICKED", "STARTED"}
 
 // redshiftDataStatementSeed is the body of POST /v1/redshift-data/status (#1155, #1163): how many
-// observations of a statement report a transient status, and what it settles to. docs/services.md,
-// "How a progression is seeded", states the rules every progression shares.
+// observations of a statement report a transient status, and what it settles to.
+// docs/reference/concepts/seeds-and-replay.md, "How a progression is seeded", states the rules
+// every progression shares.
 //
 // The pre-#1163 body, {"status","errorMessage"}, still parses. With no statementId it is the "*"
 // wildcard, and it is now read when a statement is described rather than frozen onto the statement

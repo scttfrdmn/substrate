@@ -317,12 +317,12 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		MultiRegion bool     `json:"MultiRegion"`
 		Tags        []KMSTag `json:"Tags"`
 	}
-	// The body stays optional — CreateKey has no required parameter, and an empty request creates the
-	// symmetric encryption key the operation's first guidance section describes — but a body that is present
-	// and unparseable is refused rather than discarded (#977): with the two members validated below,
-	// silently zeroing them on a parse error would answer 200 with a symmetric key for
-	// `{"KeySpec": 4096}`, defeating the validation one line later. The code is [kmsInvalidBody]'s, the same
-	// one the plugin's other twenty-one parse sites answer.
+	// The body stays optional — CreateKey has no required parameter, and an empty request creates
+	// the symmetric encryption key the operation's first guidance section describes — but a body
+	// that is present and unparseable is refused rather than discarded (#977): with the two members
+	// validated below, silently zeroing them on a parse error would answer 200 with a symmetric key
+	// for `{"KeySpec": 4096}`, defeating the validation one line later. The code is
+	// [kmsInvalidBody]'s, the same one the plugin's other twenty-one parse sites answer.
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, kmsInvalidBody()
@@ -720,8 +720,9 @@ func (p *KMSPlugin) cancelKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AW
 // document and its source.
 //
 // The key is loaded, so a KeyId naming no key answers the NotFoundException both this operation and
-// PutKeyPolicy publish (#983). The key state is deliberately not checked — the developer guide's key-state
-// table gives this operation a checkmark in all seven columns; see kms_key_policy.go's preamble.
+// PutKeyPolicy publish (#983). The key state is deliberately not checked — the developer guide's
+// key-state table gives this operation a checkmark in all seven columns; see kms_key_policy.go's
+// preamble.
 //
 // PolicyName is answered from the request after validation rather than hardcoded; `default` is the only
 // name that reaches the response.
@@ -1438,9 +1439,10 @@ func (p *KMSPlugin) updateAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 	// A pointer to a key with no record can only be one written by a build older than #1085, which
-	// closed the two paths that produced them. The type match is skipped rather than failed there, because the
-	// restriction is a comparison and there is nothing to compare — and refusing would leave a caller no
-	// way to repair a dangling alias through the operation whose purpose is to re-point it.
+	// closed the two paths that produced them. The type match is skipped rather than failed there,
+	// because the restriction is a comparison and there is nothing to compare — and refusing would
+	// leave a caller no way to repair a dangling alias through the operation whose purpose is to
+	// re-point it.
 	if current != nil {
 		if matchErr := kmsCheckAliasTargetMatches(input.AliasName, current, next); matchErr != nil {
 			return nil, matchErr
@@ -1909,10 +1911,10 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 		"CiphertextBlob": string(ciphertext),
 	}
 	// KeyMaterialId (#978). Its gloss here is the shortest of the five — "the identifier of the key
-	// material used to encrypt the data key", with no condition at all — because this operation takes no
-	// Recipient parameter and so has not even that caveat. Held to the same condition as the other four
-	// for the reason [kmsReportsKeyMaterialID] gives, and that condition is satisfied by every key reaching
-	// this line, exactly as at its sibling (#988).
+	// material used to encrypt the data key", with no condition at all — because this operation
+	// takes no Recipient parameter and so has not even that caveat. Held to the same condition as
+	// the other four for the reason [kmsReportsKeyMaterialID] gives, and that condition is
+	// satisfied by every key reaching this line, exactly as at its sibling (#988).
 	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
 	return kmsJSONResponse(http.StatusOK, out)
 }

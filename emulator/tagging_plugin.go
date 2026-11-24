@@ -2851,7 +2851,8 @@ func sortTagsByKey[T any](tags []T, keyOf func(T) string) {
 // one could not be.
 //
 // AWS documents no order for Tags, on this operation or on the ResourceTagMapping shape, so
-// lexicographic is substrate's reading rather than a match — see docs/services.md.
+// lexicographic is substrate's reading rather than a match — see
+// docs/reference/concepts/listing-order.md.
 func mapToTaggingTags(m map[string]string) []taggingTag {
 	if len(m) == 0 {
 		return nil

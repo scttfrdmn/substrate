@@ -111,7 +111,7 @@ func TestEC2_FilterNames_CaseIsSignificant(t *testing.T) {
 //
 // Every name below is on its operation's reference page and is one substrate keeps no
 // state to answer. Refusing them would be a false deny for filters real EC2 accepts, so
-// they are accepted and inert — the honest gap, listed per operation in docs/services.md
+// they are accepted and inert — the honest gap, listed per operation in docs/reference/ec2.md
 // rather than left for a caller to discover.
 func TestEC2_FilterNames_DocumentedButUnevaluatedIsAccepted(t *testing.T) {
 	for _, tc := range []struct{ action, filter string }{

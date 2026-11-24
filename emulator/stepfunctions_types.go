@@ -233,7 +233,7 @@ type StateMachineState struct {
 	// removes the record synchronously, so there is no observation between "ACTIVE" and "gone" for a
 	// DELETING to occupy. Saying so here rather than naming a value no writer sets is the point —
 	// modeling the transition is a separate piece of work, and until it happens the honest statement is
-	// that this emulator has one status. See docs/services.md for what a caller loses by it.
+	// that this emulator has one status. See docs/reference/states.md for what a caller loses by it.
 	Status string `json:"Status"`
 
 	// Definition is the Amazon States Language definition as raw JSON.

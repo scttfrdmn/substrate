@@ -30,7 +30,7 @@ import (
 // collapsed. #579 is explicit that collapsing them "would be worse than none,
 // because it would look like coverage".
 //
-// Deliberately not evaluated, and stated in docs/services.md rather than answered
+// Deliberately not evaluated, and stated in docs/reference/iam.md rather than answered
 // wrongly:
 //
 //   - Service control policies. Organizations stores them and CheckAccess never

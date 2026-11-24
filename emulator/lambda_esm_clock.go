@@ -20,8 +20,7 @@ import (
 //
 // A mapping polls once per [esmPollInterval] of simulated time, starting one interval
 // after it is created or enabled. AWS publishes no polling cadence for an SQS mapping;
-// one second is the interval substrate's goroutine poller used, kept so a test written
-// against it sees the same rhythm. It is measured in simulated time, so a frozen clock
+// one second is substrate's choice. It is measured in simulated time, so a frozen clock
 // polls never and a scaled clock polls proportionally faster or slower.
 //
 // # When several polls are due at once

@@ -135,10 +135,11 @@ in-tree cases, each with the consequence that made it a defect:
   and unreleased for the life of the process. `ResetForRun` empties the filesystem —
   by removing each root entry, because `RemoveAll("/")` on a `MemMapFs` reports
   success, leaves every file beneath readable and destroys the root entry.
-- **Lambda's event-source-mapping pollers.** `DeleteEventSourceMapping` is the only
-  call that closes a poller's stop channel, and it answers `ResourceNotFoundException`
-  once the record is gone. Both the queue URL and the function ARN are name-derived,
-  so the poller consumed the *next* run's messages and invoked its function.
+- **Lambda's event-source-mapping polled set.** `RunDue` polls, on the simulated clock,
+  the enabled SQS mappings the plugin holds in memory. `DeleteEventSourceMapping` is the
+  only call that removes an entry, and it answers `ResourceNotFoundException` once the
+  reset has deleted the record, so `ResetForRun` empties the set: a reset plugin then
+  polls exactly the mappings its state holds, as a fresh process would.
 
 One exception, and it is about ownership rather than reachability: state the **caller**
 handed the plugin is the caller's to clear. S3 empties its filesystem only when it
@@ -146,11 +147,12 @@ created it, because an injected `Options["filesystem"]` may be backed by a direc
 holding fixtures the caller means to keep, and only the caller knows that. Nothing can
 inject one over HTTP, so this is reachable only by an in-process embedder.
 
-Where the state is invisible through the wire — payload bytes, a live goroutine — the
+Where the state is invisible through the wire — payload bytes, an in-memory set — the
 assertion needs a test-only accessor in `export_test.go` rather than a request, and its
-doc comment should say why no request can see it. Prefer a deterministic form: assert
-the poller *count*, not that polling stopped, because a poll happens on a wall-clock
-tick and no test may depend on real elapsed time.
+doc comment should say why no request can see it. Prefer asserting the state itself
+over its effects: assert the size of the polled set, not that no poll happened, because
+a poll runs only when a request finds a mapping's cursor due, so an absence of polls
+says nothing about what the set still holds.
 
 ### Errors
 

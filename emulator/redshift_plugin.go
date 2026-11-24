@@ -235,7 +235,7 @@ func (p *RedshiftPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) 
 // **TagKeys and TagValues are not applied.** Substrate records no tags on a cluster (CreateCluster's
 // `Tags.Tag.N` is not stored), so there is nothing for a tag filter to match against; applying one
 // would answer an empty list for a cluster AWS would return. They are named here, and in
-// docs/services.md, rather than silently accepted as if applied.
+// docs/reference/redshift.md, rather than silently accepted as if applied.
 func (p *RedshiftPlugin) describeClusters(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	filterID := req.Params["ClusterIdentifier"]
 	if filterID != "" && req.Params["Marker"] != "" {

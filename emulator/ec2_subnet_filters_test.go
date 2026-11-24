@@ -224,7 +224,7 @@ func TestEC2_DescribeSubnets_FiltersAND(t *testing.T) {
 
 // TestEC2_DescribeSubnets_InertFiltersReturnEverything pins the fourteen names AWS
 // documents that substrate accepts and cannot answer — sampled here, listed in full in
-// docs/services.md. They constrain nothing rather than being refused, because refusing a
+// docs/reference/ec2.md. They constrain nothing rather than being refused, because refusing a
 // filter real EC2 accepts would be a false deny.
 func TestEC2_DescribeSubnets_InertFiltersReturnEverything(t *testing.T) {
 	t.Parallel()

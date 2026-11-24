@@ -159,8 +159,9 @@
 // SNS, SES, Kinesis, Firehose, AppSync, Service Quotas, and many more.
 // [S3Plugin] alone supports REST+XML operations including multipart uploads,
 // versioning, and lifecycle configuration. For the authoritative per-service
-// operation list and plugin count, see docs/services.md, which is generated
-// from the plugin registry by cmd/gen-service-reference — counts are
+// operation list and plugin count, see docs/services.md, whose coverage
+// matrix cmd/gen-service-reference generates from the plugin registry, and
+// the per-service pages under docs/reference/ it links to — counts are
 // deliberately not repeated here so they cannot drift. The [Client]
 // integrates CloudFormation deployment ([StackDeployer]), recording,
 // [ValidateRecording], and [DebugSession] time-travel into a single

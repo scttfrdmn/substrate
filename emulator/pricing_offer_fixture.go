@@ -33,7 +33,7 @@ import "slices"
 //     file at all, so this filter cannot return the rate a caller expects; the
 //     nearest $0.00099 SKU is Intelligent-Tiering's TimedStorage-INT-DAA-ByteHrs.
 //
-// See docs/services.md for the served operations and the seed endpoints.
+// See docs/reference/pricing.md for the served operations and the seed endpoints.
 
 // pricingFormatVersion is the only FormatVersion the Price List API defines.
 const pricingFormatVersion = "aws_v1"

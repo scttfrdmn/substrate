@@ -448,7 +448,7 @@ func osSortedKeys(m map[string]interface{}) []string {
 // them and the same on every run (#1201). The Query DSL documents `bool` as the way to combine clauses
 // and publishes no error for a multi-clause object, so substrate does not refuse one. A clause type
 // substrate does not implement matches every document; the supported set is listed in
-// docs/services.md.
+// docs/reference/opensearch.md.
 func osMatchDoc(src map[string]interface{}, query map[string]interface{}) bool {
 	for _, qType := range osSortedKeys(query) {
 		if !osMatchClause(src, qType, query[qType]) {

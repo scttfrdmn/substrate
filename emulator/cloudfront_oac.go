@@ -20,7 +20,7 @@ package emulator
 //
 //   - OriginAccessControlInUse/409, which DeleteOriginAccessControl publishes for an OAC a
 //     distribution still names. Answering it means knowing a distribution's origins, and
-//     substrate records none — that is the same gap docs/services.md describes under "A
+//     substrate records none — that is the same gap docs/reference/cloudfront.md describes under "A
 //     configuration is not a distribution", and it is why GetDistributionConfig answers two of
 //     its five required members. #1271 is where a distribution starts recording its
 //     configuration; the check becomes answerable there and is a follow-up on #1277 rather than
@@ -138,7 +138,7 @@ type cfOACSummaryWire struct {
 //
 // Marker, MaxItems and NextMarker are published members and are not rendered, because substrate
 // answers the list whole and so holds no value for them — the same reading [listDistributions]
-// takes for DistributionList, and the same one docs/services.md states for the three
+// takes for DistributionList, and the same one docs/reference/cloudfront.md states for the three
 // DistributionConfig members substrate cannot answer. Inventing a MaxItems would assert a page
 // size AWS publishes nowhere.
 //

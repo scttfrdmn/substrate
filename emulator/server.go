@@ -727,7 +727,7 @@ func (s *Server) handleLocalStackHealth(w http.ResponseWriter, _ *http.Request) 
 // same reason: a minting counter that survived the reset made the identifiers a
 // test case observes depend on how many test cases ran before it. It now also
 // releases what a plugin holds outside its own struct — S3's object payloads
-// (#902) and Lambda's event-source-mapping pollers (#903).
+// (#902) and the set of Lambda event-source mappings it polls (#903).
 //
 // The one exception is a filesystem a caller injected into the S3 plugin as
 // Options["filesystem"], which substrate does not own and leaves alone; it cannot

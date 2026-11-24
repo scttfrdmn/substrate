@@ -314,7 +314,7 @@ func TestSFNASL_UpdateRefusesAStructurallyInvalidDefinition(t *testing.T) {
 // The last case is the one to read twice. `{"Type":"Succeed","Next":"X"}` can never transition,
 // because Succeed is terminal — but AWS publishes only that Succeed "doesn't support or use the End
 // field", and under #671 a refusal needs a published sentence, not an inference. So substrate accepts
-// it and docs/services.md records it as unvalidated.
+// it and docs/reference/states.md records it as unvalidated.
 func TestSFNASL_AcceptsWhatAWSDoesNotRefuse(t *testing.T) {
 	ts := sfnArnServer(t)
 

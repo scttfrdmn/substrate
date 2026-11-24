@@ -18,7 +18,7 @@ import "net/http"
 // call for different fixes by the caller — one sends different bytes, the other adds a
 // member — and telling a caller their jobName is missing when their JSON is truncated
 // sends them to look at the wrong thing. The remaining conflated sites, in Athena and
-// Secrets Manager, are recorded in docs/services.md rather than changed, because there
+// Secrets Manager, are recorded in docs/reference/concepts/errors.md rather than changed, because there
 // the required member is the only member and the two answers coincide.
 
 // bedrockInvalidBody reports that a request body would not decode.

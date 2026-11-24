@@ -22,7 +22,7 @@ import (
 // second: DescribeInternetGateways, DescribeNatGateways, DescribeRouteTables, DescribeInstanceTypes
 // and DescribeInstanceTypeOfferings; and DescribeLaunchTemplates was a third part of its own rather
 // than a sixth row of the second, because its page is the one whose floor is not five. **No routed
-// describe publishing both parameters implements neither any longer.** docs/services.md lists the
+// describe publishing both parameters implements neither any longer.** docs/reference/ec2.md lists the
 // range each publishes.
 //
 // What AWS publishes about the mechanism is stated once, in Query-Requests.html → Pagination,

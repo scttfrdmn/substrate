@@ -20,7 +20,7 @@ import (
 // consumer discovering a policy rather than hardcoding its ARN had no testable path.
 //
 // Substrate can only ever return the 52 policies it bundles where real IAM returns roughly
-// 1,200. That is a documented scope limit (see docs/services.md); returning *zero* was the
+// 1,200. That is a documented scope limit (see docs/reference/iam.md); returning *zero* was the
 // bug.
 
 // iamPathPrefixPattern is policyPathType from the API model:
@@ -62,7 +62,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			http.StatusBadRequest), nil
 	}
 	// PolicyUsageFilter is validated and then not applied, which is deliberate and stated in
-	// docs/services.md rather than left for a reader to discover. The reference says only
+	// docs/reference/iam.md rather than left for a reader to discover. The reference says only
 	// that PermissionsPolicy lists "permissions policies" and PermissionsBoundary lists "the
 	// policies used to set permissions boundaries"; it does not say which side an
 	// entirely-unused policy falls on, and every bundled policy is unused in a fresh

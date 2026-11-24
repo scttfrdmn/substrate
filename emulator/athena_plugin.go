@@ -454,7 +454,7 @@ const athenaPrimaryWorkGroupName = "primary"
 // runs, and API_WorkGroupSummary publishes only ENABLED and DISABLED, so a usable workgroup has exactly
 // one of the two values available. Description is substrate's own placeholder — AWS publishes no
 // description for the primary workgroup, and a real one has none — and is recorded as such in
-// docs/services.md rather than presented as a read.
+// docs/reference/athena.md rather than presented as a read.
 func athenaPrimaryWorkGroup() AthenaWorkGroup {
 	return AthenaWorkGroup{
 		Name:        athenaPrimaryWorkGroupName,

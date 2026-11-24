@@ -11,9 +11,9 @@ import (
 //
 // A job is born `Submitted`, the first status API_GetModelInvocationJob documents ("submitted to a
 // queue for validation"), and an unseeded job stays there: substrate runs no inference, so no
-// transition beyond it happens on its own (CLAUDE.md's scope). Two seeded progressions, both on
-// the shared helper in emulator/progression.go (see docs/services.md, "How a progression is
-// seeded"), make the rest observable:
+// transition beyond it happens on its own (CLAUDE.md's scope). Two seeded progressions, both on the
+// shared helper in emulator/progression.go (see docs/reference/concepts/seeds-and-replay.md, "How a
+// progression is seeded"), make the rest observable:
 //
 //   - **The status seed** (`POST`/`DELETE /v1/bedrock/model-invocation-job-status`) reports a
 //     pending status (default `InProgress`) for `pendingObservations` reads, then the seeded

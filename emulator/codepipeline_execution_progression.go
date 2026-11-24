@@ -9,11 +9,12 @@ import (
 // A pipeline execution's seeded progression (#1155).
 //
 // StartPipelineExecution completes the execution in the request that starts it, so an unseeded
-// execution is Succeeded on its first GetPipelineExecution. A seed written to
-// POST /v1/codepipeline/execution-status makes the published in-flight states observable:
+// execution is Succeeded on its first GetPipelineExecution. A seed written to POST
+// /v1/codepipeline/execution-status makes the published in-flight states observable:
 // GetPipelineExecution reports the seed's transient status — InProgress or Stopping — for a seeded
 // number of observations, then its final one, with the statusSummary API_PipelineExecution
-// publishes alongside it. See [progression] and docs/services.md "How a progression is seeded".
+// publishes alongside it. See [progression] and docs/reference/concepts/seeds-and-replay.md "How a
+// progression is seeded".
 
 // codepipelineExecCtrlNamespace is the [StateManager] namespace the execution progression lives in.
 const codepipelineExecCtrlNamespace = "codepipeline-exec-ctrl"

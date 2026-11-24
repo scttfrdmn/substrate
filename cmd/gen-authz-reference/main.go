@@ -5,11 +5,10 @@
 // # Why this data, and why generated
 //
 // Both issues require a per-operation answer to "does this action support resource-level
-// permissions, and for which resource types" — a table AWS publishes in the Service
-// Authorization Reference. Those HTML pages render their tables in JavaScript, so they
-// cannot be read by a fetch; docs/services.md records that dead end for both ELB pages,
-// which is why some ELB parameters are still authorized against "*". AWS publishes the
-// same data as JSON at
+// permissions, and for which resource types" — a table AWS publishes in the Service Authorization
+// Reference. Those HTML pages render their tables in JavaScript, so they cannot be read by a fetch;
+// docs/reference/elasticloadbalancing.md records that dead end for both ELB pages, which is why
+// some ELB parameters are still authorized against "*". AWS publishes the same data as JSON at
 //
 //	https://servicereference.us-east-1.amazonaws.com/v1/{service}/{service}.json
 //

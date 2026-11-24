@@ -248,7 +248,7 @@ func TestSNSSetTopicAttributesAcceptsAnEmptyValue(t *testing.T) {
 // Recording it is the deliberate choice over filtering the read. The value a caller set is real, and a
 // GetTopicAttributes that hid it would make SetTopicAttributes look like a no-op — the failure mode
 // #1067 is about, in the opposite direction. A consumer asserting on Get's published key set must not
-// use substrate's answer as the authority here; docs/services.md says so.
+// use substrate's answer as the authority here; docs/reference/sns.md says so.
 func TestSNSSetTopicAttributesWriteOnlyNamesAreReadBack(t *testing.T) {
 	t.Parallel()
 	ts := snsTagServer(t)

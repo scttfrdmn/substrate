@@ -73,7 +73,7 @@ func TestEC2_Authz_OperationDecidesWhetherAResourceIsResolved(t *testing.T) {
 			why: "AWS scopes ec2:DeleteSecurityGroup to security-group",
 		},
 		{
-			// The over-reach docs/services.md recorded as deliberately left: GroupId is
+			// The over-reach docs/reference/ec2.md recorded as deliberately left: GroupId is
 			// overloaded, so a pg- ID was resolving to a placement-group ARN on an
 			// operation AWS scopes to "*".
 			name:      "DescribePlacementGroups with a pg- GroupId is decided against *",

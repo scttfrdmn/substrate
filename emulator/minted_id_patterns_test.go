@@ -20,11 +20,12 @@ import (
 // mint change that silently violates a published pattern fails in the consumer's own validation or
 // a typed SDK's URI builder, outside substrate, where nothing here would see it.
 //
-// Sites with no published pattern are not here, and the audit in docs/services.md records them as
-// such: AWS Backup's plan, version and selection IDs, CodeDeploy's application, deployment-group and
-// deployment IDs, and the UUID in an MSK cluster ARN. Redshift mints none: every identifier it
-// reports is the caller's. MSK's cluster ARN is asserted in the form every MSK page uses, which is
-// substrate's reading rather than a published pattern.
+// Sites with no published pattern are not here, and the audit in
+// docs/reference/concepts/seeds-and-replay.md records them as such: AWS Backup's plan, version and
+// selection IDs, CodeDeploy's application, deployment-group and deployment IDs, and the UUID in an
+// MSK cluster ARN. Redshift mints none: every identifier it reports is the caller's. MSK's cluster
+// ARN is asserted in the form every MSK page uses, which is substrate's reading rather than a
+// published pattern.
 
 // mintedIDCase is one minted identifier: the service and site it comes from, a function that mints
 // one and returns it, and the pattern it must match.

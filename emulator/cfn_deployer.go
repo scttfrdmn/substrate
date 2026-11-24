@@ -3218,12 +3218,11 @@ func cfnStackResourceTags(stackName, stackID, logicalID string) []EC2Tag {
 // EC2 type, so the order cannot matter for a resource either could claim. It is stated because
 // the reverse order would matter if a future arm overlapped.
 //
-// A resource neither resolver claims is **skipped silently** — a stack creates far more
-// resources than the services substrate models tags for, so a warning per resource would
-// bury a real one, and `docs/services.md` names what is skipped instead. A physical ID that
-// merely *looks* like an EC2 ID (a bucket named "i-something") resolves to a state key holding
-// no record, which [ec2ApplyTagsToResource] treats as the no-op it treats every absent resource
-// as.
+// A resource neither resolver claims is **skipped silently** — a stack creates far more resources
+// than the services substrate models tags for, so a warning per resource would bury a real one, and
+// `docs/reference/cloudformation.md` names what is skipped instead. A physical ID that merely
+// *looks* like an EC2 ID (a bucket named "i-something") resolves to a state key holding no record,
+// which [ec2ApplyTagsToResource] treats as the no-op it treats every absent resource as.
 //
 // A failed resource is not stamped: there may be nothing to stamp, and a tag on a resource
 // CloudFormation reports as CREATE_FAILED would claim a resource exists.
@@ -4070,8 +4069,7 @@ func (d *StackDeployer) deployELBLoadBalancer(
 //
 // **`Ref` needs no arm in [cfnRefValue].** AWS publishes it as "the name of the load balancer"
 // (`aws-properties-ec2-elb.html`), which is the physical ID set below, so the default answer is
-// already the right one. `docs/services.md` recorded the opposite — the DNS name — and that entry
-// is deleted rather than implemented. The DNS name is `Fn::GetAtt DNSName`, which is the whole of
+// already the right one. The DNS name is `Fn::GetAtt DNSName`, which is the whole of
 // this operation's published Response Elements, and it is recorded in the resource's metadata where
 // step 2 of [cfnGetAttValue] finds it.
 //

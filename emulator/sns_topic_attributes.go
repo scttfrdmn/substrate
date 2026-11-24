@@ -41,9 +41,9 @@ var snsDerivedTopicAttributeNames = []string{ //nolint:gochecknoglobals // read-
 // Sixteen of these 25 are absent from Get's 17 — the fifteen delivery-status names and
 // FifoThroughputScope — which is a property of AWS's own pages rather than an omission in either.
 // Substrate accepts all 25 and getTopicAttributes reports the whole stored map, so it reports those
-// sixteen back where AWS would not; that divergence is recorded in docs/services.md rather than papered
-// over by filtering the read, because the value a caller set is real and hiding it would make
-// SetTopicAttributes look like a no-op.
+// sixteen back where AWS would not; that divergence is recorded in docs/reference/sns.md rather
+// than papered over by filtering the read, because the value a caller set is real and hiding it
+// would make SetTopicAttributes look like a no-op.
 var snsSettableTopicAttributeNames = []string{ //nolint:gochecknoglobals // read-only reference data, stated once so a test can assert it
 	"DeliveryPolicy",
 	"DisplayName",

@@ -60,7 +60,7 @@ import "strings"
 //     to carry its issue time and the simulated clock to judge it — which is in scope for substrate,
 //     the clock being simulated — but the refusal would have to be attributed to
 //     InvalidParameterException/400, the only code the page publishes for a bad parameter, and that
-//     attribution is a reading rather than a read. Declined here and recorded in docs/services.md
+//     attribution is a reading rather than a read. Declined here and recorded in docs/reference/logs.md
 //     rather than decided silently; it was already recorded as out of scope for #1086.
 //   - **The "must specify true" coupling.** startFromHead publishes *"If you are using a previous
 //     nextForwardToken value as the nextToken in this operation, you must specify true for

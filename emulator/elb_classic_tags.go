@@ -37,7 +37,7 @@ import (
 // indexed plural form, so the singular is a typo on one page rather than a second accepted spelling.
 // The indexed form is what every SDK serializes, so it is the one read here — which is the same
 // resolution [elbMaxTagKeyLength] records for the Tag-length contradiction. A caller who copies
-// AWS's own sample curl is refused `ValidationError`, and docs/services.md says so.
+// AWS's own sample curl is refused `ValidationError`, and docs/reference/elasticloadbalancing.md says so.
 //
 // # What is shared rather than duplicated
 //

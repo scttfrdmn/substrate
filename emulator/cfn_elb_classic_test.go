@@ -221,10 +221,10 @@ func TestCFN_ClassicELBIsNotAnELBv2LoadBalancer(t *testing.T) {
 // TestCFN_ClassicELBRefIsTheNameAndDNSNameIsAnAttribute is the acceptance criterion this work
 // corrected rather than implemented.
 //
-// #844's AC8 and `docs/services.md` both said `Ref` resolves to the DNS name. AWS publishes the
-// opposite — "`Ref` returns the name of the load balancer" — and the DNS name is `Fn::GetAtt
-// DNSName`. Both are asserted here against each other, so neither can drift into the other's value:
-// the name is the one the template declared and the DNS name is the one the API itself reports.
+// `Ref` resolves to the load balancer's name, not its DNS name: AWS publishes "`Ref` returns the
+// name of the load balancer", and the DNS name is `Fn::GetAtt DNSName` (#844). Both are asserted
+// here against each other, so neither can drift into the other's value: the name is the one the
+// template declared and the DNS name is the one the API itself reports.
 //
 // The four remaining published attributes assert **empty**, which is the honest answer for a value
 // substrate records nothing for (#1013): no hosted zone and no source security group are minted for

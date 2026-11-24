@@ -768,7 +768,7 @@ func ec2VolumeMatchesFilters(vol EC2Volume, filters map[string][]string) bool {
 // to answer, because [ec2VolumeFilterSpec] refuses anything outside AWS's set before
 // the scan begins. So the drop is now the *inert* case rather than the unknown one,
 // and it is deliberate: refusing `encrypted` would deny a filter real EC2 accepts.
-// docs/services.md lists the inert names per operation.
+// docs/reference/ec2.md lists the inert names per operation.
 func ec2VolumeMatchesFilter(vol EC2Volume, name string, values []string) bool {
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
 		for _, t := range vol.Tags {

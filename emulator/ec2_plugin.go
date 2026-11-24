@@ -1776,7 +1776,7 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 // two operations ever need to read one name differently.
 //
 // IncludeAllInstances is not implemented: AWS returns only running instances by default, and
-// substrate returns every instance regardless. Stated in docs/services.md rather than guessed
+// substrate returns every instance regardless. Stated in docs/reference/ec2.md rather than guessed
 // at, because narrowing it would change what a caller with no filters sees.
 //
 // It paginates (#1024): API_DescribeInstanceStatus publishes MaxResults and NextToken, so a caller
@@ -2413,7 +2413,7 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 // nothing. Names are unique per VPC (#1491), so a name selects at most one group.
 //
 // One thing about the name half is substrate's reading rather than AWS's text, recorded in
-// docs/services.md: a name matching nothing answers an **empty set** rather than
+// docs/reference/ec2.md: a name matching nothing answers an **empty set** rather than
 // InvalidGroup.NotFound. This operation's Errors section is empty, and EC2's client-error table
 // describes that code as a missing security group *ID* — which is what [ec2SecurityGroupIDKind]'s
 // own message says — so refusing here would mean inventing wording for a refusal AWS does not
@@ -3039,7 +3039,7 @@ func ec2GatewayNotAttachedError() *AWSError {
 // The page's precondition, "The VPC must not contain any running instances with Elastic IP
 // addresses or public IPv4 addresses", is **not enforced**. The page states it in prose with
 // no code (its Errors section is the Common Error Types boilerplate), so enforcing it would
-// mean choosing a refusal AWS does not name for it. docs/services.md records the gap.
+// mean choosing a refusal AWS does not name for it. docs/reference/ec2.md records the gap.
 func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// Held so a detach's read-modify-write of the attachment list cannot interleave with an
 	// attach's (#1554).
@@ -4339,7 +4339,7 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 // ID, so there is no malformed-form or NotFound wording to inherit.
 //
 // Neither selector refuses an unknown name or ID. AWS answers InvalidKeyPair.NotFound there;
-// substrate answers an empty set, which docs/services.md states as the gap it is rather than
+// substrate answers an empty set, which docs/reference/ec2.md states as the gap it is rather than
 // substrate inventing the error's wording.
 func (p *EC2Plugin) describeKeyPairs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	filterNames := extractIndexedParams(req.Params, "KeyName")
@@ -4676,7 +4676,7 @@ func extractEC2Filters(params map[string]string) map[string][]string {
 //     AWS documents wildcards for `Filter.N.Value.N` only, so globbing them would let `i-*`
 //     stand in for an ID. Of the five, only `InstanceType.N` asserts the resource exists
 //     (`InvalidInstanceType`); the other four narrow the answer to nothing when an entry
-//     matches nothing, each for a reason recorded in docs/services.md's "Explicit resource
+//     matches nothing, each for a reason recorded in docs/reference/ec2.md's "Explicit resource
 //     IDs" section (#731).
 //   - [ec2FilterSpec.documents]' name lookup. AWS's wildcards are for values; a filter *name*
 //     is one of a fixed documented set and "Filter names are case-sensitive" per the Filter
@@ -5635,7 +5635,7 @@ func (p *EC2Plugin) ec2ImageUsingSnapshot(reqCtx *RequestContext, snapshotID str
 // of one operation is a zone ID the other accepts. The ID follows AWS's shape —
 // "use1-az1" for us-east-1a — from [azRegionAbbrev] and the zone's position in
 // [ec2SeededAZSuffixes]. Real zone IDs are per-account shuffled and substrate's are not;
-// docs/services.md says so.
+// docs/reference/ec2.md says so.
 func ec2SeededZones(region string) []ec2AvailabilityZoneItem {
 	abbrev := azRegionAbbrev(region)
 	zones := make([]ec2AvailabilityZoneItem, 0, len(ec2SeededAZSuffixes))
@@ -5656,7 +5656,7 @@ func ec2SeededZones(region string) []ec2AvailabilityZoneItem {
 //
 // AllRegions stays unread, and is inert rather than unimplemented: it asks for zones in
 // regions the account has *not* opted into, and every region substrate seeds is
-// opt-in-not-required, so the flag cannot change the answer. Stated in docs/services.md.
+// opt-in-not-required, so the flag cannot change the answer. Stated in docs/reference/ec2.md.
 func (p *EC2Plugin) describeAvailabilityZones(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	names := extractIndexedParams(req.Params, "ZoneName")
 	zoneIDs := extractIndexedParams(req.Params, "ZoneId")
@@ -5887,7 +5887,7 @@ var azCompassWords = []string{"north", "south", "east", "west", "central"}
 // independently map Availability Zones to codes for each AWS account", so real us-east-1a is
 // use1-az1 in one account and use1-az3 in another. Substrate maps zone a to -az1 always,
 // because a deterministic emulator cannot have a per-account secret and a test asserting a
-// pairing must be able to pass. docs/services.md says so.
+// pairing must be able to pass. docs/reference/ec2.md says so.
 func azRegionAbbrev(region string) string {
 	parts := strings.SplitN(region, "-", 2)
 	if len(parts) < 2 {
@@ -6921,7 +6921,7 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 // that applying the modellable handful and *silently dropping* the rest would repeat the
 // narrowing defect #485 found on the offerings operation, and the evaluated/accepted split is
 // the answer to it: an inert name constrains nothing and is listed as inert in
-// docs/services.md, rather than looking applied.
+// docs/reference/ec2.md, rather than looking applied.
 //
 // InstanceType.N is honored, and unlike a filter it is an assertion that the types exist.
 // IncludeUnsupportedInRegion is not read; the catalog is the same in every region.
@@ -7090,7 +7090,7 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 	// locations in the response *are* — the reference pairs each value with the identifier
 	// it yields: "availability-zone - The Availability Zone", "availability-zone-id - The
 	// AZ ID", "region - The current Region", "outpost - The Outpost ARN". Three of the four
-	// are modeled; outpost is documented as unmodelled in docs/services.md and is refused
+	// are modeled; outpost is documented as unmodelled in docs/reference/ec2.md and is refused
 	// rather than silently treated as availability-zone.
 	//
 	// Both zone arms read [ec2SeededZones], the single producer of the name/ID pair
@@ -7627,7 +7627,7 @@ func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
 //
 // IncludeManagedResources is published and read nowhere: substrate has no notion of a launch
 // template a service owns, so there is nothing for the parameter to include or hide. It is recorded
-// in docs/services.md rather than refused, since refusing a published parameter is the larger
+// in docs/reference/ec2.md rather than refused, since refusing a published parameter is the larger
 // divergence.
 func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
@@ -7786,7 +7786,7 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 //
 // A zone *name* is recorded as given and not checked against [ec2SeededZones]; a zone *ID*
 // must resolve, because it has to be translated into the name the record and every response
-// carry. That asymmetry is deliberate and stated in docs/services.md — validating names would
+// carry. That asymmetry is deliberate and stated in docs/reference/ec2.md — validating names would
 // be a wider change than the pair rule, and one substrate has never made on any zone-taking
 // operation.
 //

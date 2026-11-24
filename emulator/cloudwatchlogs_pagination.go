@@ -60,7 +60,7 @@ import "net/http"
 //     token substrate issues stays valid for the life of the store. Refusing an expired token would
 //     need the token to carry its issue time and the simulated clock to judge it — a different
 //     change, and one that needs a code decision this one does not. #1223 revisited it for GetLogEvents
-//     and declined it again for the same reason, recording the decision in docs/services.md.
+//     and declined it again for the same reason, recording the decision in docs/reference/logs.md.
 //
 // **GetLogEvents' two tokens** were one of these: AWS publishes nextBackwardToken and nextForwardToken,
 // says *"The returned tokens are never null"*, and documents termination as the returned token being

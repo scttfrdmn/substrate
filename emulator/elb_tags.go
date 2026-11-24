@@ -129,7 +129,7 @@ func elbTagQuotaForStateKey(key string) elbTagQuota {
 // code for that refusal, and no real response has been observed — so substrate does not
 // refuse the prefix. Inventing a code here is the #561 failure in a different costume: a
 // consumer's error branch would dispatch on something AWS never sends. The gap is
-// recorded in docs/services.md rather than papered over.
+// recorded in docs/reference/elasticloadbalancing.md rather than papered over.
 const elbReservedTagPrefix = "aws:"
 
 // elbMaxTagKeyLength and elbMaxTagValueLength are the tag length limits.

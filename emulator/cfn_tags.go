@@ -23,7 +23,7 @@ import (
 // lengths ("1 to 128 Unicode characters", "1 to 256 characters"); the *console* page
 // documents 127, 255 and "up to 50 tag key pairs", so it disagrees on the two lengths by
 // one character each. The model wins, on the reasoning #671 settled — only what the API
-// model states — and `docs/services.md` records the disagreement so a consumer reading
+// model states — and `docs/reference/cloudformation.md` records the disagreement so a consumer reading
 // the console page is not surprised by the extra character.
 //
 // The model publishes no `Pattern` for either member, unlike IAM's `Tag` and AWS Config's

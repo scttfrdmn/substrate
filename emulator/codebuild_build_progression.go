@@ -10,13 +10,13 @@ import (
 // A build's seeded progression (#1155).
 //
 // StartBuild completes the build in the request that starts it, so an unseeded build is SUCCEEDED,
-// with currentPhase COMPLETED, on its first BatchGetBuilds. A seed written to
-// POST /v1/codebuild/build-status makes the published in-progress state observable: BatchGetBuilds
+// with currentPhase COMPLETED, on its first BatchGetBuilds. A seed written to POST
+// /v1/codebuild/build-status makes the published in-progress state observable: BatchGetBuilds
 // reports buildStatus IN_PROGRESS, with the seed's currentPhase and no endTime, for a seeded number
 // of observations, then the final status. A failed final status may carry the diagnostic API_Build
 // publishes for it, which lives in a phase's contexts rather than on the build: the seed's message
-// is rendered as the failed phase's PhaseContext. See [progression] and docs/services.md "How a
-// progression is seeded".
+// is rendered as the failed phase's PhaseContext. See [progression] and
+// docs/reference/concepts/seeds-and-replay.md "How a progression is seeded".
 //
 // StartBuild's own response is a create-time read: it peeks the seed, reporting its first state
 // without spending an observation, so pendingObservations counts BatchGetBuilds polls only.

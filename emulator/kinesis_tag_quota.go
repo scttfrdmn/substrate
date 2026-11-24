@@ -32,13 +32,10 @@ package emulator
 // re-tagging a stream that is already at the quota with a key it already has is a rewrite, not a
 // thirty-first tag, and succeeds.
 //
-// Substrate models no tag quota for any other service, so this is the first of its kind; SSM's absence
-// is recorded the same way in `docs/services.md`. **The Resource Groups Tagging API does not enforce
-// it**, because that path merges tags for sixteen services through one helper and refusing there needs
-// the per-resource `FailedResourcesMap` semantics `TagResources` publishes. A caller can therefore
-// still push a stream past fifty tags through `TagResources`, which is filed separately rather than
-// half-done here; `AddTagsToStream` then refuses every further add, which is the correct answer for a
-// stream over quota however it got there.
+// EC2, ELB and IAM enforce their own published quotas the same way, and the Resource Groups Tagging
+// API enforces this one too, through [taggingCheckTagQuota] (#1000); docs/reference/tagging.md
+// tabulates the four. `AddTagsToStream` refuses every further add to a stream over quota however it
+// got there.
 //
 // # CreateStream reaches the same two checks, and one of the two codes is a reading there (#1087)
 //
