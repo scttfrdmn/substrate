@@ -196,8 +196,7 @@ func (s *transferServerSettings) applyTo(server *TransferServer) {
 //
 // Three defaults are the ones API_CreateServer states in so many words: Domain "The default value
 // is S3", IdentityProviderType "The default value is SERVICE_MANAGED", IPAddressType "The default
-// value is IPV4". Domain used to default to SFTP, which is a Protocols value, not a Domain one, and
-// was stored, so every later read reported a storage domain of SFTP (#1198).
+// value is IPV4". SFTP is a Protocols value, not a Domain one, so it is never a storage domain (#1198).
 //
 // EndpointType defaults to PUBLIC, and that is a different kind of decision: the page states no
 // default for it. PUBLIC is the first of its three Valid Values and is what a server created with no
@@ -292,11 +291,10 @@ func (p *TransferPlugin) describeServer(reqCtx *RequestContext, req *AWSRequest)
 // updateServer handles UpdateServer.
 //
 // It reads every member API_UpdateServer publishes, and a member the request sends replaces the
-// server's value while one it omits is left alone (#1199). It used to read EndpointType and Tags
-// only, so a caller adding FTPS by setting Protocols and Certificate got a 200 and an unchanged
-// server. Tags is not an UpdateServer member — tagging a server is TagResource, which is not routed
-// — so it is no longer read. Domain is not one either: the page says the domain cannot be changed
-// after the server is created.
+// server's value while one it omits is left alone (#1199), so a caller adding FTPS by setting
+// Protocols and Certificate gets a changed server. Tags is not an UpdateServer member — tagging a
+// server is TagResource, which is not routed — so it is not read. Domain is not one either: the
+// page says the domain cannot be changed after the server is created.
 func (p *TransferPlugin) updateServer(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		transferServerSettings
@@ -396,7 +394,7 @@ const transferPageDefault = 1000
 // page publishes a code specific to the range. A NextToken substrate did not issue is
 // InvalidNextTokenException at 400, which both pages publish with the sentence used here. An empty
 // NextToken is read as absent: the published Length Constraints make "" an illegal value, but
-// refusing it would break a caller still echoing the "" substrate used to send.
+// refusing it would break a caller echoing a "" an older build sent.
 func transferPage(maxResults *int, nextToken string) (offset, pageSize int, err error) {
 	pageSize = transferPageDefault
 	if maxResults != nil {
@@ -418,9 +416,8 @@ func transferPage(maxResults *int, nextToken string) (offset, pageSize int, err 
 
 // transferListBody returns body with NextToken set only when a further page exists.
 //
-// It used to be "" on every response. The published Length Constraints are 1–6144, so the empty
-// string is not a terminator but an illegal value, and a paginator written `while "NextToken" in
-// response` never stopped (#1195).
+// The published Length Constraints are 1–6144, so the empty string is not a terminator but an illegal
+// value, and a paginator written `while "NextToken" in response` would never stop on one (#1195).
 func transferListBody(body map[string]interface{}, token string) map[string]interface{} {
 	if token != "" {
 		body["NextToken"] = token
@@ -479,13 +476,13 @@ func (p *TransferPlugin) listServers(reqCtx *RequestContext, req *AWSRequest) (*
 //
 // API_CreateUser marks three members Required: Yes — Role, ServerId and UserName — and all three are
 // checked before the server is looked up, so a request that omits one is refused as malformed
-// whether or not its server exists. Role used to be unchecked, so a user with no access role was
-// created and reported successful (#1197). Role, UserName and every optional member the request
+// whether or not its server exists, and a user with no access role is never created (#1197). Role,
+// UserName and every optional member the request
 // sends are held to their published Length Constraints, Pattern and Valid Values.
 //
 // A duplicate user name is ResourceExistsException at 400, the only already-exists code the page
-// publishes. It was ConflictException at 409, which is published on UpdateServer for a concurrent
-// update, not on this operation (#1198).
+// publishes. ConflictException at 409 is published on UpdateServer for a concurrent update, not on
+// this operation (#1198).
 func (p *TransferPlugin) createUser(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ServerID              string          `json:"ServerId"`
@@ -616,8 +613,7 @@ func (p *TransferPlugin) describeUser(reqCtx *RequestContext, req *AWSRequest) (
 // [transferCheckHomeDirectoryMappings]. Role and HomeDirectoryType have no valid empty value, so an
 // empty one is refused rather than read as a clear. The prose cross-member rules (HomeDirectoryMappings
 // only with LOGICAL; not HomeDirectory and HomeDirectoryMappings together) are recorded as sent, as
-// CreateUser records them, since the page publishes no code for them. It used to read only
-// HomeDirectory and Role and drop the rest (#1391).
+// CreateUser records them, since the page publishes no code for them (#1391).
 func (p *TransferPlugin) updateUser(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ServerID              string          `json:"ServerId"`
@@ -727,8 +723,8 @@ func (p *TransferPlugin) deleteUser(reqCtx *RequestContext, req *AWSRequest) (*A
 }
 
 // listUsers handles ListUsers. Users are listed in user-name order, the sorted order of the server's user
-// index. A server that does not exist is ResourceNotFoundException, which the page publishes; it
-// used to list as empty.
+// index. A server that does not exist is ResourceNotFoundException, which the page publishes, rather
+// than an empty list.
 func (p *TransferPlugin) listUsers(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		MaxResults *int   `json:"MaxResults"`

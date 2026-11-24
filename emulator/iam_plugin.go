@@ -1478,9 +1478,9 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse("ValidationError", "PolicyArn is required", http.StatusBadRequest), nil
 	}
 	// Shape, not existence — see iam_policy_arn.go (#499). DeletePolicy publishes InvalidInput
-	// and arnType's 20–2048 length, and the handler used to pass any non-empty string straight
-	// to iamPolicyKey, so a bare policy name became a state key that could never match and the
-	// caller was told the policy did not exist (#853). Before authorize, as the three attach
+	// and arnType's 20–2048 length; without the check a bare policy name would become a state key
+	// that can never match, and the caller would be told the policy does not exist (#853).
+	// Before authorize, as the three attach
 	// operations do it: a malformed ARN is not a request an authorization decision can be made
 	// about.
 	if message, ok := iamValidatePolicyARN(params.PolicyArn); !ok {
@@ -1556,7 +1556,7 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	// AWS's other stated precondition: "Delete all versions of the policy using
 	// DeletePolicyVersion … You cannot use DeletePolicyVersion to delete the version that is
 	// marked as the default version. You delete the policy's default version in the next step of
-	// the process" (API_DeletePolicy). A policy can hold more than one version since #1560, so the
+	// the process" (API_DeletePolicy). A policy can hold more than one version (#1560), so the
 	// precondition is enforced, as DeleteConflict — the code the page publishes for a delete
 	// refused while something subordinate remains. The message is substrate's own.
 	var policy IAMPolicy
@@ -1813,15 +1813,14 @@ func (p *IAMPlugin) authzResource(reqCtx *RequestContext, req *AWSRequest) authz
 // rather than through the resource (#747).
 //
 // extra may be nil, which is the case for all but two of the plugin's 57 gates: an IAM
-// operation with no service-specific request key of its own publishes only the caller's keys,
-// as before. The two that pass one are CreateServiceLinkedRole and DeleteServiceLinkedRole,
+// operation with no service-specific request key of its own publishes only the caller's keys.
+// The two that pass one are CreateServiceLinkedRole and DeleteServiceLinkedRole,
 // which publish `iam:AWSServiceName`.
 //
-// resource comes from [IAMPlugin.authzResource] at every gate, which is the whole of #770: it
-// used to be a literal `"*"` at 48 of them, so a statement naming a user, a role or a path
-// matched nothing here even when the generic gate's answer would have been the same. Passing
-// the request to one resolver rather than a string per call site is what keeps the two doors
-// from drifting again — and it carries the resource's tags, so the same is true of a
+// resource comes from [IAMPlugin.authzResource] at every gate (#770): a literal `"*"` would make a
+// statement naming a user, a role or a path match nothing here even when the generic gate's answer
+// is the same. Passing the request to one resolver rather than a string per call site is what keeps
+// the two doors from drifting — and it carries the resource's tags, so the same is true of a
 // condition on `aws:ResourceTag/<key>` (#804).
 func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 	action string, resource authzResource, extra map[string]string) error {
@@ -2044,10 +2043,9 @@ func (p *IAMPlugin) listRolePolicies(ctx *RequestContext, req *AWSRequest) (*AWS
 // type: Put*Policy, Get*Policy, Delete*Policy and List*Policies all differ only in
 // that word, as does the entity-name element in a Get response.
 //
-// The four inline handlers previously each carried a two-arm branch defaulting to
-// role, so an unrecognized entity type read a role's state and reported a role's
-// operation name. One helper means a type is either known here or produces an
-// empty name, which every caller already refuses with ValidationError.
+// One helper for the four inline handlers means a type is either known here or
+// produces an empty name, which every caller refuses with ValidationError, rather
+// than an unrecognized type defaulting to role and reading a role's state.
 func iamInlineEntity(entityType, userName, roleName, groupName string) (entityName, actionSuffix string) {
 	switch entityType {
 	case "role":
@@ -2357,7 +2355,7 @@ func (p *IAMPlugin) putPermissionsBoundary(ctx *RequestContext, req *AWSRequest,
 	}
 
 	// PolicyName is still stored, because ListAttachedRolePolicies renders one and AWS's
-	// AttachedPolicy shape has the member. It no longer reaches the wire from a boundary:
+	// AttachedPolicy shape has the member. It does not reach the wire from a boundary:
 	// AttachedPermissionsBoundary has no PolicyName at all (#852).
 	boundary := &IAMAttachedPolicy{
 		PolicyARN:  params.PermissionsBoundary,
@@ -2898,9 +2896,8 @@ func (p *IAMPlugin) saveStringList(goCtx context.Context, key string, list []str
 //
 // A failure is reported through iamParamMessage, so a bad scalar names its
 // parameter — "MaxItems must be an integer, got \"abc\"". Every handler surfaces
-// this as a ValidationError, and before #642 the message a caller got for a
-// perfectly valid `MaxItems=1` was an encoding/json internal about a Go struct
-// field.
+// this as a ValidationError, so a caller never sees an encoding/json internal
+// about a Go struct field (#642).
 func parseIAMBody(body []byte, dst any) error {
 	if len(body) == 0 {
 		return nil
@@ -2930,9 +2927,9 @@ func paginateIAMKeys(keys []string, marker string, maxItems int) (page []string,
 		}
 	}
 
-	// Only an unsent MaxItems reaches this now: every handler refuses an out-of-range
+	// Only an unsent MaxItems reaches this: every handler refuses an out-of-range
 	// value before calling in (#868, [iamValidateMaxItems]), so this is the documented
-	// default and no longer a silent rewrite of what the caller asked for. The bounds stay
+	// default, not a silent rewrite of what the caller asked for. The bounds stay
 	// as a backstop rather than being deleted, so a paginated operation added without the
 	// handler guard truncates to a documented page size instead of slicing on a negative.
 	if maxItems <= 0 || maxItems > iamMaxItemsMax {
@@ -3042,12 +3039,10 @@ func arnPolicyName(arn string) string {
 
 // --- Instance profile operations ---
 //
-// All six of these called no authorization gate at all before #770 — the generic
-// [AuthController] gate upstream was the only thing deciding them. That was worth fixing
-// alongside the resource resolution rather than after it: AddRoleToInstanceProfile is the
-// classic privilege-escalation step (attach a more privileged role to a profile an instance
-// already carries), and "both doors agree" cannot be asserted for `instance-profile` while one
-// of the doors is not there.
+// All six call the plugin's own authorization gate as well as the generic [AuthController]
+// gate upstream (#770): AddRoleToInstanceProfile is the classic privilege-escalation step
+// (attach a more privileged role to a profile an instance already carries), and "both doors
+// agree" cannot be asserted for `instance-profile` unless both doors are there.
 
 func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var params struct {
@@ -3206,8 +3201,7 @@ func (p *IAMPlugin) addRoleToInstanceProfile(ctx *RequestContext, req *AWSReques
 
 	// The resource is the profile, not the role, because that is what AWS publishes for this
 	// action — see [iamAuthzOperationResource]. A policy that means to stop a caller escalating
-	// through an instance profile has to name the profile, and until #770 there was nothing on
-	// this path to name it to.
+	// through an instance profile has to name the profile (#770).
 	if err := p.authorize(goCtx, ctx, "iam:AddRoleToInstanceProfile", p.authzResource(ctx, req)); err != nil {
 		return iamErrorResponse(iamAccessDeniedCode, err.Error(), http.StatusForbidden), nil
 	}

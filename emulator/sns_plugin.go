@@ -96,8 +96,8 @@ func (p *SNSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 // The prefixes live in sns_tags.go beside the taggability guard that tests them, so the guard cannot
 // fall out of step with the keys actually written.
 //
-// Every key is account- and Region-qualified, and after #925 the account and Region a topic key
-// carries come from the ARN rather than from the caller. That is what makes isolation emergent: an
+// Every key is account- and Region-qualified, and the account and Region a topic key carries come
+// from the ARN rather than from the caller (#925). That is what makes isolation emergent: an
 // ARN naming another account builds a key nothing is stored at.
 
 func snsTopicStateKey(accountID, region, name string) string {
@@ -140,15 +140,15 @@ func (p *SNSPlugin) loadTopic(ctx context.Context, accountID, region, name strin
 //
 // One helper for six operations, on the #961/#969 precedent: those issues each found one operation
 // refusing nothing that its siblings refused, which is what a per-handler existence check invites.
-// Before #926, Subscribe, Publish, PublishBatch and ListSubscriptionsByTopic read only the
-// subscription index, so an absent topic was indistinguishable from a real topic with no subscribers
-// and all four answered 200 — GetTopicAttributes and SetTopicAttributes were the two that checked, and
-// they are routed through here so the six cannot drift apart again.
+// Subscribe, Publish, PublishBatch and ListSubscriptionsByTopic would otherwise read only the
+// subscription index, where an absent topic is indistinguishable from a real topic with no
+// subscribers; they, GetTopicAttributes and SetTopicAttributes are all routed through here so the
+// six cannot drift apart (#926).
 //
 // The load is keyed by the ARN's own account and Region, never the caller's, which is the rule #925
 // made structural: [snsParseTopicARN] takes no *RequestContext, so a cross-account or cross-Region ARN
 // builds a state key nothing is stored at and the topic reads as absent. That is also why Subscribe
-// and Publish now refuse a topic in another Region rather than serving a same-named local one, which
+// and Publish refuse a topic in another Region rather than serving a same-named local one, which
 // API_Publish independently requires: "You can publish messages only to topics and endpoints in the
 // same AWS Region."
 //
@@ -366,8 +366,8 @@ func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 
-	// The record and its index entry are removed from the account and Region the ARN names, which
-	// after #925 is where the load found it. Keying the delete by the caller instead removed an entry
+	// The record and its index entry are removed from the account and Region the ARN names, which is
+	// where the load found it (#925). Keying the delete by the caller instead would remove an entry
 	// from their own index while leaving the record the load had just read in place. Both are skipped
 	// when the load found nothing, so the idempotent path writes no state at all rather than rewriting
 	// the owning Region's index to itself.
@@ -401,14 +401,12 @@ func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 
-	// The stored attributes go in first and the derived ones over the top, which is the reverse of the
-	// order this handler used before #993. setTopicAttributes used to write any AttributeName a caller
-	// sent into this map unchecked, so merging it last let a stored TopicArn shadow the real one — and
-	// would have let a stored SubscriptionsConfirmed shadow the derived count, making the emulator report
-	// a subscription count of the caller's choosing. A derived member is a fact about the topic, so it
-	// wins. Since #1067 setTopicAttributes refuses all four derived names, so this ordering is defense in
-	// depth rather than the only guard — but it is still the only guard for a value that reached the map
-	// another way, which is why it stays and why its test now seeds state directly.
+	// The stored attributes go in first and the derived ones over the top (#993). Merging the stored
+	// ones last would let a stored TopicArn shadow the real one, or a stored SubscriptionsConfirmed
+	// shadow the derived count and report a subscription count of the caller's choosing. A derived
+	// member is a fact about the topic, so it wins. setTopicAttributes refuses all four derived names
+	// (#1067), so this ordering is defense in depth — but it is the only guard for a value that reached
+	// the map another way, which is why its test seeds state directly.
 	attrs := make(map[string]string, len(t.Attributes)+len(snsDerivedTopicAttributeNames))
 	for k, v := range t.Attributes {
 		attrs[k] = v
@@ -448,8 +446,8 @@ func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 
 // setTopicAttributes stores one of the twenty-five attribute names API_SetTopicAttributes publishes.
 //
-// Until #1067 it stored whatever name arrived, so `AttributeName=Banana` was written into the topic
-// record and GetTopicAttributes reported it back as though SNS carried it. The allowlist is
+// A name outside the list is refused, so `AttributeName=Banana` is never written into the topic
+// record for GetTopicAttributes to report back as though SNS carried it (#1067). The allowlist is
 // [snsSettableTopicAttributeNames] and the argument for an allowlist over a denylist of the derived
 // names is written there; the short version is that the Set and Get pages publish 25 and 17 names with
 // only 9 in common, so no subtraction of one from the other describes what a caller may set.
@@ -569,10 +567,10 @@ func (p *SNSPlugin) subscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, &AWSError{Code: "InvalidParameter", Message: "TopicArn and Protocol are required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// The topic has to exist before anything is written. Subscribe is the one of the four #926
-	// operations that *writes*, so a missing check left a subscription record and two index entries
-	// under a topic that was never created — reported by ListSubscriptions ever after, and delivered to
-	// if a topic of that name was later created.
+	// The topic has to exist before anything is written (#926). Subscribe *writes*, so without the
+	// check it would leave a subscription record and two index entries under a topic that was never
+	// created — reported by ListSubscriptions ever after, and delivered to if a topic of that name were
+	// later created.
 	goCtx := context.Background()
 	_, target, err := p.requireTopic(goCtx, topicARN)
 	if err != nil {
@@ -810,11 +808,8 @@ func (p *SNSPlugin) buildSubscriptionListResponse(
 // getSubscriptionAttributes reports a subscription's stored attributes together with the members
 // substrate derives from its record.
 //
-// Until #1125 it answered a fixed four entries built from the record — SubscriptionArn, TopicArn,
-// Protocol, Endpoint — so nothing a caller set could ever be read back, whatever it was. The pairing
-// with setSubscriptionAttributes was the defect: one operation discarded every attribute and the other
-// could not have reported one. Both halves are in [SNSPlugin.subscriptionAttributes] now, which is what
-// makes a set followed by a get a round trip rather than two independent answers.
+// Both it and setSubscriptionAttributes go through [SNSPlugin.subscriptionAttributes], which is what
+// makes a set followed by a get a round trip rather than two independent answers (#1125).
 //
 // The entries are sorted by key before marshaling, matching getTopicAttributes: Go's map iteration
 // order is randomized, and an unordered response body would make a recorded run replay differently from
@@ -854,12 +849,10 @@ func (p *SNSPlugin) getSubscriptionAttributes(ctx *RequestContext, req *AWSReque
 // setSubscriptionAttributes stores one of the six attributes API_SetSubscriptionAttributes publishes,
 // refusing a name it does not publish and an ARN that names no subscription.
 //
-// It was a literal stub until #1125: it read SubscriptionArn into `_`, read neither AttributeName nor
-// AttributeValue, touched no state and answered 200. So a subscription that did not exist was a
-// success, a malformed ARN was a success, an attribute name AWS publishes nowhere was a success, and
-// the value was unreadable because getSubscriptionAttributes answered a fixed four entries. A consumer
-// testing "set a FilterPolicy, then confirm the subscription reports it" got a green 200 and a response
-// with the member absent — a silent wrong answer rather than a refusal.
+// An absent subscription, a malformed ARN and an attribute name AWS publishes nowhere are each
+// refused, and the value is stored where getSubscriptionAttributes reads it, so a consumer testing
+// "set a FilterPolicy, then confirm the subscription reports it" gets either the member or a refusal,
+// never a silent 200 (#1125).
 //
 // The order is AttributeName, then the ARN, then the record: the name check is a fact about the request
 // and is decided before any state is read, which is the ordering setTopicAttributes takes and what
@@ -1322,6 +1315,6 @@ func snsXMLResponse(status int, v interface{}) (*AWSResponse, error) {
 
 // --- Utility ---
 
-// The topic name no longer comes from a string scan. [snsParseTopicARN] in sns_tags.go is the one
-// producer, and it takes no *RequestContext, so the account and Region come from the ARN at every one
-// of the ten operations that used to take them from the caller (#925).
+// The topic name comes from [snsParseTopicARN] in sns_tags.go, the one producer, and it takes no
+// *RequestContext, so the account and Region come from the ARN at every one of the ten operations
+// that name a topic (#925).

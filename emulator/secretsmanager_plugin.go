@@ -17,8 +17,7 @@ import (
 // PutResourcePolicy, GetResourcePolicy, DeleteResourcePolicy and ValidateResourcePolicy.
 //
 // It deliberately does not handle ListTagsForResource, which the Secrets Manager API does not publish
-// among its twenty-three operations; substrate answered one until #929. Tags are read through
-// DescribeSecret.
+// among its twenty-three operations (#929). Tags are read through DescribeSecret.
 type SecretsManagerPlugin struct {
 	state  StateManager
 	logger Logger
@@ -68,10 +67,10 @@ func (p *SecretsManagerPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.tagResource(ctx, req)
 	case "UntagResource":
 		return p.untagResource(ctx, req)
-	// No ListTagsForResource arm: the Secrets Manager API does not publish that operation, and
-	// substrate answered it until #929. A secret's tags are read through DescribeSecret's Tags member,
-	// which is the read path #928's tagging row asserts through. The name now falls to
-	// unknownActionError like any other operation AWS does not have, which is what a caller reaching
+	// No ListTagsForResource arm: the Secrets Manager API does not publish that operation (#929). A
+	// secret's tags are read through DescribeSecret's Tags member, which is the read path #928's
+	// tagging row asserts through. The name falls to unknownActionError like any other operation AWS
+	// does not have, which is what a caller reaching
 	// for it against real AWS gets.
 	case "RotateSecret":
 		return p.rotateSecret(ctx, req)
@@ -192,7 +191,7 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 			}
 		}
 		// 400, as API_CreateSecret's Errors list publishes ResourceExistsException ("A resource with the
-		// ID you requested already exists"). It answered 409 until #1376.
+		// ID you requested already exists") (#1376).
 		return nil, &AWSError{
 			Code:       "ResourceExistsException",
 			Message:    fmt.Sprintf("A resource with the ID %q already exists", input.Name),
@@ -393,9 +392,8 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 	}
 	// API_PutSecretValue's InvalidRequestException lists "The secret is scheduled for deletion." first
 	// among its three possible causes. The refusal sits ahead of both writes below, so a scheduled secret
-	// keeps the version payload and the CurrentVersionID it had — substrate used to attach a new version
-	// to a secret inside its recovery window and move the current pointer onto it, so a RestoreSecret
-	// afterwards handed back a value AWS would have refused to store (#956).
+	// keeps the version payload and the CurrentVersionID it had, and a RestoreSecret afterwards cannot
+	// hand back a value AWS would have refused to store (#956).
 	if !secret.DeletionDate.IsZero() {
 		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
 	}
@@ -496,13 +494,13 @@ func (p *SecretsManagerPlugin) describeSecret(ctx *RequestContext, req *AWSReque
 // AWS's "never been configured for rotation" and true is exactly "configured". A false value would
 // therefore be a claim AWS does not make, which is why it is emitted as null.
 //
-// DeletedDate is the one member of the omitted tier substrate does answer, since #953: it is emitted
+// DeletedDate is the one member of the omitted tier substrate does answer (#953): it is emitted
 // exactly when a recovery window is open, which is the observation that distinguishes a secret
 // scheduled for deletion from a live one, and it is omitted otherwise — the omission AWS documents.
 // Note the asymmetry in AWS's own naming, which substrate follows rather than tidies: DeleteSecret
 // answers the stamp as DeletionDate and DescribeSecret reports the same stamp as DeletedDate.
 //
-// RotationLambdaARN and RotationRules are answered since #952, and they fall in different tiers, which
+// RotationLambdaARN and RotationRules are answered (#952), and they fall in different tiers, which
 // is why they are emitted by different conditions. RotationRules is one of the four members AWS itself
 // documents an omission for — "if the secret never had rotation turned on, this field is omitted" — so
 // its absence is AWS's own contract and [SecretState.RotationRules] is a pointer to keep a
@@ -549,8 +547,8 @@ func smDescribeSecretBody(secret *SecretState) map[string]interface{} {
 		out["RotationRules"] = secret.RotationRules
 	}
 	// This is the operation a caller reads a secret's tags back through, Secrets Manager publishing no
-	// ListTagsForResource at all (#929). An untagged secret emitted "Tags": null before #928, which is
-	// not a member AWS sends and not the null AWS documents for the three rotation members.
+	// ListTagsForResource at all (#929). An untagged secret omits Tags: "Tags": null is not a member AWS
+	// sends and not the null AWS documents for the three rotation members (#928).
 	if len(secret.Tags) > 0 {
 		out["Tags"] = secret.Tags
 	}

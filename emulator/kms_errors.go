@@ -13,34 +13,33 @@ package emulator
 // and the code is the whole signal — the shape #933 recorded for Systems Manager, arrived at from
 // the other direction.
 //
-// Three codes were wrong before #923, each in a different way:
+// Three codes need a specific reading (#923):
 //
-//   - NotFoundException answered HTTP 404 at fifteen sites. Every one of the fifteen belongs to an
-//     operation whose own reference page gives it 400: "The request was rejected because the
-//     specified entity or resource could not be found. HTTP Status Code: 400". That is the status
-//     kms_tags.go's own refusals already used, so the two halves of the package disagreed.
+//   - NotFoundException is 400 at every site. Every operation that answers it gives it 400 on its
+//     own reference page: "The request was rejected because the specified entity or resource could
+//     not be found. HTTP Status Code: 400". kms_tags.go's refusals answer the same status.
 //
-//   - DisabledException answered HTTP 409 at three sites. API_Encrypt, API_Decrypt and
-//     API_GenerateDataKey each publish it at 400: "The request was rejected because the specified
-//     KMS key is not enabled".
+//   - DisabledException is 400. API_Encrypt, API_Decrypt and API_GenerateDataKey each publish it at
+//     400: "The request was rejected because the specified KMS key is not enabled".
 //
-//   - InvalidRequest was answered at twenty-one sites for an unparseable request body, and the
-//     string appears nowhere in KMS's documentation — not on an operation page, not on
-//     CommonErrors.html. A caller matching on it matched something no SDK models. The replacement
-//     is ValidationError, published on CommonErrors.html at 400: "The input doesn't meet the
-//     required format or constraints. Check that all required parameters are included and that
-//     values are valid." Being a common error, it applies to every operation, which the
-//     twenty-one sites need and TagException does not give: TagException is also 400 but is
-//     glossed "one or more tags are not valid", which is the content of a Tags member, and
-//     eighteen of the twenty-one operations take no tags at all.
+//   - An unparseable request body answers ValidationError, not InvalidRequest: the latter string
+//     appears nowhere in KMS's documentation — not on an operation page, not on CommonErrors.html —
+//     so a caller matching on it would match something no SDK models. ValidationError is published
+//     on CommonErrors.html at 400: "The input doesn't meet the required format or constraints.
+//     Check that all required parameters are included and that values are valid." Being a common
+//     error, it applies to every operation, which the twenty-one parse sites need and TagException
+//     does not give: TagException is also 400 but is glossed "one or more tags are not valid",
+//     which is the content of a Tags member, and eighteen of the twenty-one operations take no
+//     tags at all.
 //
 // Three codes deliberately not reached for, recorded because each is a plausible guess that would
-// repeat the defect above. MalformedHttpRequestException is on CommonErrors.html at 400 but its
-// published scope is the transport layer — "This typically happens when the request body can't be
-// decompressed using the specified content encoding algorithm" — and a body that decompressed and
-// then failed to parse is not that. SerializationException and ValidationException appear nowhere
-// in KMS's documentation at all; KMS spells it ValidationError with no "Exception" suffix, unlike
-// most JSON-protocol services, so a caller matching ValidationException would match nothing.
+// answer a code KMS does not publish for this case. MalformedHttpRequestException is on
+// CommonErrors.html at 400 but its published scope is the transport layer — "This typically happens
+// when the request body can't be decompressed using the specified content encoding algorithm" — and
+// a body that decompressed and then failed to parse is not that. SerializationException and
+// ValidationException appear nowhere in KMS's documentation at all; KMS spells it ValidationError
+// with no "Exception" suffix, unlike most JSON-protocol services, so a caller matching
+// ValidationException would match nothing.
 //
 // Messages are substrate's throughout. AWS publishes codes and statuses, not message text.
 
@@ -69,10 +68,8 @@ func kmsNotFound(detail string) *AWSError {
 // The code is DisabledException at 400, published identically on API_Encrypt, API_Decrypt,
 // API_GenerateDataKey, API_GenerateDataKeyWithoutPlaintext, API_ReEncrypt, API_EnableKeyRotation and
 // API_DisableKeyRotation — the seven operations substrate refuses this way, every one of which gives a
-// Disabled key footnote [1] in the developer guide's key-state table. The rotation pair was added by
-// #949; before it they wrote RotationEnabled against a disabled key and answered 200, which #923
-// recorded as a missing refusal rather than a wrong status. GenerateDataKeyWithoutPlaintext and
-// ReEncrypt were added by #961, which found they refused a disabled key nowhere at all.
+// Disabled key footnote [1] in the developer guide's key-state table (#949 for the rotation pair, #961
+// for GenerateDataKeyWithoutPlaintext and ReEncrypt).
 //
 // Every caller reaches this through [kmsKeyStateError], which is what rules out PendingDeletion first —
 // the key-state table gives that state a different code, and ScheduleKeyDeletion clears Enabled as it
@@ -100,10 +97,9 @@ func kmsKeyDisabled(keyID string) *AWSError {
 // answering DisabledException for both would collapse two different remedies into one. The state is
 // named in the message for the same reason.
 //
-// For the five cryptographic operations #961 brought here the same table cell reads "[2] or [3]", and
-// footnote [2] is that same sentence under **DisabledException** — so AWS admits either code there and
-// the DisabledException substrate answered before #961 was not outside what the table publishes.
-// Choosing this one anyway is substrate's reading, argued in [kmsKeyStateError]: it is the only
+// For the five cryptographic operations (#961) the same table cell reads "[2] or [3]", and footnote
+// [2] is that same sentence under **DisabledException** — so AWS admits either code there. Choosing
+// this one is substrate's reading, argued in [kmsKeyStateError]: it is the only
 // choice under which one key state produces one code across the plugin, and the only one a caller can
 // branch on to tell the two remedies apart.
 //
@@ -462,7 +458,7 @@ func kmsUnsupportedKeyOrigin(origin string) *AWSError {
 // anywhere: each presupposes a modeled store.
 //
 // The ID is quoted because a caller reading its own value back is how they confirm the parameter reached
-// substrate at all, which is precisely what was in doubt before #984.
+// substrate at all (#984).
 func kmsUnsupportedCustomKeyStore(customKeyStoreID string) *AWSError {
 	return &AWSError{
 		Code: "UnsupportedOperationException",
@@ -480,12 +476,11 @@ func kmsUnsupportedCustomKeyStore(customKeyStoreID string) *AWSError {
 // Decrypt request and the SourceKeyId in a ReEncrypt request must identify the same KMS key that was
 // used to encrypt the ciphertext."
 //
-// It is the one refusal in #969's set that AWS attaches a code to, which is why that issue put it
-// first: the two algorithm members add a rendered value, while this adds an outcome a caller's error
-// path can be tested against. Both operations describe the member as a constraint rather than a
-// selector — "if you identify a different KMS key, the operation throws an IncorrectKeyException" —
-// and substrate decoded neither, so a caller that named the wrong key was silently given the right
-// one, which is the opposite of what the member exists for.
+// It is the one refusal in #969's set that AWS attaches a code to: the two algorithm members add a
+// rendered value, while this adds an outcome a caller's error path can be tested against. Both
+// operations describe the member as a constraint rather than a selector — "if you identify a different
+// KMS key, the operation throws an IncorrectKeyException" — so a caller that names the wrong key must
+// be refused rather than silently given the right one.
 //
 // Both key ARNs are named because the whole content of the refusal is that two identifiers differ, and
 // a caller holding a ciphertext it did not create has no other way to learn which key it needs.
@@ -590,16 +585,16 @@ func kmsUnknownEncryptionAlgorithm(member, algorithm string) *AWSError {
 // The code is published rather than substrate's reading, and the mapping is exact.
 //
 // The first bullet — "the KeyUsage value of the KMS key is incompatible with the API operation" — is
-// [kmsInvalidKeyUsageForOperation], added by #977. The two are one error code with two causes, so a caller
+// [kmsInvalidKeyUsageForOperation] (#977). The two are one error code with two causes, so a caller
 // matching on the code alone cannot tell them apart; the message names the key spec, which is the half this
 // one is about, where the other names the key usage.
 //
 // The key spec and the admissible set are both in the message because the refusal is otherwise
 // unactionable: a caller that sent SYMMETRIC_DEFAULT to an RSA key needs to be told the key is RSA.
 //
-// The empty set — "no encryption algorithm" — is now unreachable, and the branch is kept rather than
-// removed. It was the answer for a key whose spec admits no encryption at all, an ECC key say, and #977
-// made that key unreachable twice over: CreateKey will not pair such a spec with ENCRYPT_DECRYPT, and
+// The empty set — "no encryption algorithm" — is unreachable, and the branch is kept rather than
+// removed. It is the answer for a key whose spec admits no encryption at all, an ECC key say, and that
+// key is unreachable twice over (#977): CreateKey will not pair such a spec with ENCRYPT_DECRYPT, and
 // [kmsKeyUsageError] runs ahead of this check at all five call sites, so such a key is refused for its
 // usage before its algorithm is considered. That ordering is deliberate — see [kmsKeyUsageError] for why
 // one condition producing one message was worth choosing — and the branch stays because it is a claim
@@ -630,9 +625,9 @@ func kmsIncompatibleEncryptionAlgorithm(key *KMSKey, member, algorithm string) *
 //
 // [kmsIncompatibleEncryptionAlgorithm] is the second bullet, and the two sharing one code is AWS's design
 // rather than a collision: a caller cannot distinguish them by code, which is why one message leads with
-// the key usage and the other with the key spec. #969 shipped the second and this is the first, and they
-// are genuinely independent — RSA_2048 admits RSAES_OAEP_SHA_256 whatever the key's usage is, so an Encrypt
-// against an RSA signing key satisfied every check substrate had before #977.
+// the key usage and the other with the key spec. They are genuinely independent — RSA_2048 admits
+// RSAES_OAEP_SHA_256 whatever the key's usage is, so an Encrypt against an RSA signing key passes the
+// algorithm check and is refused only here (#969, #977).
 //
 // The usage is named and the required one spelled out, because the remedy is not to retry: KeyUsage cannot
 // be changed after creation — "you can't change the KeyUsage value after the KMS key is created" — so the
@@ -739,9 +734,9 @@ func kmsAliasNameTooLong(length int) *AWSError {
 // kmsAliasAlreadyExists reports that CreateAlias named an alias the account and Region already hold.
 //
 // AlreadyExistsException at 400 — "the request was rejected because it attempted to create a resource
-// that already exists" — published on API_CreateAlias alone among the alias operations, which is the
-// shape of the fix: the same name arriving twice is a refusal at CreateAlias and an idempotent-looking
-// re-point at UpdateAlias, and substrate answered 200 for both. The published rule it rests on is "the
+// that already exists" — published on API_CreateAlias alone among the alias operations: the same name
+// arriving twice is a refusal at CreateAlias and an idempotent-looking re-point at UpdateAlias. The
+// published rule it rests on is "the
 // alias must be unique in the account and Region, but you can have aliases with the same name in
 // different Regions", so the account and Region are part of the condition rather than of the message
 // (#1085).
@@ -816,8 +811,7 @@ func kmsInvalidMarker() *AWSError {
 // API_ListKeys: "If you include a value, it must be between 1 and 1000, inclusive. If you do not
 // include a value, it defaults to 100." API_ListAliases: "If you include a value, it must be between
 // 1 and 100, inclusive. If you do not include a value, it defaults to 50." The maximum differs and so
-// does the default, which is how one shared 100 came to serve both and gave ListAliases a default
-// twice the published one: sixty aliases were one page from substrate and two from KMS.
+// does the default: sixty aliases are two pages from KMS, and one shared 100 would make them one.
 var (
 	kmsListKeysLimit    = pageSizeRange{member: "Limit", min: 1, max: 1000, def: 100}
 	kmsListAliasesLimit = pageSizeRange{member: "Limit", min: 1, max: 100, def: 50}

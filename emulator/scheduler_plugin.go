@@ -142,8 +142,8 @@ type schedulerScheduleInput struct {
 
 // schedulerTargetInput is the `Target` object as AWS publishes it.
 //
-// DeadLetterConfig, SqsParameters and EventBridgeParameters are decoded and reported since #1501,
-// because a due schedule acts on them. The other templated-target objects (EcsParameters,
+// DeadLetterConfig, SqsParameters and EventBridgeParameters are decoded and reported, because a
+// due schedule acts on them (#1501). The other templated-target objects (EcsParameters,
 // EventBridgePutEventsV2Parameters, EventBridgePutRawEventsParameters, KinesisParameters,
 // SageMakerPipelineParameters) belong to targets substrate records rather than dispatches, so they
 // are not decoded and not reported — #1013's honest-empty rule rather than a silent round trip.
@@ -543,8 +543,8 @@ func (p *SchedulerPlugin) createSchedule(ctx *RequestContext, req *AWSRequest) (
 }
 
 func (p *SchedulerPlugin) getSchedule(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// Reachable since #1009: "/schedules/" routes here rather than to ListSchedules, so a caller who
-	// built the path from an empty variable reads the refusal `Name`'s Required: Yes implies.
+	// Reachable: "/schedules/" routes here rather than to ListSchedules, so a caller who built the
+	// path from an empty variable reads the refusal `Name`'s Required: Yes implies (#1009).
 	name := schedNameFromPath(req.Path)
 	if awsErr := schedulerValidateName("name", name); awsErr != nil {
 		return nil, awsErr
@@ -585,8 +585,8 @@ func (p *SchedulerPlugin) updateSchedule(ctx *RequestContext, req *AWSRequest) (
 	}
 	// `API_UpdateSchedule` publishes the same three Required: Yes members as the create, so the same
 	// validator serves both and an update that names only the expression is refused (#1008). The
-	// page's full-replace statement for the *optional* members is settled too, since #1089: applyTo
-	// below assigns every one of them, so an omitted member reverts rather than persisting.
+	// page's full-replace statement for the *optional* members holds too (#1089): applyTo below
+	// assigns every one of them, so an omitted member reverts rather than persisting.
 	if awsErr := schedulerValidateScheduleInput(name, &body); awsErr != nil {
 		return nil, awsErr
 	}
@@ -634,7 +634,7 @@ func (p *SchedulerPlugin) updateSchedule(ctx *RequestContext, req *AWSRequest) (
 }
 
 func (p *SchedulerPlugin) deleteSchedule(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// Reachable since #1009, as in getSchedule: a DELETE naming no schedule is refused rather than
+	// Reachable, as in getSchedule (#1009): a DELETE naming no schedule is refused rather than
 	// answering the success of a delete that removed nothing.
 	name := schedNameFromPath(req.Path)
 	if awsErr := schedulerValidateName("name", name); awsErr != nil {
@@ -651,8 +651,8 @@ func (p *SchedulerPlugin) deleteSchedule(ctx *RequestContext, req *AWSRequest) (
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	goCtx := context.Background()
-	// `API_DeleteSchedule` publishes ResourceNotFoundException/404; a delete of a schedule that
-	// does not exist answered 200 until #1501.
+	// `API_DeleteSchedule` publishes ResourceNotFoundException/404 for a delete of a schedule that
+	// does not exist (#1501).
 	existing, err := p.state.Get(goCtx, schedulerNamespace, schedKey(ctx.AccountID, ctx.Region, groupName, name))
 	if err != nil {
 		return nil, fmt.Errorf("scheduler deleteSchedule state.Get: %w", err)
@@ -673,8 +673,7 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 	//
 	// GroupName is a filter: "If specified, only lists the schedules whose associated schedule group
 	// matches the given filter." Absent, every group's schedules are listed, ordered by group and
-	// then by name; until #1501 an absent group read the default group alone. A group that does not
-	// exist matches nothing, so it lists nothing.
+	// then by name (#1501). A group that does not exist matches nothing, so it lists nothing.
 	groupName := req.Params[schedListGroupKey]
 	namePrefix := req.Params[schedListNamePrefixKey]
 	stateFilter := req.Params[schedListStateKey]
@@ -792,11 +791,11 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 // returned by GetSchedule. CreationDate and LastModificationDate are Unix epoch
 // seconds (float64) as required by the AWS SDK.
 //
-// `ClientToken` was rendered here until #1089 and is not one of `API_GetSchedule`'s fifteen published
-// response elements — it is a request-only idempotency token, published on the create and the update
-// and on no read. It came off the wire with the full-replace fix rather than on its own, because an
-// omitted member now reverts instead of persisting: leaving it would have made an unpublished field
-// start changing under callers who never named it. The record keeps it as recorded intent.
+// `ClientToken` is not rendered: it is not one of `API_GetSchedule`'s fifteen published response
+// elements, but a request-only idempotency token, published on the create and the update and on no
+// read. Because an omitted member reverts instead of persisting, rendering it would make an
+// unpublished field change under callers who never named it (#1089). The record keeps it as
+// recorded intent.
 type schedWireRecord struct {
 	Arn                        string                      `json:"Arn"`
 	Name                       string                      `json:"Name"`

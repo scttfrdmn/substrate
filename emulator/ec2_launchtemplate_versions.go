@@ -17,10 +17,8 @@ import (
 //
 // A launch template is versioned: CreateLaunchTemplate produces version 1, each
 // CreateLaunchTemplateVersion appends one, and a launch names either a number or
-// one of the two aliases. Before this, substrate stored a single
-// EC2LaunchTemplateData and registered neither CreateLaunchTemplateVersion nor
-// ModifyLaunchTemplate, so a consumer that shipped a second version launched the
-// first one's parameters with no error anywhere — the silent-wrong-answer shape.
+// one of the two aliases. Every version is stored, so a consumer that ships a second
+// version launches its parameters rather than the first one's.
 //
 // DescribeLaunchTemplateVersions is also the only operation that returns a
 // template's data at all: DescribeLaunchTemplates' response carries just createTime,
@@ -92,8 +90,8 @@ func ec2LaunchTemplateVersionNotFound(ltID, version string) *AWSError {
 //
 // Both codes are EC2's published ones — the error table describes the first as "The specified
 // launch template ID does not exist" and the second as "The specified launch template name does
-// not exist". Until #1469 every caller answered the ID code, so a request that named its template
-// by name, which is how most IaC names one, was refused with a code about an ID it never sent.
+// not exist". A request that names its template by name, which is how most IaC names one, is
+// refused with the name code rather than a code about an ID it never sent (#1469).
 // When a request names both, the ID is what [ec2LookupLaunchTemplate] resolves by, so the ID
 // is what is reported.
 //
@@ -197,9 +195,9 @@ func ec2LaunchTemplateNameMalformed() *AWSError {
 // ([ec2LaunchTemplateNotFound]) are always about the same identifier (#1507).
 //
 // It is asked only about an identifier that resolved to nothing. A template already in state is
-// acted on whatever its identifier looks like: one stored under a name the rule now refuses —
-// created before CreateLaunchTemplate enforced it, or written by a recorded event log that
-// replays — must stay reachable, or the rule would lock it out and make the older recording
+// acted on whatever its identifier looks like: one stored under a name the rule refuses —
+// created by an older build, or written by a recorded event log that replays — must stay
+// reachable, or the rule would lock it out and make the older recording
 // fail on replay. A new name is held to the rule where it is introduced, at CreateLaunchTemplate.
 // For every identifier AWS itself could have issued, checking shape only after the lookup
 // misses gives the same answer as checking it first.
@@ -252,8 +250,7 @@ type ec2LTVersionItem struct {
 //
 // Both operations document the member and neither documents an error for an invalid
 // launch template, so a template carrying a mapping RunInstances refuses is *created*
-// and warned about rather than refused — see [ec2CollectBlockDeviceMappings]. Substrate
-// swallowed those mappings silently until #693.
+// and warned about rather than refused — see [ec2CollectBlockDeviceMappings] (#693).
 //
 // It is always rendered through a pointer field, never a value: encoding/xml ignores
 // omitempty on a struct, so a value field would emit an empty `<warning></warning>` on
@@ -343,9 +340,8 @@ func ec2Items[T any](items []T) *ec2ItemSet[T] {
 
 // ec2LTVersionBDMXML is one LaunchTemplateBlockDeviceMapping within a version's data.
 //
-// A template's mappings were stored and unreadable until #693: parsing them landed in
-// v0.104.0 and this member did not, so a caller could not read back the mapping a
-// `warning` is about — nor see what a SourceVersion-derived version inherited.
+// It is what lets a caller read back the mapping a `warning` is about, and see what a
+// SourceVersion-derived version inherited (#693).
 //
 // noDevice is a string on the wire, not a bool: AWS documents it as "To omit the device
 // from the block device mapping, specify an empty string", so its presence is the signal
@@ -437,10 +433,8 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 	}
 	out.BlockDeviceMappings = ec2Items(ec2LTVersionBDMs(d.BlockDeviceMappings))
 	// The two stored scopes read back, instance then volume; see
-	// [EC2LaunchTemplateData.TagSpecifications]. The volume scope has been stored since #670
-	// and was not rendered until #1471, so a template tagging its volumes read back as though
-	// it did not. The other scopes the request shape allows are not stored, so they cannot
-	// read back.
+	// [EC2LaunchTemplateData.TagSpecifications] (#670, #1471). The other scopes the request
+	// shape allows are not stored, so they cannot read back.
 	var specs []ec2LTVersionTagSpecXML
 	for _, scope := range []struct {
 		resourceType string
@@ -701,10 +695,9 @@ func ec2OverlayTemplateData(src, overlay EC2LaunchTemplateData) EC2LaunchTemplat
 	if overlay.DisableAPITermination != "" {
 		out.DisableAPITermination = overlay.DisableAPITermination
 	}
-	// The interface list was not overlaid before #1471, so a version naming its own
-	// interfaces inherited the source's list — the one every read and launch prefers — and
-	// only the flat primary fields above changed. The list and the primary's flat fields
-	// are one parameter and are replaced together.
+	// A version naming its own interfaces replaces the source's list — the one every read and
+	// launch prefers — as well as the flat primary fields (#1471). The list and the primary's
+	// flat fields are one parameter and are replaced together.
 	if len(overlay.NetworkInterfaces) > 0 {
 		out.NetworkInterfaces = overlay.NetworkInterfaces
 		out.SubnetID = overlay.SubnetID
@@ -749,8 +742,8 @@ func (p *EC2Plugin) modifyLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 
 // describeLaunchTemplateVersions handles the DescribeLaunchTemplateVersions action.
 //
-// Filter.N was accepted and ignored before #695; four of AWS's fourteen names are evaluated
-// now, per [ec2LaunchTemplateVersionFilterSpec]. The filter names are checked before anything
+// Four of AWS's fourteen Filter.N names are evaluated, per [ec2LaunchTemplateVersionFilterSpec]
+// (#695). The filter names are checked before anything
 // is resolved, so an undocumented name is refused rather than answered after a NotFound for
 // the template — the ordering #687 established and [TestEC2_FilterNames_UndocumentedNameRefusedBeforeTheScan]
 // pins.
@@ -771,10 +764,10 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 	}
 	// Naming no MaxResults pages at the published maximum rather than answering the whole
 	// listing, which is DescribeTags' default too and is kept for the same reason (#917): this
-	// page publishes no unpaginated default, and paging at 200 is the behavior the operation
-	// shipped with. Its sibling DescribeLaunchTemplates reads an absent MaxResults as the whole
-	// listing instead (#1024) — the two pages share a published range and not a default, because
-	// neither publishes one and each keeps what it shipped with.
+	// page publishes no unpaginated default, and paging at 200 is what existing callers see.
+	// Its sibling DescribeLaunchTemplates reads an absent MaxResults as the whole listing
+	// instead (#1024) — the two pages share a published range and not a default, because
+	// neither publishes one.
 	if maxResults == 0 {
 		maxResults = ec2MaxLaunchTemplateResults
 	}
@@ -822,9 +815,9 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 	// the request sets ResolveAlias, which the reference documents as "If true, and if a
 	// Systems Manager parameter is specified for ImageId, the AMI ID is displayed in the
 	// Pagination is offset-based over a stable ordering, matching the other EC2
-	// describes: the token is the index to resume at. Since #917 the offset is read before the
-	// templates are resolved, so a token that is not one is refused whether or not the request
-	// also names a template that does not exist.
+	// describes: the token is the index to resume at. The offset is read before the
+	// templates are resolved (#917), so a token that is not one is refused whether or not
+	// the request also names a template that does not exist.
 	page, nextToken := ec2Page(items, offset, maxResults)
 
 	// A version's ImageId reads back as stored — a resolve:ssm: reference stays one — unless

@@ -319,10 +319,10 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 	// The body stays optional — CreateKey has no required parameter, and an empty request creates the
 	// symmetric encryption key the operation's first guidance section describes — but a body that is present
-	// and unparseable is now refused rather than discarded. It was discarded until #977, which is what made
-	// it worth changing: with the two members validated below, silently zeroing them on a parse error would
-	// answer 200 with a symmetric key for `{"KeySpec": 4096}`, defeating the validation one line later. The
-	// code is [kmsInvalidBody]'s, the same one the plugin's other twenty-one parse sites answer.
+	// and unparseable is refused rather than discarded (#977): with the two members validated below,
+	// silently zeroing them on a parse error would answer 200 with a symmetric key for
+	// `{"KeySpec": 4096}`, defeating the validation one line later. The code is [kmsInvalidBody]'s, the same
+	// one the plugin's other twenty-one parse sites answer.
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, kmsInvalidBody()
@@ -413,8 +413,8 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	}
 
 	// The same builder DescribeKey uses, because AWS answers the same shape from both — see
-	// kms_key_metadata.go's preamble. Before #974 this was a nine-member map of its own and DescribeKey's
-	// was a ten-member one, so the two operations already disagreed about DeletionDate.
+	// kms_key_metadata.go's preamble. One builder is what keeps the two operations from disagreeing
+	// about a member such as DeletionDate (#974).
 	out := map[string]interface{}{"KeyMetadata": kmsKeyMetadata(key)}
 	return kmsJSONResponse(http.StatusOK, out)
 }
@@ -444,9 +444,9 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 	// RotationEnabled is deliberately absent, and its absence is the point of #971. API_KeyMetadata
 	// publishes 26 members and RotationEnabled is not one of them — the string does not appear on the page
-	// at all. Substrate rendered it here until #971, which meant a caller could read rotation state off
-	// DescribeKey against the emulator and get nothing back from AWS: a green test for code that cannot
-	// work, which is #765's failure mode aimed at a response member.
+	// at all. Rendering it would let a caller read rotation state off DescribeKey against the emulator
+	// and get nothing back from AWS: a green test for code that cannot work, which is #765's failure mode
+	// aimed at a response member.
 	//
 	// Rotation state is observable through GetKeyRotationStatus alone. That is why AWS has a separate
 	// operation for a single boolean, and why API_EnableKeyRotation points a caller at
@@ -454,12 +454,11 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	// caller a route to rotation state that bypasses the rules the real one carries, such as the
 	// pending-deletion answer in #973.
 	//
-	// The other sixteen published members were missing from this map until #974, five of which AWS sends
-	// for every key substrate can create — AWSAccountId, KeyManager, Origin, EncryptionAlgorithms and the
-	// deprecated CustomerMasterKeySpec. That was the same shape failing to match the same page in the
-	// other direction. The builder they moved into is shared with CreateKey, which is what keeps the two
-	// operations from disagreeing about one shape again; kms_key_metadata.go records which members stay
-	// absent and what would have to exist for each to be reachable.
+	// The other published members come from [kmsKeyMetadata], five of which AWS sends for every key
+	// substrate can create — AWSAccountId, KeyManager, Origin, EncryptionAlgorithms and the deprecated
+	// CustomerMasterKeySpec (#974). The builder is shared with CreateKey, which keeps the two operations
+	// answering one shape; kms_key_metadata.go records which members stay absent and what would have to
+	// exist for each to be reachable.
 	out := map[string]interface{}{"KeyMetadata": kmsKeyMetadata(key)}
 	return kmsJSONResponse(http.StatusOK, out)
 }
@@ -544,11 +543,10 @@ func (p *KMSPlugin) disableKey(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 // setKeyState is the shared body of EnableKey and DisableKey, and the one refusal it makes is #968's.
 //
 // A key in PendingDeletion is refused with KMSInvalidStateException, footnote [3] of the developer
-// guide's key-state table, which both operations' identical rows carry. Before #968 neither checked
-// anything, so EnableKey against a pending key answered 200 and wrote Enabled — a one-call path from
-// pending deletion to usable, which AWS does not have and which routes around the two-call recovery
-// #963 established from API_CancelKeyDeletion's own first sentence. It also abandoned the deletion
-// silently, because the clearing this function used to do left no record that one had been scheduled.
+// guide's key-state table, which both operations' identical rows carry. Without it EnableKey against a
+// pending key would answer 200 and write Enabled — a one-call path from pending deletion to usable,
+// which AWS does not have and which routes around the two-call recovery #963 established from
+// API_CancelKeyDeletion's own first sentence.
 //
 // The guard lives in the shared helper rather than in each handler because both callers refuse the
 // same single state, and #963's counter-example is what makes that worth stating: CancelKeyDeletion
@@ -583,12 +581,10 @@ func (p *KMSPlugin) setKeyState(ctx *RequestContext, keyIDParam, state string, e
 	}
 	key.KeyState = state
 	key.Enabled = enabled
-	// No deletion date is cleared here any more, and nothing is lost by that. This function used to
-	// clear one, on the reasoning that a key reported Enabled must not still remember when it is due to
-	// be deleted; with the refusal above, the only state that carries a date cannot reach this line, and
-	// CancelKeyDeletion clears it on the one exit AWS documents. Clearing it anyway would be code no
-	// request can run, which this package records in a comment rather than guards — the disposition the
-	// four unreachable states above already have.
+	// No deletion date is cleared here. With the refusal above, the only state that carries a date
+	// cannot reach this line, and CancelKeyDeletion clears it on the one exit AWS documents. Clearing it
+	// anyway would be code no request can run, which this package records in a comment rather than
+	// guards — the disposition the four unreachable states above already have.
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms setKeyState saveKey: %w", err)
 	}
@@ -597,22 +593,21 @@ func (p *KMSPlugin) setKeyState(ctx *RequestContext, keyIDParam, state string, e
 
 // scheduleKeyDeletion schedules a key for deletion after a waiting period.
 //
-// The three things #963 changed here, in the order the handler does them:
+// Three rules (#963), in the order the handler applies them:
 //
 // The waiting period is checked against the published 7-30 range before the key is resolved. AWS does
 // not publish which of a bad window and an absent key it reports first, so the precedence is
 // substrate's reading: a value that is wrong on the face of the request is refused without a lookup,
-// which is how kmsInvalidBody already behaves one line above. Before #963 the guard was
-// "if days <= 0 { days = 30 }", which got the default right and the range not at all — 1, 365 and -5
-// were all accepted and the last silently became 30.
+// which is how kmsInvalidBody already behaves one line above. An absent value takes the default of
+// 30, and 1, 365 and -5 are each refused.
 //
 // A key already in PendingDeletion is refused rather than re-stamped. Its row in the developer
 // guide's key-state table is footnote [3] and the page carries the compatible-key-state sentence, so
-// the previous behavior — recomputing the deletion date and saving it — silently moved a deadline the
-// caller believed it had set. Updating, the table's other refused state, is unreachable: nothing in
+// recomputing the deletion date and saving it would silently move a deadline the caller believed it
+// had set. Updating, the table's other refused state, is unreachable: nothing in
 // substrate writes it.
 //
-// The response gained PendingWindowInDays and its KeyId became the key ARN, both of which
+// The response carries PendingWindowInDays and the key ARN as KeyId, both of which
 // API_ScheduleKeyDeletion publishes and its own sample response carries.
 func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
@@ -670,23 +665,21 @@ func (p *KMSPlugin) scheduleKeyDeletion(ctx *RequestContext, req *AWSRequest) (*
 
 // cancelKeyDeletion cancels a scheduled deletion, leaving the key disabled.
 //
-// It no longer delegates to setKeyState, which is what made all three of #963's defects here one
-// change: that helper writes whatever state it is handed, answers an empty body, and checks nothing.
-// All three are wrong for this operation.
+// It does not delegate to setKeyState (#963): that helper writes whatever state it is handed, answers
+// an empty body, and refuses the one state this operation requires. All three are wrong here.
 //
 // The resulting state is Disabled, not Enabled. API_CancelKeyDeletion's first sentence is explicit —
 // "when this operation succeeds, the key state of the KMS key is Disabled. To enable the KMS key, use
-// EnableKey" — so recovery from a scheduled deletion is two calls. Answering Enabled collapsed it to
-// one, and a consumer's recovery path written against substrate would have passed with its EnableKey
-// step missing.
+// EnableKey" — so recovery from a scheduled deletion is two calls. Answering Enabled would collapse it
+// to one, and a consumer's recovery path written against substrate would pass with its EnableKey step
+// missing.
 //
 // A key that is not pending deletion is refused. CancelKeyDeletion is the only operation in the
 // key-state table whose permitted set is a single state, every other row being footnote [4]. Without
-// the check the operation enabled any key it was pointed at, which is EnableKey under another name and
-// reachable by a caller authorized for one and not the other.
+// the check the operation would enable any key it was pointed at, which is EnableKey under another name
+// and reachable by a caller authorized for one and not the other.
 //
-// The body is the key ARN under KeyId, the single response element the page publishes, where
-// setKeyState answered {} and a consumer reading response["KeyId"] got nothing.
+// The body is the key ARN under KeyId, the single response element the page publishes.
 func (p *KMSPlugin) cancelKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		KeyID string `json:"KeyId"`
@@ -721,19 +714,17 @@ func (p *KMSPlugin) cancelKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AW
 // getKeyPolicy answers the key policy attached to a key, which for a key that has never been given one
 // is the document AWS attaches by default.
 //
-// Until #983 the fallback was `{"Version":"2012-10-17","Statement":[]}` — a document that grants
-// nothing, where AWS's default grants the key's own account full control of it. That is not a neutral
-// placeholder: a key policy is the only place a KMS key's own permissions live, so the stand-in said
-// the opposite of what AWS says. [kmsDefaultKeyPolicy] carries the document and its source.
+// AWS's default grants the key's own account full control of it. An empty statement list is not a
+// neutral placeholder: a key policy is the only place a KMS key's own permissions live, so a document
+// granting nothing would say the opposite of what AWS says (#983). [kmsDefaultKeyPolicy] carries the
+// document and its source.
 //
-// The key is now loaded, so a KeyId naming no key answers the NotFoundException both this operation and
-// PutKeyPolicy publish; before #983 neither checked, which `kms_error_status_test.go` recorded as a gap
-// rather than a status. The key state is deliberately not checked — the developer guide's key-state
+// The key is loaded, so a KeyId naming no key answers the NotFoundException both this operation and
+// PutKeyPolicy publish (#983). The key state is deliberately not checked — the developer guide's key-state
 // table gives this operation a checkmark in all seven columns; see kms_key_policy.go's preamble.
 //
-// PolicyName is answered from the request after validation rather than hardcoded, which is the same
-// value as before for every request that is not refused, since `default` is the only name that reaches
-// the response.
+// PolicyName is answered from the request after validation rather than hardcoded; `default` is the only
+// name that reaches the response.
 func (p *KMSPlugin) getKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		KeyID      string `json:"KeyId"`
@@ -894,9 +885,7 @@ func (p *KMSPlugin) getKeyRotationStatus(ctx *RequestContext, req *AWSRequest) (
 	// must not. Reading whether rotation is on is permitted in every state substrate can produce, and
 	// API_GetKeyRotationStatus does not publish DisabledException at all.
 	//
-	// It *does* publish KMSInvalidStateException, which an earlier version of this comment denied; the
-	// claim was wrong and is corrected here rather than left standing, since it was the stated reason for
-	// not guarding. The decision it was defending survives the correction, on better grounds: the page
+	// It *does* publish KMSInvalidStateException, and the reason not to guard is that the page
 	// spells out what a pending-deletion key answers, and it is a value rather than a refusal — "While a
 	// KMS key is pending deletion, its key rotation status is false and AWS KMS does not rotate the key
 	// material." An operation that documents an answer for a state cannot also be refusing that state, so
@@ -1273,10 +1262,10 @@ func (p *KMSPlugin) listResourceTags(ctx *RequestContext, req *AWSRequest) (*AWS
 
 // createAlias points a new alias at a key, refusing what API_CreateAlias publishes a code for.
 //
-// The `alias/` prepend this used to do is gone: the page publishes `Pattern: ^alias/[a-zA-Z0-9/_-]+$` and
-// the sentence "this value must begin with alias/", so a name without the prefix is a request AWS refuses
-// and substrate accepted by rewriting it. kms_alias_validate.go holds the rules and records why
-// `deleteAlias` keeps its prepend (#1085).
+// No `alias/` is prepended: the page publishes `Pattern: ^alias/[a-zA-Z0-9/_-]+$` and the sentence
+// "this value must begin with alias/", so a name without the prefix is a request AWS refuses, and
+// rewriting it would accept one. kms_alias_validate.go holds the rules and records why `deleteAlias`
+// keeps its prepend (#1085).
 //
 // The order of the four checks is the order a caller can act on: the name is wrong before anything is
 // looked up, then the target must name a key, then that key's state must permit it, then the name must be
@@ -1298,10 +1287,10 @@ func (p *KMSPlugin) createAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, err
 	}
-	// "A valid KMS key is required. You can't create an alias without a KMS key." Nothing loaded the
-	// record before, so an alias could point at a key ID that was never created — and an empty
-	// TargetKeyId, which the page refuses in its own sentence, reaches here as a key ID naming nothing
-	// and is answered by this same check rather than by a special case.
+	// "A valid KMS key is required. You can't create an alias without a KMS key." The record is loaded,
+	// so an alias cannot point at a key ID that was never created — and an empty TargetKeyId, which the
+	// page refuses in its own sentence, reaches here as a key ID naming nothing and is answered by this
+	// same check rather than by a special case.
 	if _, stateErr := p.requireAliasTargetKey(goCtx, ctx, keyID, input.TargetKeyID); stateErr != nil {
 		return nil, stateErr
 	}
@@ -1410,11 +1399,10 @@ func (p *KMSPlugin) deleteAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 // updateAlias re-points an existing alias, refusing what API_UpdateAlias publishes a code for.
 //
-// This verified nothing before #1085 — the four gaps and the published sentence behind each are set out in
-// kms_alias_validate.go. The first of them is the one that made the operation do a different operation's
-// job: the page's opening sentence is "Associates an **existing** AWS KMS alias with a different KMS key",
-// and a blind Put creates the alias when it is absent, so UpdateAlias silently did CreateAlias's work
-// without CreateAlias's name rules.
+// The four checks and the published sentence behind each are set out in kms_alias_validate.go (#1085).
+// The first keeps the operation from doing a different operation's job: the page's opening sentence is
+// "Associates an **existing** AWS KMS alias with a different KMS key", and a blind Put would create the
+// alias when it is absent, doing CreateAlias's work without CreateAlias's name rules.
 //
 // The alias is looked up before the target, so a caller holding one wrong member learns about the alias
 // first — and because no alias that fails CreateAlias's published pattern can exist, that lookup is also
@@ -1449,8 +1437,8 @@ func (p *KMSPlugin) updateAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, err
 	}
-	// A pointer to a key with no record can only come from a substrate that wrote one before #1085 closed
-	// the two paths that produced them. The type match is skipped rather than failed there, because the
+	// A pointer to a key with no record can only be one an older build wrote (#1085), which closed the
+	// two paths that produced them. The type match is skipped rather than failed there, because the
 	// restriction is a comparison and there is nothing to compare — and refusing would leave a caller no
 	// way to repair a dangling alias through the operation whose purpose is to re-point it.
 	if current != nil {
@@ -1602,14 +1590,14 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	// Ahead of both checks below, added by #977. [kmsKeyUsageError] argues the ordering: a key usage is
+	// Ahead of both checks below (#977). [kmsKeyUsageError] argues the ordering: a key usage is
 	// permanent where a key state has a remedy, and putting it before the algorithm check is what makes one
 	// condition — this is not an encryption key — produce one message whatever the key's spec is.
 	if usageErr := kmsKeyUsageError(key); usageErr != nil {
 		return nil, usageErr
 	}
 	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
-	// different codes, and until #961 both answered DisabledException.
+	// different codes, and only one of them is DisabledException (#961).
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
@@ -1661,12 +1649,12 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 // DryRunModifiers is set to IGNORE_CIPHERTEXT". Substrate requires it always, which is correct for
 // every request it can answer.
 //
-// EncryptionContext, added by #979, is the one member here that can *refuse*. AWS requires "the same (an
-// exact case-sensitive match) encryption context" that encrypted the data, and until #979 substrate
-// decoded none, so an application that encrypted under a tenant context and decrypted without one passed
-// here and failed in production. [kmsCheckCiphertextMatchesRequest] holds both that check and the
-// algorithm's, and runs last of the five: a caller is told about the key it named, that key's usage, that
-// key's state and whether its spec admits the algorithm at all before being told that this particular
+// EncryptionContext is the one member here that can *refuse* (#979). AWS requires "the same (an
+// exact case-sensitive match) encryption context" that encrypted the data, so an application that
+// encrypted under a tenant context and decrypts without one must fail here as it fails in
+// production. [kmsCheckCiphertextMatchesRequest] holds both that check and the algorithm's, and
+// runs last of the five: a caller is told about the key it named, that key's usage, that key's
+// state and whether its spec admits the algorithm at all before being told that this particular
 // ciphertext disagrees with the request.
 //
 // KeyMaterialId is reported, and it is read from the key rather than from the ciphertext — which is what
@@ -1723,7 +1711,7 @@ func (p *KMSPlugin) decrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, usageErr
 	}
 	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
-	// different codes, and until #961 both answered DisabledException.
+	// different codes, and only one of them is DisabledException (#961).
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
@@ -1826,13 +1814,13 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if key == nil {
 		return nil, kmsNotFound("Key not found")
 	}
-	// Ahead of the key-state check, added by #977 — [kmsKeyUsageError] argues why the permanent property is
+	// Ahead of the key-state check (#977) — [kmsKeyUsageError] argues why the permanent property is
 	// answered before the transient one. This operation takes no EncryptionAlgorithm, so unlike Encrypt and
 	// Decrypt it is the only refusal that tells a caller its signing key cannot wrap a data key.
 	if usageErr := kmsKeyUsageError(key); usageErr != nil {
 		return nil, usageErr
 	}
-	// Then the key spec, added by #988, which the usage check above does not cover: an RSA_2048 key with
+	// Then the key spec (#988), which the usage check above does not cover: an RSA_2048 key with
 	// KeyUsage ENCRYPT_DECRYPT satisfies it and still cannot wrap a data key. [kmsDataKeyKeySpecError]
 	// argues both sides of the position — after the usage, before the state — and is shared with
 	// GenerateDataKeyWithoutPlaintext so the two operations cannot diverge.
@@ -1840,7 +1828,7 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, specErr
 	}
 	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
-	// different codes, and until #961 both answered DisabledException.
+	// different codes, and only one of them is DisabledException (#961).
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
@@ -1855,12 +1843,11 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 		"Plaintext":      plaintextB64,
 		"CiphertextBlob": string(ciphertext),
 	}
-	// KeyMaterialId, added by #978. This page states no key-type condition on the member — it bounds it
-	// only by the unmodeled Recipient parameter — because the operation already requires a symmetric
-	// encryption key. Substrate applies the condition anyway, and since #988 the two readings agree at this
-	// site: [kmsDataKeyKeySpecError] above refuses every key the condition would have omitted it for, so
-	// the member is now always present here and [kmsReportsKeyMaterialID] is a guard rather than the
-	// workaround it was.
+	// KeyMaterialId (#978). This page states no key-type condition on the member — it bounds it only by
+	// the unmodeled Recipient parameter — because the operation already requires a symmetric encryption
+	// key. Substrate applies the condition anyway, and the two readings agree at this site:
+	// [kmsDataKeyKeySpecError] above refuses every key the condition would omit it for (#988), so the
+	// member is always present here and [kmsReportsKeyMaterialID] is a guard.
 	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
 	return kmsJSONResponse(http.StatusOK, out)
 }
@@ -1904,13 +1891,12 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 	// #988. This page carries the restriction in stronger terms than GenerateDataKey's, naming the custom
 	// key store as well: "you cannot use an asymmetric KMS key or a key in a custom key store to generate a
 	// data key." Both halves land in [kmsDataKeyKeySpecError], where the store half is recorded as
-	// unreachable since #984 rather than left unguarded.
+	// unreachable rather than left unguarded (#984).
 	if specErr := kmsDataKeyKeySpecError(key); specErr != nil {
 		return nil, specErr
 	}
-	// Added by #961, where the other four cryptographic operations only had the wrong code for one of
-	// two states: this one refused *nothing*, so a disabled key and a key pending deletion both minted a
-	// data key and answered 200. Its row in the key-state table is identical to Encrypt's.
+	// A disabled key and a key pending deletion mint no data key: this operation's row in the key-state
+	// table is identical to Encrypt's (#961).
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
 		return nil, stateErr
 	}
@@ -1922,11 +1908,11 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 		"KeyId":          key.ARN,
 		"CiphertextBlob": string(ciphertext),
 	}
-	// KeyMaterialId, added by #978. Its gloss here is the shortest of the five — "the identifier of the
-	// key material used to encrypt the data key", with no condition at all — because this operation takes
-	// no Recipient parameter and so has not even that caveat. Held to the same condition as the other
-	// four for the reason [kmsReportsKeyMaterialID] gives, and since #988 that condition is satisfied by
-	// every key reaching this line, exactly as at its sibling.
+	// KeyMaterialId (#978). Its gloss here is the shortest of the five — "the identifier of the key
+	// material used to encrypt the data key", with no condition at all — because this operation takes no
+	// Recipient parameter and so has not even that caveat. Held to the same condition as the other four
+	// for the reason [kmsReportsKeyMaterialID] gives, and that condition is satisfied by every key reaching
+	// this line, exactly as at its sibling (#988).
 	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
 	return kmsJSONResponse(http.StatusOK, out)
 }
@@ -1959,9 +1945,9 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 // account and a Region alongside the key ID, which #979's envelope does not add (see [kmsStubEnvelope] —
 // it records what a refusal needs, not what a lookup needs).
 //
-// #969 added the three members this operation was missing that substrate can derive: SourceKeyId's
-// *request* form, which had gone undecoded so that the IncorrectKeyException AWS publishes was
-// unreachable, and both algorithm members, on the request and echoed on the response. AWS splits the
+// Three members are decoded because substrate can derive them (#969): SourceKeyId's *request* form,
+// without which the IncorrectKeyException AWS publishes would be unreachable, and both algorithm
+// members, on the request and echoed on the response. AWS splits the
 // algorithm across the two ends deliberately — a ReEncrypt exists to move data between keys, so the
 // source and destination algorithms are independent — and each is checked against its own key.
 //
@@ -2082,9 +2068,8 @@ func (p *KMSPlugin) reEncrypt(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	// *changes* a context: re-encrypting with no DestinationEncryptionContext strips one.
 	newCiphertext := kmsEncryptStub(destKey, destAlgorithm, input.DestinationEncryptionContext, envelope.Plaintext)
 	// SourceKeyId is the source key's ARN, matching the sample response on API_ReEncrypt and the
-	// element's own gloss, "unique identifier of the KMS key used to originally encrypt the data". It
-	// held input.CiphertextBlob until #961 — a value that is not an identifier of anything, and one a
-	// caller round-tripping it into a DescribeKey could only ever get NotFoundException from.
+	// element's own gloss, "unique identifier of the KMS key used to originally encrypt the data", so a
+	// caller can round-trip it into a DescribeKey (#961).
 	out := map[string]interface{}{
 		"KeyId":                          destKey.ARN,
 		"CiphertextBlob":                 string(newCiphertext),

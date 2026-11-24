@@ -16,11 +16,10 @@ import (
 //
 // The listener and rule types are the ones AWS's ARNs carry —
 // `listener/app/<lb>/<lb-id>/<listener-id>` and
-// `listener-rule/app/<lb>/<lb-id>/<listener-id>/<rule-id>` — and since #774 that is also the
-// shape [elbListenerARN] and [elbRuleARN] mint, so authorization and resolution read one spelling
-// rather than two. Substrate nested the child under the load balancer's own ARN before that;
-// [elbResourceKindFromARN] still recognizes the nested form, because recorded state and exported
-// fixtures written by an earlier version carry it.
+// `listener-rule/app/<lb>/<lb-id>/<listener-id>/<rule-id>` — and that is also the shape
+// [elbListenerARN] and [elbRuleARN] mint, so authorization and resolution read one spelling rather
+// than two (#774). [elbResourceKindFromARN] also recognizes the form nested under the load
+// balancer's own ARN, because recorded state and exported fixtures written by older builds carry it.
 const (
 	elbKindLoadBalancer = "loadbalancer"
 	elbKindTargetGroup  = "targetgroup"
@@ -50,9 +49,8 @@ const (
 // reserved-prefix rule of its own, and the restrictions list is written for the service rather
 // than for one generation, so the exclusion is applied to both rather than to ELBv2 alone.
 //
-// Substrate held only the 50 until #1148, and #844's Tier 1a made that reachable: a classic load
-// balancer became a record, and the Resource Groups Tagging API tags one. So `TagResources` on a
-// classic ARN accepted an 11th tag, and a 50th, where AWS refuses the 11th.
+// The classic cap matters because a classic load balancer is a record the Resource Groups Tagging
+// API tags (#844): `TagResources` on a classic ARN refuses the 11th tag, as AWS does (#1148).
 const (
 	elbMaxTagsPerResource        = 50
 	elbClassicMaxTagsPerResource = 10
@@ -255,14 +253,11 @@ func elbNotFoundError(kind, arn string) *AWSError {
 // (`authzref/elasticloadbalancing.json`) publishes a classic load balancer as
 // `…:loadbalancer/${LoadBalancerName}` — one segment — and an ELBv2 one as
 // `…:loadbalancer/app/${LoadBalancerName}/${LoadBalancerId}` — three. A `strings.Contains(arn,
-// ":loadbalancer/")` test, which is what this did before #863, matches both, so a classic ARN was
-// classified as an ELBv2 load balancer and scanned against the `lb:` prefix where only ELBv2
-// records live. When #863 made this change nothing wrote a classic record, so the substring test
-// resolved to nothing rather than to the wrong record — but it answered `LoadBalancerNotFound`,
-// which tells a caller a load balancer of that ARN could exist. #844 now writes classic records,
-// under [elbClassicLBKeyPrefix] rather than `lb:` precisely so that the collision the substring test
-// was one writer away from cannot happen: a classic `web` and an ELBv2 `web` are two resources and
-// they live under two keys. This is [elbChildARN]'s `wantSegments` check applied to the read side.
+// ":loadbalancer/")` test matches both, so it would classify a classic ARN as an ELBv2 load balancer
+// and scan it against the `lb:` prefix where only ELBv2 records live (#863). Classic records live
+// under [elbClassicLBKeyPrefix] rather than `lb:` for the same reason (#844): a classic `web` and an
+// ELBv2 `web` are two resources and they live under two keys. This is [elbChildARN]'s
+// `wantSegments` check applied to the read side.
 //
 // # This classifier stays ELBv2-only, and that is caller-scoped rather than incidental
 //
@@ -287,12 +282,12 @@ func elbNotFoundError(kind, arn string) *AWSError {
 //
 // # Both nested and flat, and why the order is the arity
 //
-// The nested shapes substrate minted before #774 —
+// The nested shapes older builds minted —
 // `…:loadbalancer/app/<name>/<id>/listener/<suffix>` and that plus `/rule/<suffix>` — carry the
 // `loadbalancer` resource type and five and seven segments respectively, so counting segments
 // separates them from an ELBv2 load balancer's three without needing an ordered chain of
-// `strings.Contains` tests to run first. The flat `…:listener/…` and `…:listener-rule/…` that #774
-// mints are AWS's own and are matched on the resource type with their own arity.
+// `strings.Contains` tests to run first. The flat `…:listener/…` and `…:listener-rule/…` substrate
+// mints are AWS's own and are matched on the resource type with their own arity (#774).
 //
 // Keeping the nested form resolvable is deliberate: an event log recorded by an earlier version,
 // or a fixture exported from one, holds listener and rule ARNs of that shape, and a replay whose
@@ -313,9 +308,9 @@ func elbResourceKindFromARN(arn string) string {
 		switch segments {
 		case 3: // app/<name>/<id> — an ELBv2 load balancer. A classic one has 1 and is refused.
 			return elbKindLoadBalancer
-		case 5: // …/<id>/listener/<suffix> — the pre-#774 nested listener.
+		case 5: // …/<id>/listener/<suffix> — the nested listener older builds minted (#774).
 			return elbKindListener
-		case 7: // …/listener/<suffix>/rule/<suffix> — the pre-#774 nested rule.
+		case 7: // …/listener/<suffix>/rule/<suffix> — the nested rule older builds minted.
 			return elbKindRule
 		}
 	case elbKindTargetGroup:

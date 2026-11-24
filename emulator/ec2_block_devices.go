@@ -11,11 +11,11 @@ import (
 
 // Root device names. Substrate recognizes a mapping as configuring the root volume
 // by device name rather than by comparing it against the AMI's own root device.
-// [EC2Image.RootDeviceName] records one as of #750 — RegisterImage stores what the
+// [EC2Image.RootDeviceName] records one (#750) — RegisterImage stores what the
 // caller sent and a bundled descriptor names its publisher's convention — but the
-// launch path still accepts either spelling, because an AMI minted by CreateImage or
-// registered before #750 has none to compare against and refusing those launches
-// would be a regression a caller cannot act on.
+// launch path accepts either spelling, because an AMI minted by CreateImage or
+// registered by an older build has none to compare against and refusing those launches
+// would be a refusal a caller cannot act on.
 //
 // Both spellings are AWS's own. Its device naming reference gives the HVM root
 // device as "Differs by AMI — /dev/sda1 or /dev/xvda" and the paravirtual one as
@@ -33,11 +33,11 @@ const (
 // It matches the mapping DescribeImages fabricates for every AMI, so an AMI's reported
 // root size and the volume a launch from it produces agree.
 //
-// It no longer backs CreateVolume, which refuses a request naming neither Size nor
-// SnapshotId as of #712: AWS documents a default only on the launch path, where a mapping
+// It does not back CreateVolume, which refuses a request naming neither Size nor
+// SnapshotId (#712): AWS documents a default only on the launch path, where a mapping
 // that omits a size is legal, and never on the operation whose whole purpose is to be told
-// one. A launch-created volume and a CreateVolume-created one therefore no longer agree
-// about what "unspecified" means — because on CreateVolume it is not a request AWS accepts.
+// one. A launch-created volume and a CreateVolume-created one therefore disagree about
+// what "unspecified" means — because on CreateVolume it is not a request AWS accepts.
 const ec2DefaultVolumeSizeGiB = 8
 
 // ec2DefaultVolumeType is the type of a volume whose mapping names none.
@@ -57,11 +57,10 @@ const ec2DefaultVolumeType = "gp2"
 // two hand-rolled readers that can drift — the same argument
 // [ec2ParseNetworkInterfaces] takes, and for the same reason.
 //
-// Before #666 neither path parsed this at all. A request naming
-// BlockDeviceMapping.1.Ebs.VolumeSize=60 was accepted and the value discarded, so
-// DescribeVolumes reported nothing for the instance — and since AWS's
-// EbsInstanceBlockDevice carries no size member, DescribeVolumes is the *only* API
-// surface where a launch-specified volume size is observable at all.
+// A request naming BlockDeviceMapping.1.Ebs.VolumeSize=60 is reflected in
+// DescribeVolumes (#666) — and since AWS's EbsInstanceBlockDevice carries no size member,
+// DescribeVolumes is the *only* API surface where a launch-specified volume size is
+// observable at all.
 func ec2ParseBlockDeviceMappings(params map[string]string, prefix string) []EC2BlockDeviceMapping {
 	var out []EC2BlockDeviceMapping
 	for n := 1; ; n++ {
@@ -153,10 +152,8 @@ var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "
 // ec2CheckBlockDeviceMappings returns the error EC2 raises for a block device mapping
 // it will not accept, or nil.
 //
-// Through v0.104.0 substrate accepted every mapping it could parse and materialized a
-// volume from it, so a launch AWS refuses succeeded here — the same class of defect
-// #412 closed for an empty ImageId, and worse after #666, because the mapping now
-// produces state a consumer asserts against.
+// A launch AWS refuses must be refused here too, as an empty ImageId is (#412): a mapping
+// produces volume state a consumer asserts against (#666).
 //
 // # Scope
 //
@@ -170,13 +167,10 @@ var ec2VolumeTypesWithoutIOPS = map[string]bool{"standard": true, "st1": true, "
 //
 // # The snapshot rules
 //
-// Three of them. Two were added by #689 once a snapshot had a real size to compare
-// against: a SnapshotId that is malformed or names nothing is refused, and a VolumeSize
-// smaller than the named snapshot's is refused. v0.105.0 deferred the second for the
-// reason #689 removes — EC2Snapshot.VolumeSize was the literal 8 at its single producer,
-// so the comparison would have tested a constant rather than the caller's request. The
-// third, added by #732, refuses a snapshot that is not `completed`, which is the same
-// refusal CreateVolume already makes from the same rule.
+// Three of them. A SnapshotId that is malformed or names nothing is refused, and a
+// VolumeSize smaller than the named snapshot's is refused, which compares against the
+// snapshot's real recorded size (#689). The third refuses a snapshot that is not
+// `completed`, which is the same refusal CreateVolume makes from the same rule (#732).
 //
 // resolveSnapshot is how the first two reach state: a lookup rather than a
 // [StateManager], so this stays a pure function over its arguments and a unit test can
@@ -756,9 +750,8 @@ func (p *EC2Plugin) ec2DeleteInstanceVolumes(accountID, region, instanceID strin
 //
 // A `tag:<key>` filter with no values matches nothing. AWS documents no rule for
 // that shape — Using_Filtering says only that a filter value cannot be null, and
-// offers tag-key for the any-value question — so this is substrate's reading, and
-// since #686 it is the reading everywhere: describeImages used to treat the shape as
-// tag-key and no longer does.
+// offers tag-key for the any-value question — so this is substrate's reading, and it is
+// the reading every EC2 describe shares, describeImages included (#686).
 func ec2VolumeMatchesFilters(vol EC2Volume, filters map[string][]string) bool {
 	for name, values := range filters {
 		if !ec2VolumeMatchesFilter(vol, name, values) {

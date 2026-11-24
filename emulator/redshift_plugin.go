@@ -79,8 +79,8 @@ type redshiftEndpointXML struct {
 //
 // It carries no `XMLName`: the element name belongs to the field that holds the value, which is
 // `<Cluster>` for a single cluster and `<Clusters><Cluster>` for a list, both as API_CreateCluster and
-// API_DescribeClusters publish. Until #1208 the type forced `<member>`, so a single cluster rendered
-// `<Cluster><member>` and a list rendered `<Clusters><member>`, neither of which an SDK reads.
+// API_DescribeClusters publish. A forced `<member>` would render `<Cluster><member>` and
+// `<Clusters><member>`, neither of which an SDK reads (#1208).
 //
 // # The members it does not send (#1199)
 //
@@ -105,9 +105,8 @@ type redshiftEndpointXML struct {
 //     TotalStorageCapacityInMegaBytes, AvailabilityZoneRelocationStatus, LakehouseRegistrationStatus,
 //     AquaConfiguration and the three CustomDomain members.
 //   - **ClusterNamespaceArn**, which API_Cluster glosses as "the namespace Amazon Resource Name (ARN)
-//     of the cluster". Until #1199 substrate filled it with the cluster's own `:cluster:` ARN. A
-//     namespace ARN names a namespace by its UUID, which substrate does not mint, so the member is
-//     omitted rather than answered with an ARN of the wrong resource type.
+//     of the cluster". A namespace ARN names a namespace by its UUID, which substrate does not
+//     mint, so the member is omitted rather than answered with an ARN of the wrong resource type.
 type redshiftClusterXML struct {
 	ClusterIdentifier string              `xml:"ClusterIdentifier"`
 	ClusterStatus     string              `xml:"ClusterStatus"`
@@ -158,11 +157,10 @@ func clusterToXML(c RedshiftCluster) redshiftClusterXML {
 // createCluster handles CreateCluster.
 //
 // API_CreateCluster marks three members `Required: Yes` — ClusterIdentifier, MasterUsername and
-// NodeType — and until #1197 only the first was checked: an absent NodeType was defaulted to
-// dc2.large and an absent MasterUsername stored empty, so a template omitting either validated here
-// and failed against AWS. Each is now refused with `MissingParameter`/400, from Redshift's own Common
-// Errors page, in the order the page lists them. See [redshiftCheckCreateCluster] for the values each
-// checked member must also satisfy.
+// NodeType — and each is refused when absent rather than defaulted or stored empty, so a template
+// omitting one fails here as it fails against AWS (#1197). The code is `MissingParameter`/400, from
+// Redshift's own Common Errors page, in the order the page lists them. See
+// [redshiftCheckCreateCluster] for the values each checked member must also satisfy.
 func (p *RedshiftPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	if awsErr := redshiftCheckCreateCluster(req.Params); awsErr != nil {
 		return nil, awsErr
@@ -345,7 +343,7 @@ func (p *RedshiftPlugin) modifyCluster(reqCtx *RequestContext, req *AWSRequest) 
 }
 
 // deleteCluster handles DeleteCluster, reading the three final-snapshot parameters the page publishes
-// (see [parseRedshiftDelete]); until #1196 all three were discarded.
+// (see [parseRedshiftDelete], #1196).
 //
 // A requested final snapshot is written as a manual snapshot of the cluster, refused with the page's
 // ClusterSnapshotAlreadyExists when its identifier is taken. The response answers deleting, as
@@ -458,8 +456,8 @@ type redshiftCreateParamGroupResultXML struct {
 // createClusterParameterGroup handles CreateClusterParameterGroup.
 //
 // API_CreateClusterParameterGroup marks all three of its members `Required: Yes` —
-// ParameterGroupName, ParameterGroupFamily and Description — and until #1197 only the name was
-// checked, so a group was recorded with no family. Each absent one is `MissingParameter`/400.
+// ParameterGroupName, ParameterGroupFamily and Description — and each absent one is
+// `MissingParameter`/400, so no group is recorded without a family (#1197).
 //
 // The name's published constraints are enforced (1 to 255 alphanumeric characters or hyphens, a
 // letter first, no trailing hyphen and no two consecutive hyphens), and the name is stored lower-case,
@@ -525,11 +523,10 @@ func paramGroupToXML(pg RedshiftClusterParameterGroup) redshiftParamGroupData {
 
 // describeClusterParameterGroups handles DescribeClusterParameterGroups.
 //
-// Until #1195 it took `_ *AWSRequest`, so Marker, MaxRecords and ParameterGroupName were all unread:
-// every call answered every group in one page, and a request naming one group got the whole list.
-// It now pages as [RedshiftPlugin.describeClusters] does, and ParameterGroupName narrows to that group
-// or answers `ClusterParameterGroupNotFound`/404, the page's own code. The name is compared
-// lower-cased, as it is stored. TagKeys and TagValues are not applied, for the reason
+// It reads Marker, MaxRecords and ParameterGroupName (#1195): it pages as
+// [RedshiftPlugin.describeClusters] does, and ParameterGroupName narrows to that group or answers
+// `ClusterParameterGroupNotFound`/404, the page's own code. The name is compared lower-cased, as it
+// is stored. TagKeys and TagValues are not applied, for the reason
 // [RedshiftPlugin.describeClusters] gives. The page also says the listing includes "the default
 // parameter group"; substrate models none, so a listing holds only groups the caller created.
 func (p *RedshiftPlugin) describeClusterParameterGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -601,11 +598,10 @@ const redshiftMaxSubnetsPerRequest = 20
 // createClusterSubnetGroup handles CreateClusterSubnetGroup.
 //
 // API_CreateClusterSubnetGroup marks ClusterSubnetGroupName, Description and
-// `SubnetIds.SubnetIdentifier.N` `Required: Yes`. Until #1197 only the name was checked, and the
-// handler read `VpcId` off the request, which is a **response** member of ClusterSubnetGroup and never
-// a request parameter, while the subnets the page requires were not read at all. It now refuses each
-// absent member with `MissingParameter`/400, records the subnets, and answers them as `Subnets` with
-// `SubnetGroupStatus` Complete, as the page's sample does.
+// `SubnetIds.SubnetIdentifier.N` `Required: Yes` (#1197). `VpcId` is a **response** member of
+// ClusterSubnetGroup and never a request parameter, so it is not read off the request. The handler
+// refuses each absent member with `MissingParameter`/400, records the subnets, and answers them as
+// `Subnets` with `SubnetGroupStatus` Complete, as the page's sample does.
 //
 // The name's published constraints are enforced (no more than 255 alphanumeric characters or hyphens,
 // and not "Default"), and it is stored lower-case, as the page states. A name in use is
@@ -687,11 +683,10 @@ func subnetGroupToXML(sg RedshiftClusterSubnetGroup) redshiftSubnetGroupData {
 
 // describeClusterSubnetGroups handles DescribeClusterSubnetGroups.
 //
-// Until #1195 it took `_ *AWSRequest`. It now pages as [RedshiftPlugin.describeClusters] does, and
-// ClusterSubnetGroupName narrows to that group or answers `ClusterSubnetGroupNotFoundFault`/**400** —
-// the page's own code and status, which carry the `Fault` suffix and a 400 where the parameter-group
-// and snapshot faults do not. TagKeys and TagValues are not applied, for the reason
-// [RedshiftPlugin.describeClusters] gives.
+// It pages as [RedshiftPlugin.describeClusters] does (#1195), and ClusterSubnetGroupName narrows to
+// that group or answers `ClusterSubnetGroupNotFoundFault`/**400** — the page's own code and status,
+// which carry the `Fault` suffix and a 400 where the parameter-group and snapshot faults do not.
+// TagKeys and TagValues are not applied, for the reason [RedshiftPlugin.describeClusters] gives.
 func (p *RedshiftPlugin) describeClusterSubnetGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	cursor, maxRecords, awsErr := redshiftPagination(req.Params)
 	if awsErr != nil {
@@ -789,11 +784,10 @@ func (p *RedshiftPlugin) createClusterSnapshot(reqCtx *RequestContext, req *AWSR
 
 // describeClusterSnapshots handles DescribeClusterSnapshots.
 //
-// Until #1195 it took `_ *AWSRequest`, so its pagination and all of its filters were unread and a
-// request for one cluster's snapshots, or one snapshot, answered every snapshot. It now pages as
-// [RedshiftPlugin.describeClusters] does, and applies each filter API_DescribeClusterSnapshots
-// publishes that substrate holds a value for. See [redshiftSnapshotFilter] for each one's reading.
-// SnapshotIdentifier naming nothing is `ClusterSnapshotNotFound`/404, the page's own code.
+// It pages as [RedshiftPlugin.describeClusters] does (#1195), and applies each filter
+// API_DescribeClusterSnapshots publishes that substrate holds a value for. See
+// [redshiftSnapshotFilter] for each one's reading. SnapshotIdentifier naming nothing is
+// `ClusterSnapshotNotFound`/404, the page's own code.
 func (p *RedshiftPlugin) describeClusterSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	cursor, maxRecords, awsErr := redshiftPagination(req.Params)
 	if awsErr != nil {
@@ -877,12 +871,11 @@ const redshiftXMLNS = "http://redshift.amazonaws.com/doc/2012-12-01/"
 // `<{Operation}Response xmlns=…><{Operation}Result>…</…Result><ResponseMetadata><RequestId>`, which
 // every Redshift operation page's sample response shows.
 //
-// Until #1208 the result was marshaled as the document root, with no namespace and the request ID
-// accepted and discarded, so an SDK looking for `{Operation}Response` found nothing and every routed
-// Redshift operation was undecodable. The envelope is the shared awsQuery one, [queryOKResponse]
-// (`query_envelope.go`), which derives both element names from the operation; a second copy would be
-// a second place for the shape to drift. The request ID is the context's, as that file explains, so a
-// replayed body is byte-identical to the recorded one.
+// An SDK looks for `{Operation}Response`, so without the envelope every routed Redshift operation
+// is undecodable (#1208). The envelope is the shared awsQuery one, [queryOKResponse]
+// (`query_envelope.go`), which derives both element names from the operation; a second copy would
+// be a second place for the shape to drift. The request ID is the context's, as that file explains,
+// so a replayed body is byte-identical to the recorded one.
 func redshiftOKResponse(reqCtx *RequestContext, operation string, result any) (*AWSResponse, error) {
 	return queryOKResponse(reqCtx, operation, redshiftXMLNS, result)
 }
@@ -890,10 +883,9 @@ func redshiftOKResponse(reqCtx *RequestContext, operation string, result any) (*
 // redshiftClusterNotFound is the refusal for a cluster identifier that names no cluster.
 //
 // API_DescribeClusters and API_DescribeClusterSnapshots publish `ClusterNotFound` at HTTP 404, and the
-// cluster operations that take an identifier publish the same code. Until #1208 substrate answered
-// `ClusterNotFoundFault`, the shape's name in the service model rather than its wire code, which a
-// consumer matching on the published code never matched. #1208's text gives the status as 400; the
-// pages give 404, which is what this answers.
+// cluster operations that take an identifier publish the same code — not `ClusterNotFoundFault`, the
+// shape's name in the service model, which a consumer matching on the published code never matches.
+// #1208's text gives the status as 400; the pages give 404, which is what this answers.
 func redshiftClusterNotFound(id string) *AWSError {
 	return &AWSError{Code: "ClusterNotFound", Message: "Cluster " + id + " not found.", HTTPStatus: http.StatusNotFound}
 }

@@ -51,9 +51,9 @@ type EC2Plugin struct {
 
 	// sgMu serializes the read-check-write of a security group's name and rules, so two
 	// concurrent creates cannot both pass the per-VPC name check and two concurrent authorizes
-	// cannot both pass the duplicate-rule check (#1491). Since #1551 it also serializes an
-	// instance launch, from its subnet and group checks through its writes, with DeleteSubnet's
-	// and DeleteSecurityGroup's dependency checks and deletes.
+	// cannot both pass the duplicate-rule check (#1491). It also serializes an instance launch,
+	// from its subnet and group checks through its writes, with DeleteSubnet's and
+	// DeleteSecurityGroup's dependency checks and deletes (#1551).
 	sgMu sync.Mutex
 
 	// igwMu serializes every read-check-write of an internet gateway's attachments (#1554):
@@ -424,9 +424,9 @@ func (p *EC2Plugin) launchInstances(
 	// The call-level instance type is kept verbatim, with no default applied yet: a
 	// launch template may supply one, and the default can only be resolved once the
 	// template has had its chance. Defaulting here and then testing for the default
-	// value later cannot tell "absent" from "explicitly t3.micro" — which is how a
-	// caller naming t3.micro alongside a template naming something else used to get
-	// the template's type, exactly inverting AWS's precedence (#453).
+	// value later cannot tell "absent" from "explicitly t3.micro", and a caller naming
+	// t3.micro alongside a template naming something else would get the template's
+	// type, exactly inverting AWS's precedence (#453).
 	instanceType := req.Params["InstanceType"]
 	// Absent counts still default; a count that is present and invalid is rejected
 	// rather than clamped, because clamping MinCount=0 up to 1 launched an instance
@@ -499,14 +499,12 @@ func (p *EC2Plugin) launchInstances(
 	networkInterfaces := ec2ParseNetworkInterfaces(req.Params, "")
 	ec2SortInterfacesByDeviceIndex(networkInterfaces)
 
-	// Storage is specified the same way, and was likewise accepted and discarded
-	// until #666: a request naming BlockDeviceMapping.1.Ebs.VolumeSize succeeded and
-	// DescribeVolumes reported nothing for the instance. The mappings become real
-	// volumes in the launch loop below; see [ec2LaunchVolumesFor].
+	// Storage is specified the same way. The mappings become real volumes in the
+	// launch loop below, so a request naming BlockDeviceMapping.1.Ebs.VolumeSize is
+	// reported by DescribeVolumes (#666); see [ec2LaunchVolumesFor].
 	blockDeviceMappings := ec2ParseBlockDeviceMappings(req.Params, "")
 	// A launch tags its volumes through the same TagSpecification.N structure that
-	// tags the instance, scoped to "volume" — and those tags were accepted and
-	// discarded until #670. They are parsed here rather than in
+	// tags the instance, scoped to "volume" (#670). They are parsed here rather than in
 	// [EC2Plugin.runInstances] because a template can also supply them, and because
 	// substrate's fleet stamp is an instance tag with no volume-scoped counterpart, so
 	// there is nothing for the caller-named-tags rule to distinguish.
@@ -542,15 +540,12 @@ func (p *EC2Plugin) launchInstances(
 	// "Any additional parameters that you specify for the new instance overwrite the
 	// corresponding parameters included in the launch template." A request carrying
 	// both an ImageId and a template therefore gets its own AMI *and* the template's
-	// instance type, key name, subnet, security groups and public-IP preference —
-	// where the old imageID == "" gate meant such a request never read the template
-	// at all and silently dropped every one of those values.
+	// instance type, key name, subnet, security groups and public-IP preference.
 	//
 	// Every fallback below is guarded on the call-level value being absent, which is
 	// what implements that precedence. The networking fallbacks in particular must
 	// run *after* the call-level NetworkInterface.1.* reads above rather than before
-	// them (#444) — the subnet fallback used to sit ahead of this block, where there
-	// was nothing yet to fall back to.
+	// them, where there is nothing yet to fall back to (#444).
 	//
 	// Which *version* supplies those values is resolved from LaunchTemplate.Version.
 	// An absent version means the template's default version, not its latest — see
@@ -699,11 +694,9 @@ func (p *EC2Plugin) launchInstances(
 		spot.launchParams["ImageId"] = imageID
 	}
 
-	// And it must be an AMI that exists. Through v0.107.0 substrate launched from any
-	// string beginning "ami-", and from several that did not, so a template naming a
-	// region-specific literal, a placeholder an AI left in, or an AMI that had never
-	// existed all launched here and failed on real AWS — the divergence #733 was filed
-	// for, found by a live run.
+	// And it must be an AMI that exists, so a template naming a region-specific literal,
+	// a placeholder an AI left in, or an AMI that never existed fails here as it fails on
+	// real AWS (#733).
 	//
 	// Both codes come from the kind, so a caller distinguishes "that is not an AMI ID"
 	// from "that AMI is not here" the way EC2 does: ec2ImageIDKind.requireResource
@@ -715,8 +708,8 @@ func (p *EC2Plugin) launchInstances(
 	// materialized, and CreateFleet inherits the rule for free by going through
 	// runInstancesWithTags. And it is ahead of the first write below: refusing past that
 	// point would leave state behind for the next request in the same test to see. (The
-	// default-VPC branch once committed a VPC and its resources here; it no longer writes
-	// anything, the VPC being seeded before dispatch as of #1464.)
+	// default VPC is seeded before dispatch, so the default-VPC branch writes nothing
+	// here; #1464.)
 	//
 	// CreateLaunchTemplate deliberately does not carry this rule. It reports mapping
 	// problems through AWS's documented warning member rather than refusing, and an AMI
@@ -773,12 +766,9 @@ func (p *EC2Plugin) launchInstances(
 
 	// The groups the request or its template named are checked for existence here,
 	// before anything below is written (#673). The membership
-	// check has to wait for the subnet's VPC, but existence does not, and a launch
-	// naming a group that does not exist was previously refused *after* nine records
-	// had been committed — a VPC, subnet, security group, internet gateway, route
-	// table and four index mutations, two of them swallowing their own failures. A
-	// refusal that leaves a default VPC behind is worse than no check at all, because
-	// the next request in the same test sees state the refused one created. Reachable
+	// check has to wait for the subnet's VPC, but existence does not. A refusal that
+	// leaves records behind is worse than no check at all, because the next request in
+	// the same test sees state the refused one created. Reachable
 	// with no IAM configured, so this stands on its own regardless of the
 	// authorization change beside it.
 	if sgCheckErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, ""); sgCheckErr != nil {
@@ -810,7 +800,7 @@ func (p *EC2Plugin) launchInstances(
 	// Resolve VPCID from subnet for SG validation. The subnet must exist (#1551): a launch naming
 	// one that does not — including one a DeleteSubnet removed while this launch waited for
 	// sgMu — is InvalidSubnetID.NotFound, rather than an instance recorded in a subnet nothing
-	// holds. Through v0.128.0 an unknown subnet was accepted and stored on the instance.
+	// holds.
 	var targetVPCID string
 	if subnetID != "" {
 		subData, subErr := p.state.Get(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+subnetID)
@@ -1003,8 +993,7 @@ type ec2InstanceStateItem struct {
 // Three of API_Placement's ten members are emitted. availabilityZone must be readable for a
 // caller to reason about TerminateInstances' zone-scoped protection rule (#489). groupName and
 // groupId — "The name of the placement group that the instance is in" — are the group the launch
-// named, stored since #1193 and omitted for an instance in none, so a launch with no placement
-// group renders exactly as before.
+// named (#1193), omitted for an instance in none.
 //
 // The other seven are deliberately absent, each because substrate records nothing that would
 // back it: affinity, hostId and hostResourceGroupArn (no Dedicated Hosts are modeled),
@@ -1083,7 +1072,7 @@ type ec2InstanceItem struct {
 	InstanceLifecycle     string `xml:"instanceLifecycle,omitempty"`
 	SpotInstanceRequestID string `xml:"spotInstanceRequestId,omitempty"`
 
-	// MetadataOptions is Instance's metadataOptions, rendered for every instance since #1471,
+	// MetadataOptions is Instance's metadataOptions, rendered for every instance (#1471):
 	// `pending` from RunInstances and `applied` from DescribeInstances; see
 	// [ec2InstanceMetadataOptionsFor] for which members and why.
 	MetadataOptions *ec2InstanceMetadataOptionsXML `xml:"metadataOptions"`
@@ -1263,8 +1252,7 @@ func (p *EC2Plugin) ec2GroupItems(reqCtx *RequestContext, groupIDs []string) []e
 // It reports the same members DescribeInstances does, through the one shared
 // [ec2InstanceItem]: networkInterfaceSet, whose presence AWS's own sample response
 // carries (#455); tagSet, which real EC2 populates on a launch (#351);
-// iamInstanceProfile, which DescribeInstances reported and this response silently
-// omitted until #669; and blockDeviceMapping.
+// iamInstanceProfile, which DescribeInstances reports too (#669); and blockDeviceMapping.
 //
 // blockDeviceMapping is a deliberate divergence. AWS's only RunInstances sample
 // response emits <blockDeviceMapping /> empty, on a pending instance whose request
@@ -1326,12 +1314,10 @@ func ec2InstanceMatchesFilters(inst EC2Instance, filters map[string][]string) bo
 // ec2InstanceMatchesFilter evaluates a single filter against an instance.
 //
 // A name it does not handle is one of the 122 DescribeInstances documents over instance
-// members substrate does not model, and it is **inert** — the instance matches. Until
-// #687 it matched nothing, which was defensible while an unknown name landed here too
-// ("never return resources the caller meant to exclude"), but a refused typo is the
-// better answer to that concern and it left this operation returning empty where every
-// other describe returned everything. One answer for the inert case is the point of
-// #687, so this now agrees with [ec2VolumeMatchesFilter] rather than opposing it.
+// members substrate does not model, and it is **inert** — the instance matches, as it
+// does in [ec2VolumeMatchesFilter] and every other describe (#687). Matching nothing would
+// guard against returning resources the caller meant to exclude, but an unknown name is
+// refused as a typo before it reaches here, which answers that concern better.
 func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bool {
 	// tag:<key> — instance has a tag with that key whose value is in values.
 	if tagKey, ok := strings.CutPrefix(name, "tag:"); ok {
@@ -1413,7 +1399,7 @@ type ec2ReservationItem struct {
 // describeInstances reports the account's instances in the region, grouped into the reservations
 // they were launched under, one page at a time.
 //
-// It paginates as of #917. API_DescribeInstances publishes MaxResults with no Valid Range and no
+// It paginates (#917). API_DescribeInstances publishes MaxResults with no Valid Range and no
 // Default, so the bound is [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling] rather than
 // the 5–1000 three sibling pages publish (#671). It is also the one page of the nine that repeats
 // the ID-list rule against its own parameter — "You cannot specify this parameter and the instance
@@ -1793,12 +1779,12 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 // substrate returns every instance regardless. Stated in docs/services.md rather than guessed
 // at, because narrowing it would change what a caller with no filters sees.
 //
-// It paginates as of #1024: API_DescribeInstanceStatus publishes MaxResults and NextToken and
-// substrate read neither, so a caller paging this listing saw one page here and several in
-// production. The three rules are [ec2MaxResults], [ec2NextTokenOffset] and [ec2Page]. The page
-// publishes **no** range for MaxResults — only "The maximum number of items to return for this
-// request", type Integer — so the bound is [ec2MinUnpublishedMaxResults] with
-// [ec2NoMaxResultsCeiling] rather than the 5–1000 three sibling describes publish, per #671.
+// It paginates (#1024): API_DescribeInstanceStatus publishes MaxResults and NextToken, so a caller
+// paging this listing sees the pages it sees in production. The three rules are [ec2MaxResults],
+// [ec2NextTokenOffset] and [ec2Page]. The page publishes **no** range for MaxResults — only "The
+// maximum number of items to return for this request", type Integer — so the bound is
+// [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling] rather than the 5–1000 three sibling
+// describes publish, per #671.
 //
 // This is also the one page of the sixteen besides API_DescribeInstances that repeats the
 // service-wide ID-list prohibition against its own parameter — "You cannot specify this parameter
@@ -1890,9 +1876,9 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	if cidr == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "CidrBlock is required", HTTPStatus: http.StatusBadRequest}
 	}
-	// TagSpecification.N and InstanceTenancy were dropped until #1519. Terraform tags a VPC at
-	// creation and reads instanceTenancy back, so both showed as changes on the plan after an
-	// apply, and a changed tenancy forces the VPC's replacement.
+	// TagSpecification.N and InstanceTenancy are recorded (#1519). Terraform tags a VPC at
+	// creation and reads instanceTenancy back, so dropping either shows as a change on the plan
+	// after an apply, and a changed tenancy forces the VPC's replacement.
 	tags := ec2TagSpecificationTags(req.Params, "", "vpc")
 	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
 		return nil, awsErr
@@ -1941,10 +1927,9 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	if _, err := p.createRouteTableForVPC(reqCtx, vpcID, cidr, true, ""); err != nil {
 		p.logger.Warn("ec2: failed to create default route table", "err", err)
 	}
-	// "Your default VPCs and any VPCs that you create come with a default security group"
-	// (VPC User Guide). Through v0.127.0 only the seeded default VPC had one (#1492). It is
-	// minted after the route table, so the route table's and association's IDs a recorded
-	// CreateVpc minted are unchanged on replay.
+	// "Your default VPCs and any VPCs that you create come with a default security group" (VPC User
+	// Guide), so every VPC gets one (#1492). It is minted after the route table, so the route
+	// table's and association's IDs a recorded CreateVpc minted are unchanged on replay.
 	if err := p.createDefaultSecurityGroup(context.Background(), reqCtx, vpcID); err != nil {
 		return nil, err
 	}
@@ -2033,9 +2018,9 @@ func ec2VPCXML(vpc EC2VPC) ec2VPCItem {
 // describeVPCs reports the VPCs the account holds in the region, narrowed by VpcId.N and by the
 // filters [ec2VPCFilterSpec] evaluates, one page at a time.
 //
-// It paginates as of #917: API_DescribeVpcs publishes MaxResults with "Valid Range: Minimum value
-// of 5. Maximum value of 1000." and NextToken, and substrate implemented neither — so a caller
-// paging this listing saw one page here and several in production. The three rules are
+// It paginates (#917): API_DescribeVpcs publishes MaxResults with "Valid Range: Minimum value
+// of 5. Maximum value of 1000." and NextToken, so a caller paging this listing sees the pages it
+// sees in production. The three rules are
 // [ec2MaxResults], [ec2NextTokenOffset] and [ec2Page], and the fourth — that an ID list may not
 // accompany MaxResults — is [ec2RefuseIDsWithMaxResults].
 //
@@ -2213,11 +2198,11 @@ func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // describeSubnets lists the account's subnets, honoring an optional list of SubnetId.N
 // parameters and the eleven Filter.N names [ec2SubnetMatchesFilter] evaluates.
 //
-// Filter.N was parsed nowhere here before #685. The spec check runs before the scan so a
+// Filter.N is evaluated (#685). The spec check runs before the scan so a
 // refusal cannot depend on whether any subnet matched, and ids.match runs before the filters
 // so a subnet a filter excluded still counts as resolved for [ec2IDFilter.unresolved].
 //
-// It paginates as of #917, on the range API_DescribeSubnets publishes — "Valid Range: Minimum
+// It paginates (#917), on the range API_DescribeSubnets publishes — "Valid Range: Minimum
 // value of 5. Maximum value of 1000." — through the same three helpers every other converted
 // describe uses; see [EC2Plugin.describeVPCs] for the ordering and the fourth rule.
 func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2294,8 +2279,8 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, lookupErr
 	}
 	// A subnet still holding an instance or a NAT gateway is refused before anything is
-	// written (#1551); see [EC2Plugin.subnetInUse]. Through v0.128.0 it was deleted and its
-	// instances kept its ID.
+	// written (#1551), so no instance keeps the ID of a deleted subnet; see
+	// [EC2Plugin.subnetInUse].
 	inUse, err := p.subnetInUse(reqCtx, subnetID)
 	if err != nil {
 		return nil, err
@@ -2316,9 +2301,9 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 
 // createSecurityGroup creates a security group, tagging it from TagSpecification.N.
 //
-// TagSpecification.N scoped to security-group was accepted and discarded until #1440, so a
-// group created with tags read back with none and a tag: filter could not select it. The tag
-// rules are checked before the record is written, so a rejected request creates no group. A
+// TagSpecification.N scoped to security-group is recorded, so a group created with tags reads
+// them back and a tag: filter selects it (#1440). The tag rules are checked before the record
+// is written, so a rejected request creates no group. A
 // specification naming another resource type is skipped rather than refused, which is what
 // [ec2LaunchTagsForResource] does for every create that accepts the list and publishes no
 // type rule — CreateSecurityGroup's page says only "The tags to assign to the security
@@ -2339,8 +2324,7 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 //
 // A name another group in the same VPC already holds is InvalidGroup.Duplicate (#1491), per
 // "Names are case-insensitive and must be unique within the VPC"; see
-// [EC2Plugin.refuseDuplicateGroupName]. Through v0.127.0 any number of groups could share a
-// name.
+// [EC2Plugin.refuseDuplicateGroupName].
 func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	groupName := req.Params["GroupName"]
 	description := req.Params["GroupDescription"]
@@ -2421,17 +2405,12 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 
 // describeSecurityGroups reports the security groups the account holds in the region.
 //
-// Selects on GroupId.N, GroupName.N and Filter.N. GroupName.N was read by nothing before #749
-// — a caller naming one group by name was answered about every group in the account, the
-// superset failure #731 fixed for DescribeImages — and the two identity lists union rather
-// than intersect, per [ec2IDFilter.matchOrNamed].
+// Selects on GroupId.N, GroupName.N and Filter.N (#749), and the two identity lists union
+// rather than intersect, per [ec2IDFilter.matchOrNamed].
 //
 // A name is matched **in the default VPC only**, as AWS scopes the parameter: "[Default VPC] The
-// names of the security groups" (#1491). Through v0.127.0 it matched account-wide — first because
-// substrate created its default VPC lazily, so a default-VPC scope would have answered nothing in
-// a fresh account, and then, after #1464 seeded the default VPC eagerly, to keep that behavior
-// change out of the seeding release. In an account with no default VPC a name selects nothing.
-// Names are unique per VPC since #1491, so a name selects at most one group.
+// names of the security groups" (#1491). In an account with no default VPC a name selects
+// nothing. Names are unique per VPC (#1491), so a name selects at most one group.
 //
 // One thing about the name half is substrate's reading rather than AWS's text, recorded in
 // docs/services.md: a name matching nothing answers an **empty set** rather than
@@ -2443,7 +2422,7 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 // half keeps its full contract: a malformed ID is refused before the walk and an unresolved one
 // after it.
 //
-// It paginates as of #917. This page publishes the range twice — as "Valid Range: Minimum value
+// It paginates (#917). This page publishes the range twice — as "Valid Range: Minimum value
 // of 5. Maximum value of 1000." and in prose, where it is also the one page of the nine that says
 // what an absent MaxResults means: "If this parameter is not specified, then all items are
 // returned." That sentence is why [ec2MaxResults] reads an absent parameter as the whole listing
@@ -2494,9 +2473,9 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeSecurityGroups: %w", err)
 	}
-	// ownerId and tagSet are published members of SecurityGroup that this item did not
-	// render until #1440: tagSet because a tag the group carried was otherwise unreadable,
-	// and ownerId because the owner-id filter selects on it. tagSet is omitted when the
+	// ownerId and tagSet are published members of SecurityGroup, rendered (#1440): tagSet
+	// because a tag the group carries is otherwise unreadable, and ownerId because the
+	// owner-id filter selects on it. tagSet is omitted when the
 	// group has no tags, the shape [ec2VPCItem] follows for the same reason.
 	type sgItem struct {
 		OwnerID        string                `xml:"ownerId"`
@@ -2537,7 +2516,7 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 			continue
 		}
 		// A filter naming no values matches nothing, as it does everywhere else (#696). Every
-		// documented name is evaluated as of #1440 — see [ec2SecurityGroupMatchesFilter].
+		// documented name is evaluated (#1440) — see [ec2SecurityGroupMatchesFilter].
 		if !ec2SecurityGroupMatchesFilters(sg, filters) {
 			continue
 		}
@@ -2565,9 +2544,8 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 //
 // API_DeleteSecurityGroup publishes GroupName as "[Default VPC] The name of the security group.
 // You can specify either the security group name or the security group ID. For security groups
-// in a nondefault VPC, you must specify the security group ID." Through v0.127.0 it was not read,
-// so a delete by name answered MissingParameter for GroupId. It is resolved among the default
-// VPC's groups as of #1491 — see [EC2Plugin.defaultVPCGroupByName] — and a name that resolves to
+// in a nondefault VPC, you must specify the security group ID." It is resolved among the default
+// VPC's groups (#1491) — see [EC2Plugin.defaultVPCGroupByName] — and a name that resolves to
 // nothing there is InvalidGroup.NotFound. GroupId wins when both are sent.
 //
 // A VPC's default group is refused with CannotDelete, and a group an instance carries or another
@@ -2602,8 +2580,8 @@ func (p *EC2Plugin) deleteSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("ec2 deleteSecurityGroup unmarshal: %w", err)
 	}
 	// A default group is refused with CannotDelete and a group still in use with
-	// DependencyViolation, before anything is written (#1551). Through v0.128.0 both were
-	// deleted, leaving instances and rules naming a group that no longer existed.
+	// DependencyViolation, before anything is written (#1551), so no instance or rule is left
+	// naming a group that does not exist.
 	if ec2IsDefaultSecurityGroup(sg) {
 		return nil, ec2CannotDeleteDefaultGroupError()
 	}
@@ -2650,16 +2628,14 @@ func (p *EC2Plugin) revokeSecurityGroupEgress(reqCtx *RequestContext, req *AWSRe
 // security group rules that were not revoked. For a non-default VPC ... an
 // InvalidPermission.NotFound client error is returned, and no rules are revoked." The
 // default-VPC half renders unknownIpPermissionSet; the other refuses before anything is
-// written. Through v0.125.0 an unmatched revoke answered return=true in both, having removed
-// nothing.
+// written.
 //
 // SecurityGroupRuleId.N is not read: substrate assigns no sgr- rule IDs, so a revoke naming
 // rules only by ID still answers MissingParameter.
 //
 // An authorize naming a source the group already allows for the same protocol and ports is
 // InvalidPermission.Duplicate, and nothing is written (#1491); the check is per source, the
-// granularity the revoke above works at — see [ec2AuthorizeDuplicates]. Through v0.127.0 the
-// rule was appended a second time.
+// granularity the revoke above works at — see [ec2AuthorizeDuplicates].
 //
 // Every IPv4 and IPv6 range is canonicalised before it is compared or stored (#1553), as the
 // operation pages publish: "AWS canonicalizes IPv4 and IPv6 CIDRs" — see
@@ -2670,8 +2646,7 @@ func (p *EC2Plugin) revokeSecurityGroupEgress(reqCtx *RequestContext, req *AWSRe
 // For security groups for a default VPC you can specify either the ID or the name of the
 // security group" — and resolved among the default VPC's groups by
 // [EC2Plugin.defaultVPCGroupByName], the rule DeleteSecurityGroup follows (#1491). GroupId wins
-// when both are sent. Through v0.128.0 the name was not read, so a request by name was
-// MissingParameter.
+// when both are sent.
 func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direction string, add bool) (*AWSResponse, error) {
 	p.sgMu.Lock()
 	defer p.sgMu.Unlock()
@@ -2834,10 +2809,8 @@ type ec2InternetGatewayAttachmentItem struct {
 // ec2InternetGatewayItem renders an internet gateway as AWS's InternetGateway element.
 //
 // Shared by CreateInternetGateway and DescribeInternetGateways, which AWS documents with one
-// type; before #695 both rendered internetGatewayId and nothing else, so a caller could not
-// read which VPC a gateway was attached to, who owned it, or what it was tagged with — while
-// DescribeInternetGateways answered every filter over exactly those three things by returning
-// every gateway in the region.
+// type, so both report which VPC a gateway is attached to, who owns it, and what it is tagged
+// with — the three things DescribeInternetGateways' filters select on (#695).
 //
 // Both attachmentSet and tagSet are **present but empty** on an unattached, untagged gateway,
 // because that is what this page's own sample response shows (`<attachmentSet/>`,
@@ -2876,8 +2849,8 @@ func ec2InternetGatewayXML(igw EC2InternetGateway) ec2InternetGatewayItem {
 // by InternetGatewayId.N and by the filters [ec2InternetGatewayFilterSpec] evaluates, one page at a
 // time.
 //
-// It paginates as of #1024: API_DescribeInternetGateways publishes MaxResults with "Valid Range:
-// Minimum value of 5. Maximum value of 1000." and NextToken, and substrate implemented neither. The
+// It paginates (#1024): API_DescribeInternetGateways publishes MaxResults with "Valid Range:
+// Minimum value of 5. Maximum value of 1000." and NextToken. The
 // rules are the shared ones — [ec2MaxResults], [ec2NextTokenOffset], [ec2Page] and
 // [ec2RefuseIDsWithMaxResults] — and the pagination parameters are read first, so a refusal cannot
 // depend on how many gateways the account holds (#887's ordering).
@@ -2942,19 +2915,17 @@ func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSReq
 
 // attachInternetGateway attaches a gateway to a VPC.
 //
-// Both InternetGatewayId and VpcId are "Required: Yes" on API_AttachInternetGateway, and
-// through v0.127.0 only the gateway was required: an attach with no VpcId appended an
-// attachment to the empty-string VPC (#1194). Each is now MissingParameter when absent and
-// resolved through its kind, so an unknown VPC is InvalidVpcID.NotFound.
+// Both InternetGatewayId and VpcId are "Required: Yes" on API_AttachInternetGateway. Each is
+// MissingParameter when absent and resolved through its kind, so an unknown VPC is
+// InvalidVpcID.NotFound (#1194).
 //
 // A gateway already attached, to this VPC or another, is refused with
 // Resource.AlreadyAssociated, whose client-error-table gloss names exactly this case: "You
 // also cannot attach an internet gateway to more than one VPC at a time." The operation's own
-// Errors section is the Common Error Types boilerplate, so the code is that table's. Before
-// #1194 a second attach appended a second attachment.
+// Errors section is the Common Error Types boilerplate, so the code is that table's (#1194).
 //
 // A VPC that already has a gateway attached refuses a second one with InvalidParameterValue
-// (#1554); through v0.128.0 it was accepted, so a VPC could report two. The default VPC is seeded
+// (#1554), so a VPC never reports two. The default VPC is seeded
 // with one, so attaching a new gateway to it is refused until that one is detached. The check and
 // the write hold igwMu, so two concurrent attaches cannot both find the VPC empty.
 func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -3058,9 +3029,8 @@ func ec2GatewayNotAttachedError() *AWSError {
 
 // detachInternetGateway detaches a gateway from the VPC the request names.
 //
-// VpcId is "Required: Yes" on API_DetachInternetGateway and was not required through
-// v0.127.0, so an omitted or mismatched VpcId filtered nothing out and answered return=true
-// with the gateway still attached (#1194). An omitted VpcId is now MissingParameter, and a
+// VpcId is "Required: Yes" on API_DetachInternetGateway (#1194). An omitted VpcId is
+// MissingParameter, and a
 // VPC the gateway is not attached to (including a gateway attached to nothing) is
 // Gateway.NotAttached; see [ec2GatewayNotAttachedError]. The VPC is not resolved first: a VPC
 // that does not exist is also one the gateway is not attached to, and the client-error table
@@ -3121,8 +3091,7 @@ func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSReques
 //
 // API_DeleteInternetGateway: "You must detach the internet gateway from the VPC before you can
 // delete it." A gateway still attached is refused with DependencyViolation (#1492); see
-// [ec2DependencyViolationError]. Through v0.127.0 it was deleted attached, taking its
-// attachment with it.
+// [ec2DependencyViolationError].
 func (p *EC2Plugin) deleteInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// Held across the attachment check and the delete, so a concurrent attach cannot attach the
 	// gateway after the check and leave a VPC attached to a gateway that no longer exists (#1554).
@@ -3230,8 +3199,8 @@ func routeTableHasSubnet(rtb EC2RouteTable, subnetIDs []string) bool {
 // describeRouteTables reports the route tables the account holds in the region, narrowed by
 // RouteTableId.N and by the filters [ec2RouteTableFilterSpec] evaluates, one page at a time.
 //
-// It paginates as of #1024: API_DescribeRouteTables publishes MaxResults and NextToken and substrate
-// implemented neither. Its published range is "Minimum value of 5. Maximum value of 100." — a
+// It paginates (#1024): API_DescribeRouteTables publishes MaxResults and NextToken. Its published
+// range is "Minimum value of 5. Maximum value of 100." — a
 // **hundred**, not the thousand three sibling describes publish, so it takes
 // [ec2MaxPublishedMaxResults100]. Collapsing the two would be the borrowing #671 forbids, and it is
 // the reason MaxResults=1000 is refused here and accepted at DescribeNatGateways.
@@ -3396,10 +3365,9 @@ func (p *EC2Plugin) disassociateRouteTable(reqCtx *RequestContext, req *AWSReque
 // The destination and the target are read through [ec2ParseRouteDestination] and
 // [ec2ParseRouteTarget], which [EC2Plugin.replaceRoute] shares, and a target substrate stores is
 // resolved through [EC2Plugin.resolveRouteTarget] (#1187). An IPv4 destination is canonicalised,
-// and a destination the table already routes is RouteAlreadyExists, the client-error table's
-// "A route for the specified CIDR block already exists in this route table" — through v0.127.0 a
-// second route to one destination was appended. The checks run in that order, after the route
-// table resolves, and a refused request writes nothing.
+// and a destination the table already routes is RouteAlreadyExists, the client-error table's "A
+// route for the specified CIDR block already exists in this route table". The checks run in that
+// order, after the route table resolves, and a refused request writes nothing.
 func (p *EC2Plugin) createRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	rtbID := req.Params["RouteTableId"]
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
@@ -3457,8 +3425,8 @@ func (p *EC2Plugin) createRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 // ReplaceRoute's own LocalTarget, and resolves a stored target the same way. The destination is
 // canonicalised as CreateRoute canonicalises it — the stored route is in canonical form — and then
 // matched exactly, "The value that you provide must match the CIDR of an existing route in the
-// table"; a destination no route carries is InvalidRoute.NotFound. Through v0.127.0 the
-// target was the first of six parameters set, folded onto the gateway field (#1187).
+// table"; a destination no route carries is InvalidRoute.NotFound. The target is resolved the
+// way CreateRoute resolves it (#1187).
 func (p *EC2Plugin) replaceRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	rtbID := req.Params["RouteTableId"]
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
@@ -3519,11 +3487,9 @@ func (p *EC2Plugin) replaceRouteTableAssociation(reqCtx *RequestContext, req *AW
 	assocID := req.Params["AssociationId"]
 	newRtbID := req.Params["RouteTableId"]
 
-	// Resolve the target route table first. Both refusals below used to sit after the
-	// source association had already been removed and committed, so a request naming a
-	// bogus RouteTableId destroyed the association it was asked to move and then reported
-	// a failure — the same "a refusal must leave no state behind" rule #673 established
-	// for RunInstances. Every write now happens after both IDs have resolved.
+	// Resolve the target route table first, and write only after both IDs have resolved,
+	// so a request naming a bogus RouteTableId leaves the association it was asked to move
+	// in place — the "a refusal must leave no state behind" rule RunInstances follows (#673).
 	newKey := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + newRtbID
 	data, getErr := p.state.Get(context.Background(), ec2Namespace, newKey)
 	if getErr != nil {
@@ -3640,7 +3606,7 @@ func (p *EC2Plugin) replaceRouteTableAssociation(reqCtx *RequestContext, req *AW
 // The IPv4 destination is canonicalised as CreateRoute stores it, so the 100.68.0.18/18 a route
 // was created with deletes the 100.68.0.0/18 it was stored as. A destination no route carries is
 // InvalidRoute.NotFound, whose client-error-table gloss reads "Ensure that you indicate the exact
-// CIDR range for the route in the request"; through v0.127.0 it answered return=true.
+// CIDR range for the route in the request".
 func (p *EC2Plugin) deleteRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	rtbID := req.Params["RouteTableId"]
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
@@ -3826,10 +3792,9 @@ func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequ
 
 	// Some attributes can only be modified while the instance is stopped, and the
 	// check runs before anything is written so a refused call leaves the value
-	// untouched (#473). This is a new rejection on a path that used to succeed:
-	// substrate previously changed the type of a running instance, which real EC2
-	// refuses — see [ec2ModifiableWhenStopped] for which attributes are gated and
-	// why disableApiTermination is not among them.
+	// untouched (#473). Real EC2 refuses to change the type of a running instance —
+	// see [ec2ModifiableWhenStopped] for which attributes are gated and why
+	// disableApiTermination is not among them.
 	if attr := ec2AttributeModificationState(req.Params); attr != "" && !ec2InstanceStopped(inst) {
 		return nil, ec2IncorrectInstanceState(attr, inst.State.Name)
 	}
@@ -4316,8 +4281,8 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 
-	// The key pair ID is minted first and the key's seed second, so a request mints the same
-	// keyPairId it did before #1296 made the material derived.
+	// The key pair ID is minted first and the key's seed second, so keyPairId is the mint's
+	// first draw, as it is in a recording made before the material was derived (#1296).
 	keyPairID := generateKeyPairID(reqCtx.IDs)
 	keyMaterial, fp, err := ec2KeyPairMaterial(keyType, reqCtx.IDs)
 	if err != nil {
@@ -4347,7 +4312,7 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 
 	// The published Response Elements are keyFingerprint, keyMaterial, keyName, keyPairId,
 	// requestId and tagSet. keyType is not among them — it is API_KeyPairInfo's, which
-	// DescribeKeyPairs answers — and is no longer rendered here (#1190).
+	// DescribeKeyPairs answers — and is not rendered here (#1190).
 	type response struct {
 		XMLName        xml.Name      `xml:"CreateKeyPairResponse"`
 		XMLNS          string        `xml:"xmlns,attr"`
@@ -4369,8 +4334,7 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 
 // describeKeyPairs reports the region's key pairs.
 //
-// Selects on KeyName.N, KeyPairId.N and Filter.N. KeyPairId.N was read by nothing before #695
-// — a caller narrowing by ID got every key pair in the account — and it is matched by
+// Selects on KeyName.N, KeyPairId.N and Filter.N (#695). KeyPairId.N is matched by
 // membership rather than through [newEC2IDFilter] because no [ec2IDKind] describes a key-pair
 // ID, so there is no malformed-form or NotFound wording to inherit.
 //
@@ -4676,9 +4640,8 @@ func extractIndexedParams(params map[string]string, prefix string) []string {
 // A repeated filter name accumulates into one value list rather than overwriting the
 // previous one (#686). AWS documents that filters are ANDed and the values within a
 // filter ORed, and says nothing about the same name appearing twice; merging the values
-// answers it as an OR, which is substrate's reading. Overwriting was not a reading of
-// anything — it silently discarded the earlier filter, so a caller who sent two got the
-// last one applied and no indication the first was dropped.
+// answers it as an OR, which is substrate's reading. Overwriting would silently discard
+// the earlier filter, applying only the last one a caller sent.
 func extractEC2Filters(params map[string]string) map[string][]string {
 	filters := make(map[string][]string)
 	for i := 1; ; i++ {
@@ -4703,8 +4666,8 @@ func extractEC2Filters(params map[string]string) map[string][]string {
 
 // containsStr reports whether s is in the slice, comparing exactly.
 //
-// Since #697 this is **not** how a filter value is compared — [ec2FilterAccepts] is, and it
-// honors EC2's documented wildcards. What is left here is every membership test that is not
+// This is **not** how a filter value is compared — [ec2FilterAccepts] is, and it honors
+// EC2's documented wildcards (#697). What is left here is every membership test that is not
 // a filter, and each one must stay exact:
 //
 //   - The `KeyName.N`, `GroupName.N`, `FleetId.N`, `RegionName.N` and `InstanceType.N`
@@ -4714,8 +4677,7 @@ func extractEC2Filters(params map[string]string) map[string][]string {
 //     stand in for an ID. Of the five, only `InstanceType.N` asserts the resource exists
 //     (`InvalidInstanceType`); the other four narrow the answer to nothing when an entry
 //     matches nothing, each for a reason recorded in docs/services.md's "Explicit resource
-//     IDs" section. This comment claimed all five asserted existence until #731; the claim
-//     was wrong, and it mattered because it read as an already-honored contract.
+//     IDs" section (#731).
 //   - [ec2FilterSpec.documents]' name lookup. AWS's wildcards are for values; a filter *name*
 //     is one of a fixed documented set and "Filter names are case-sensitive" per the Filter
 //     type, so a name is either in the set or refused.
@@ -4912,9 +4874,7 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	// the value for ResourceType must be image. To tag the snapshots […] the value for
 	// ResourceType must be snapshot. The same tag is applied to all of the snapshots
 	// that are created." Both are parsed through the shared parser, so ResourceType is
-	// honored rather than ignored — this path previously read TagSpecification.1's tags
-	// regardless of what resource they were scoped to, which put snapshot-scoped tags
-	// on the AMI (#468).
+	// honored and snapshot-scoped tags stay off the AMI (#468).
 	tags := ec2LaunchTagsForResource(req.Params, "image")
 	snapshotTags := ec2LaunchTagsForResource(req.Params, "snapshot")
 	// Checked before the snapshot and image are written, so a rejected request creates
@@ -4937,8 +4897,7 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	// DescribeImages can model snapshot-retention logic (#322).
 	//
 	// The size and the source volume are read from the instance's own root volume rather
-	// than being the literal 8 this recorded through v0.105.0; see
-	// [EC2Plugin.ec2InstanceRootVolume] for what that constant cost a caller (#689).
+	// than a constant; see [EC2Plugin.ec2InstanceRootVolume] for why (#689).
 	rootVolumeID, rootVolumeSize, err := p.ec2InstanceRootVolume(reqCtx, instanceID)
 	if err != nil {
 		return nil, err
@@ -5025,16 +4984,12 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 // # The mappings
 //
 // They are read by [ec2ParseBlockDeviceMappings], the walk RunInstances and a launch
-// template already share, rather than by the bounded 1..32 scan this had through v0.106.0
-// that kept only the first snapshot it found and discarded the rest of every mapping (#711).
-// AWS's own Example 3 registers three volumes — two distinct snapshots and an empty 100 GiB
-// volume — so keeping one snapshot was losing most of the request.
+// template share, so every mapping is kept (#711). AWS's own Example 3 registers three
+// volumes — two distinct snapshots and an empty 100 GiB volume.
 //
-// Two changes a caller can observe, beyond getting its mappings back: the walk is unbounded,
-// and it stops at the first absent index rather than tolerating a sparse one. AWS's query
-// protocol indexes contiguously and every other indexed walk in this plugin assumes it, so
-// this is alignment with the rest of substrate — but a request that skipped an index used to
-// have its later mappings read and now does not.
+// The walk is unbounded, and it stops at the first absent index rather than tolerating a
+// sparse one. AWS's query protocol indexes contiguously and every other indexed walk in this
+// plugin assumes it, so a request that skips an index has its later mappings ignored.
 //
 // Each mapping that names a snapshot is checked by [ec2CheckMappingSnapshot], so an ID that
 // is malformed or names nothing is refused instead of being stored and rendered as a
@@ -5163,19 +5118,19 @@ func ec2RegisteredRootDeviceType(params map[string]string) string {
 // describeImages lists the AMIs the account owns in the request's Region, narrowed by an
 // explicit ImageId.N list and by the filters [ec2ImageFilterSpec] evaluates.
 //
-// `Owner.N` is read as of #1432 — "Scopes the results to images with the specified owners.
+// `Owner.N` is read (#1432) — "Scopes the results to images with the specified owners.
 // You can specify a combination of AWS account IDs, self, amazon, aws-backup-vault, and
 // aws-marketplace" — because a fresh server holds no image the account owns, and the way
 // AWS's own examples discover one is Owners=amazon. `self` and the caller's account ID
 // select the account's own images; `amazon` selects the bundled catalog's AMIs published
 // under that alias, and Canonical's account ID its Ubuntu entries (see [ec2ImageOwnerSelected]);
 // every other value selects nothing substrate holds. An absent Owner.N still answers the
-// account's own images alone, where AWS would add every public image: substrate's reading, kept
-// so an unqualified describe keeps meaning what it meant. `ExecutableBy.N` is read as of #1494
+// account's own images alone, where AWS would add every public image: substrate's reading, so
+// an unqualified describe answers about the account's own images. `ExecutableBy.N` is read (#1494)
 // — see [ec2ImageExecutableSelected] — and narrows alongside Owner.N. A bundled AMI is also
 // reachable by naming it in ImageId.N.
 //
-// It paginates as of #917. API_DescribeImages publishes MaxResults with **no** Valid Range and no
+// It paginates (#917). API_DescribeImages publishes MaxResults with **no** Valid Range and no
 // Default — only "The maximum number of items to return for this request" — so, per #671, the
 // 5–1000 the VPC, subnet and security-group pages publish is not borrowed here: the floor is
 // [ec2MinUnpublishedMaxResults] and there is no ceiling. See [ec2MinUnpublishedMaxResults] for why
@@ -5255,9 +5210,9 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	// <isPublic>. Substrate follows the type page and the two examples that agree with it,
 	// which is also the spelling it already used for imageOwnerId (#750).
 	//
-	// imageOwnerId is omitempty as of #750. A bundled public AMI has no owner substrate can
-	// name — see [bundledImage.image] — and rendering an empty element claimed an account ID
-	// of "" rather than reporting no owner.
+	// imageOwnerId is omitempty (#750). A bundled public AMI has no owner substrate can
+	// name — see [bundledImage.image] — and an empty element would claim an account ID
+	// of "" rather than report no owner.
 	//
 	// platform is omitempty because AWS documents it as "set to windows for Windows AMIs;
 	// otherwise, it is blank", and an omitted element is what a caller branching on it can
@@ -5293,11 +5248,8 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	// The mapping's volumeSize is read from the backing snapshot rather than rendered as
-	// the literal 8 this used through v0.105.0. That constant was a second, independent
-	// copy of createImage's — so the two agreed only for as long as neither knew a real
-	// size, and #689 gave createImage one. Reading the snapshot means there is one source
-	// of truth for an AMI's root volume size, and DescribeImages and DescribeSnapshots
-	// cannot disagree about the same snapshot.
+	// a constant (#689), so there is one source of truth for an AMI's root volume size,
+	// and DescribeImages and DescribeSnapshots cannot disagree about the same snapshot.
 	resolveSnapshot := p.ec2SnapshotResolver(reqCtx)
 
 	// renderImage builds one response item. It is a closure rather than a method because
@@ -5353,10 +5305,10 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 			item.BlockDeviceMappings = append(item.BlockDeviceMappings, bdi)
 		}
 		if len(img.BlockDeviceMappings) == 0 && img.SnapshotID != "" {
-			// Every CreateImage-minted AMI, and any AMI registered before #711, has a root
+			// Every CreateImage-minted AMI, and any AMI recorded before #711, has a root
 			// snapshot and no recorded mapping — so substrate fabricates the root device
 			// entry for it. The AMI's own RootDeviceName names the device when there is one
-			// to read: as of #750 a CreateImage AMI inherits its parent's, so an image made
+			// to read: a CreateImage AMI inherits its parent's (#750), so an image made
 			// from a bundled Amazon Linux instance reports /dev/xvda in both the mapping and
 			// the rootDeviceName member rather than contradicting itself. /dev/sda1 remains
 			// the answer when the AMI records none, which is every AMI written before #750.
@@ -5476,9 +5428,8 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 // A filter naming no values matches nothing (#686). AWS documents no rule for that shape
 // — Using_Filtering says only "You can't specify a filter value of null" — so this is
 // substrate's reading, taken from ec2InstanceMatchesFilter and describeVolumes, which
-// both already answer that way. describeImages previously read it as the any-value
-// question instead, which is what tag-key spells and what this function now answers under
-// that name.
+// both answer that way. The any-value question is what tag-key spells, and this function
+// answers it under that name.
 func ec2ImageMatchesFilters(img EC2Image, filters map[string][]string) bool {
 	for name, vals := range filters {
 		matched := false
@@ -5569,7 +5520,7 @@ func ec2ImageMatchesFilters(img EC2Image, filters map[string][]string) bool {
 // beside the mapping that implements it ("&RootDeviceName=/dev/sda1
 // &BlockDeviceMapping.1.DeviceName=/dev/sda1"). When it names one of the mappings, that
 // mapping's snapshot is the answer; otherwise the first mapping naming a snapshot is, which
-// is what AWS's examples put first and what this operation recorded through v0.106.0.
+// is what AWS's examples put first.
 //
 // RootDeviceName is read rather than [ec2IsRootDevice] guessed at, because this is the one
 // place a caller states which device is root, and guessing would give the wrong answer for
@@ -5701,9 +5652,7 @@ func ec2SeededZones(region string) []ec2AvailabilityZoneItem {
 
 // describeAvailabilityZones reports the region's seeded zones.
 //
-// The signature took the request and discarded it before #695, so every documented selector
-// was ignored: ZoneName.N, ZoneId.N and Filter.N alike. A caller asking for one zone got all
-// of them.
+// Every documented selector is honored: ZoneName.N, ZoneId.N and Filter.N (#695).
 //
 // AllRegions stays unread, and is inert rather than unimplemented: it asks for zones in
 // regions the account has *not* opted into, and every region substrate seeds is
@@ -5749,7 +5698,7 @@ type ec2PlacementGroupXML struct {
 
 // ec2PlacementGroupSummary renders a placement group as AWS's placementGroup element.
 //
-// groupArn is rendered as of #695, when the group-arn filter started selecting on it: a filter
+// groupArn is rendered because the group-arn filter selects on it (#695): a filter
 // over a value the response never showed would leave a caller unable to read back what it
 // matched. The string comes from [ec2PlacementGroupARN], the one spelling the filter also uses.
 func ec2PlacementGroupSummary(pg EC2PlacementGroup) ec2PlacementGroupXML {
@@ -5766,11 +5715,9 @@ func ec2PlacementGroupSummary(pg EC2PlacementGroup) ec2PlacementGroupXML {
 // createPlacementGroup creates an EC2 placement group (#344). A repeat create of
 // an existing name returns InvalidPlacementGroup.Duplicate.
 //
-// TagSpecification.N with ResourceType=placement-group is read here (#708), which is the
-// only way a placement group's tags were settable at all until CreateTags grew a pg- arm:
-// EC2PlacementGroup has carried a Tags field since #344 and nothing ever wrote it, so
-// DescribePlacementGroups and DescribeTags reported a group as untagged however it was
-// created.
+// TagSpecification.N with ResourceType=placement-group is read here (#708), so
+// DescribePlacementGroups and DescribeTags report the tags a group was created with;
+// CreateTags reaches a group through its pg- arm.
 func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["GroupName"]
 	if name == "" {
@@ -5825,8 +5772,8 @@ func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest
 // GroupName.N parameters (#344).
 // describePlacementGroups reports the region's placement groups.
 //
-// Selects on GroupName.N, GroupId.N and Filter.N. GroupId.N is documented and was read by
-// nothing before #695; it is matched by membership rather than through [newEC2IDFilter]
+// Selects on GroupName.N, GroupId.N and Filter.N (#695). GroupId.N is matched by membership
+// rather than through [newEC2IDFilter]
 // because #708 left the ID-vs-name question this operation raises deliberately open — the ARN
 // is by name, and no group-id filter exists — so refusing a malformed pg- form here would
 // settle by accident what that PR recorded as underdetermined.
@@ -5926,13 +5873,8 @@ var azCompassWords = []string{"north", "south", "east", "west", "central"}
 // azRegionAbbrev returns the AZ-ID prefix for a region: "us-east-1" → "use1",
 // "eu-west-2" → "euw2", "ap-southeast-2" → "apse2".
 //
-// This produced "ue11" for us-east-1 before #712 — the wrong shape *and* a doubled digit,
-// since the old walk took the first byte of every hyphenated segment and then appended a
-// trailing digit that, for the numeric segment, was the byte it had just written. Every
-// zoneId DescribeAvailabilityZones has ever reported was therefore a form no real account
-// returns, and #712 is where that starts to bite: CreateVolume now accepts an
-// AvailabilityZoneId, so a consumer whose fixture carries the real "use1-az1" would have been
-// refused for naming the zone correctly.
+// The shape matters because CreateVolume accepts an AvailabilityZoneId, so a consumer whose
+// fixture carries the real "use1-az1" must find the zone by that name (#712).
 //
 // AWS states the rule in the AZ-ID reference — "An AZ ID consists of the first three letters
 // of the Region code, followed by the number at the end of the Region code, followed by -az,
@@ -5999,8 +5941,7 @@ func (p *EC2Plugin) modifySubnetAttribute(reqCtx *RequestContext, req *AWSReques
 		return nil, fmt.Errorf("ec2 modifySubnetAttribute unmarshal: %w", unmarshalErr)
 	}
 	// The published spelling, as API_ModifySubnetAttribute's Example 1 sends it:
-	// MapPublicIpOnLaunch.Value=true. Through v0.127.0 the Go field's initialism spelling was read
-	// instead, so every SDK's modify was discarded (#1151).
+	// MapPublicIpOnLaunch.Value=true, which is what every SDK sends (#1151).
 	if v, ok := req.Params["MapPublicIpOnLaunch.Value"]; ok {
 		subnet.MapPublicIPOnLaunch = v == "true"
 	}
@@ -6090,9 +6031,8 @@ func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) 
 		return nil, fmt.Errorf("ec2 modifyVpcAttribute unmarshal: %w", unmarshalErr)
 	}
 	// The published spellings, as API_ModifyVpcAttribute's example sends them
-	// (EnableDnsHostnames.Value=false). Through v0.127.0 the Go fields' initialism spellings were
-	// read instead, so every SDK's modify was discarded (#1151). Each is readable back through
-	// DescribeVpcAttribute.
+	// (EnableDnsHostnames.Value=false), which is what every SDK sends (#1151). Each is readable
+	// back through DescribeVpcAttribute.
 	if awsErr := ec2CheckVPCAttributeRequest(req.Params, vpc); awsErr != nil {
 		return nil, awsErr
 	}
@@ -6124,8 +6064,7 @@ func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) 
 
 // allocateAddress allocates an Elastic IP address.
 //
-// Of the seven request parameters API_AllocateAddress publishes, through v0.127.0 only Domain
-// was read, and it was echoed unvalidated (#1191). As of #1191:
+// Of the seven request parameters API_AllocateAddress publishes (#1191):
 //
 //   - Domain must be one of its Valid Values, vpc | standard, and defaults to vpc. Another
 //     value is InvalidParameterValue.
@@ -6406,8 +6345,8 @@ func (p *EC2Plugin) releaseAddress(reqCtx *RequestContext, req *AWSRequest) (*AW
 
 // describeAddresses reports the region's Elastic IPs.
 //
-// Selects on AllocationId.N, PublicIp.N and Filter.N. PublicIp.N is documented and was read by
-// nothing before #695; unlike AllocationId.N it goes through plain membership, because an
+// Selects on AllocationId.N, PublicIp.N and Filter.N (#695). Unlike AllocationId.N, PublicIp.N
+// goes through plain membership, because an
 // address is not an EC2 ID and there is no InvalidAddress.Malformed form to check against.
 //
 // No pagination: this operation publishes no MaxResults or NextToken, so there is none to add.
@@ -6557,10 +6496,10 @@ func ec2NatClientTokenKey(accountID, region, token string) string {
 // # AllocationId and PrivateIpAddress
 //
 // A named AllocationId that resolves to no Elastic IP is InvalidAllocationID.NotFound, from the
-// Common Error Types list the page links to (#1188; substrate's reading, #671). It used to be
-// dropped, building a public gateway with no public IP. PrivateIpAddress is honored when given
-// and must be an IPv4 address inside the subnet's CIDR block, else InvalidParameterValue, also
-// substrate's reading; when absent the address is derived from the gateway ID as before.
+// Common Error Types list the page links to (#1188; substrate's reading, #671), so a public
+// gateway is never built with no public IP. PrivateIpAddress is honored when given and must be
+// an IPv4 address inside the subnet's CIDR block, else InvalidParameterValue, also substrate's
+// reading; when absent the address is derived from the gateway ID.
 func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	subnetID := req.Params["SubnetId"]
 	allocationID := req.Params["AllocationId"]
@@ -6797,8 +6736,8 @@ func ec2CheckAddressInSubnet(address, cidr string) *AWSError {
 // describeNatGateways reports the NAT gateways the account holds in the region, narrowed by
 // NatGatewayId.N and by the filters [ec2NatGatewayFilterSpec] evaluates, one page at a time.
 //
-// It paginates as of #1024: API_DescribeNatGateways publishes MaxResults with "Valid Range: Minimum
-// value of 5. Maximum value of 1000." and NextToken, and substrate implemented neither. The rules
+// It paginates (#1024): API_DescribeNatGateways publishes MaxResults with "Valid Range: Minimum
+// value of 5. Maximum value of 1000." and NextToken. The rules
 // are the shared ones, and the ceiling is the same thousand DescribeInternetGateways publishes
 // rather than the hundred DescribeRouteTables does.
 func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -6897,8 +6836,8 @@ func (p *EC2Plugin) deleteNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 	if err := ec2NatGatewayProgressions.reset(context.Background(), p.state, natID); err != nil {
 		return nil, fmt.Errorf("ec2 deleteNatGateway reset progression: %w", err)
 	}
-	// API_DeleteNatGateway publishes natGatewayId alone (with requestId). The `state` element
-	// substrate used to add is on no page, so it is no longer answered.
+	// API_DeleteNatGateway publishes natGatewayId alone (with requestId); a `state` element is
+	// on no page, so none is answered.
 	type response struct {
 		XMLName      xml.Name `xml:"DeleteNatGatewayResponse"`
 		XMLNS        string   `xml:"xmlns,attr"`
@@ -6925,7 +6864,7 @@ var ec2SeededRegions = []struct {
 // describeRegions reports the seeded regions.
 //
 // All three filters this operation documents — endpoint, opt-in-status and region-name — are
-// evaluated as of #695; before it, Filter.N was accepted and ignored.
+// evaluated (#695).
 //
 // AllRegions is not read, and cannot change the answer: it asks for regions the account has
 // not opted into, and every seeded region is opt-in-not-required. By the same token an
@@ -6987,9 +6926,9 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 // InstanceType.N is honored, and unlike a filter it is an assertion that the types exist.
 // IncludeUnsupportedInRegion is not read; the catalog is the same in every region.
 //
-// It paginates as of #1024: API_DescribeInstanceTypes publishes MaxResults with "Valid Range:
-// Minimum value of 5. Maximum value of 100." and NextToken, and substrate read neither, so a caller
-// paging the catalog saw one page here and several in production. The hundred is this page's own,
+// It paginates (#1024): API_DescribeInstanceTypes publishes MaxResults with "Valid Range:
+// Minimum value of 5. Maximum value of 100." and NextToken, so a caller paging the catalog sees
+// the pages it sees in production. The hundred is this page's own,
 // shared only with DescribeRouteTables ([ec2MaxPublishedMaxResults100]).
 //
 // It gets **no** [ec2RefuseIDsWithMaxResults] call, for the reason
@@ -7072,7 +7011,7 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 		}
 		item := instanceTypeItem{
 			InstanceType: info.InstanceType,
-			// Not a constant since #1028: the catalog derives it per family from AWS's
+			// Not a constant (#1028): the catalog derives it per family from AWS's
 			// previous-generation table, so the three p3 sizes report false. The member
 			// carries no omitempty for that reason — a false currentGeneration is an
 			// answer, and dropping the element would make it indistinguishable from a
@@ -7119,8 +7058,8 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 // InstanceType.N; see [ec2CheckInstanceTypesExist] for why, and #485 for the real-AWS
 // diff of both.
 //
-// It paginates as of #1024: API_DescribeInstanceTypeOfferings publishes MaxResults with "Valid
-// Range: Minimum value of 5. Maximum value of 1000." and NextToken, and substrate read neither.
+// It paginates (#1024): API_DescribeInstanceTypeOfferings publishes MaxResults with "Valid
+// Range: Minimum value of 5. Maximum value of 1000." and NextToken.
 // This is the one converted describe whose page has **no ID-list parameter at all** — its whole
 // request is DryRun, Filter.N, LocationType, MaxResults and NextToken, the list #485 quotes — so
 // [ec2RefuseIDsWithMaxResults] has nothing to be called with, where DescribeInstanceTypes and
@@ -7156,10 +7095,8 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 	//
 	// Both zone arms read [ec2SeededZones], the single producer of the name/ID pair
 	// DescribeAvailabilityZones renders, so the two forms of the same zone cannot drift:
-	// us-east-1a and use1-az1 are one entry, not two derivations. availability-zone
-	// enumerated ec2SeededAZSuffixes directly until #893, which was equivalent only for as
-	// long as nothing else about a zone could vary — a zone the seed later reported as
-	// unavailable would have left the two arms disagreeing about which locations exist.
+	// us-east-1a and use1-az1 are one entry, not two derivations, so a zone the seed reports
+	// as unavailable leaves the two arms agreeing about which locations exist (#893).
 	locationType := req.Params["LocationType"]
 	if locationType == "" {
 		locationType = "availability-zone"
@@ -7195,7 +7132,7 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 	}
 
 	// Both filters are looked up with the two-value form because an absent filter and a
-	// filter naming no values are different requests and now get different answers: absent
+	// filter naming no values are different requests and get different answers: absent
 	// constrains nothing, while an empty value list matches nothing (#696). Indexing the map
 	// directly would conflate them and drop the whole catalog for an unfiltered query.
 	wantTypes, filterByType := filters["instance-type"]
@@ -7231,9 +7168,9 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 // DescribeInstanceTypes, whose InstanceType.N asserts existence; see
 // [ec2CheckInstanceTypesExist].
 //
-// It paginates as of #1024: API_DescribeSpotPriceHistory publishes MaxResults and NextToken and
-// substrate read neither. The page publishes no range for MaxResults, so the bound is
-// [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling].
+// It paginates (#1024): API_DescribeSpotPriceHistory publishes MaxResults and NextToken. The page
+// publishes no range for MaxResults, so the bound is [ec2MinUnpublishedMaxResults] with
+// [ec2NoMaxResultsCeiling].
 //
 // It is the one operation #1024 converts that gets **no** [ec2RefuseIDsWithMaxResults] call: the
 // service-wide rule is stated against "a list of IDs", and this page has no ID-list parameter at
@@ -7266,9 +7203,8 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 	}
 	// AZ filter — a scalar on this operation, not indexed, per AWS's parameter list.
 	azFilter := req.Params["AvailabilityZone"]
-	// ProductDescription.N filter (e.g. "Linux/UNIX"). Read at every index as of #695;
-	// before it only ProductDescription.1 was consulted, so a caller asking for two
-	// platforms was answered as if it had asked for the first.
+	// ProductDescription.N filter (e.g. "Linux/UNIX"), read at every index, so a caller
+	// asking for two platforms is answered about both (#695).
 	pdFilter := indexedParams(req.Params, "ProductDescription.%d")
 	if err := ec2SpotPriceFilterSpec().check(req.Params); err != nil {
 		return nil, err
@@ -7365,31 +7301,28 @@ func ec2LookupLaunchTemplate(goCtx context.Context, state StateManager, ctx *Req
 // Networking comes from the first network interface, because AWS's
 // RequestLaunchTemplateData has no top-level SubnetId member — a network interface
 // is the only place a template can name a subnet, and the only place
-// AssociatePublicIpAddress exists at all. Substrate previously accepted those
-// params and stored none of them, so an instance launched from a template
-// configured the way AWS requires landed in a substrate-chosen subnet (#444).
+// AssociatePublicIpAddress exists at all. Storing them is what lets an instance
+// launched from a template configured the way AWS requires land in the template's
+// subnet (#444).
 //
 // Every declared interface is parsed (#455). The flat SubnetID,
 // AssociatePublicIPAddress and NetworkInterfaceGroups fields hold the primary
-// interface's values, so a launch from this template lands where it did before and a
-// template stored before the slice existed still reads correctly; the slice carries
-// the rest, which used to be silently dropped.
+// interface's values, so a template stored before the slice existed still reads
+// correctly; the slice carries the rest.
 //
 // The interface's security groups are read from SecurityGroupId.N first, which is
 // what real SDKs send — the AWS model gives that member the locationName
 // "SecurityGroupId" — with Groups.N accepted as a secondary spelling for
 // hand-built requests, mirroring runInstances.
 //
-// TagSpecification.N and IamInstanceProfile were likewise accepted and stored
-// nowhere, so a template that tagged its instances produced untagged ones and a
-// template naming a role produced an instance with none — with nothing failing to
-// say so, and a tag: filter simply returning nothing (#471).
+// TagSpecification.N and IamInstanceProfile are stored too, so a template that tags its
+// instances produces tagged ones and a template naming a role produces an instance with it
+// (#471).
 //
-// #1471 swept the rest of RequestLaunchTemplateData for members dropped the same way, and
-// three more are read now. MetadataOptions, the issue's own, is validated as well as stored
-// ([ec2ParseMetadataOptions]), which is the one way this function refuses a request.
-// DisableApiTermination is stored and reaches the launch. And SecurityGroupId.N is read whole:
-// only SecurityGroupId.1 was, so a template naming two groups stored and launched with one.
+// Three more RequestLaunchTemplateData members are read (#1471). MetadataOptions is
+// validated as well as stored ([ec2ParseMetadataOptions]), which is the one way this
+// function refuses a request. DisableApiTermination is stored and reaches the launch. And
+// SecurityGroupId.N is read whole, so a template naming two groups launches with both.
 // The published members still not read — CapacityReservationSpecification, CpuOptions,
 // CreditSpecification, DisableApiStop, EbsOptimized, EnclaveOptions, HibernationOptions,
 // InstanceInitiatedShutdownBehavior, InstanceMarketOptions, InstanceRequirements, KernelId,
@@ -7489,9 +7422,8 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 
 	// The template's *own* tags, which are a different list from the two inside
 	// LaunchTemplateData: those scope to the instances and volumes a launch creates, and
-	// this one is on the template resource itself. Until #708 nothing read it, so
-	// EC2LaunchTemplate.Tags was never written by any path — ec2LaunchTemplateSummary has
-	// always rendered a tagSet from it, and the element was always empty.
+	// this one is on the template resource itself. It is what EC2LaunchTemplate.Tags holds,
+	// and ec2LaunchTemplateSummary renders a tagSet from it (#708).
 	ownTags := ec2TagSpecificationTags(req.Params, "", "launch-template")
 	if awsErr := ec2CheckTagRules(ownTags); awsErr != nil {
 		return nil, awsErr
@@ -7651,11 +7583,9 @@ func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
 
 // describeLaunchTemplates reports the region's launch templates.
 //
-// Two defects fixed in #695. Filter.N was accepted and ignored, so "the templates tagged
-// Env=prod" answered with every template in the region. And only LaunchTemplateId.1 and
-// LaunchTemplateName.1 were read, so a caller naming three templates was answered about one
-// — silently, since a one-element answer to a three-element question looks like two of them
-// not existing.
+// Filter.N is evaluated, so "the templates tagged Env=prod" answers with those templates, and
+// every LaunchTemplateId.N and LaunchTemplateName.N is read, so a caller naming three templates
+// is answered about three (#695).
 //
 // The two identity lists union, per [ec2SelectedByEither]. Each named template is resolved
 // through [EC2Plugin.resolveLaunchTemplate] rather than scanned for, because that is the
@@ -7665,14 +7595,13 @@ func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
 // A named template that does not exist fails the whole call (#1469), as every other EC2
 // describe's explicit ID list does (#391): an unknown ID is InvalidLaunchTemplateId.NotFound and
 // an unknown name InvalidLaunchTemplateName.NotFoundException, the IDs checked before the names
-// and each list in request order. See [ec2DescribeLaunchTemplatesNotFound]. It used to answer
-// an empty set, so code treating the exception as "not created yet" could not run here. The
+// and each list in request order, so code treating the exception as "not created yet" runs
+// here. See [ec2DescribeLaunchTemplatesNotFound]. The
 // check runs before Filter.N is applied, so a template that exists and is filtered out is still
 // an empty answer and not a refusal — the [ec2IDFilter] rule. The codes are not an [ec2IDKind]:
 // the kind's message names one ID, and this operation's names none.
 //
-// It paginates as of #1024, the last of the sixteen routed describes that published MaxResults and
-// NextToken and implemented neither. Its range is the only one in the set whose floor is not five:
+// It paginates (#1024). Its range is the only one in the set whose floor is not five:
 // API_DescribeLaunchTemplates publishes "Valid Range: Minimum value of 1. Maximum value of 200." and
 // repeats it in prose, the same sentence API_DescribeLaunchTemplateVersions states in prose alone, so
 // both launch-template pages share [ec2MinLaunchTemplateResults] and [ec2MaxLaunchTemplateResults]
@@ -7727,8 +7656,8 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 		// Every named identifier is looked up first, and an identifier that names nothing is
 		// then refused by its shape before by its absence (#1507): IDs, then names, each list in
 		// request order, so a malformed one anywhere is InvalidLaunchTemplateId.Malformed or
-		// InvalidLaunchTemplateName.MalformedException rather than the NotFound it used to share,
-		// even after a missing one. A stored template is answered whatever its identifier looks
+		// InvalidLaunchTemplateName.MalformedException rather than a NotFound, even after a
+		// missing one. A stored template is answered whatever its identifier looks
 		// like; see [ec2LaunchTemplateIdentifierMalformed].
 		//
 		// Dedup by ID: a request may name the same template by both spellings, and
@@ -7805,8 +7734,8 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	ltID := req.Params["LaunchTemplateId"]
 	ltName := req.Params["LaunchTemplateName"]
 
-	// By the identifier the request used: a delete by name answered the ID code until #1469,
-	// and an identifier of the wrong shape answered NotFound until #1507.
+	// By the identifier the request used: a delete by name answers the name code (#1469), and
+	// an identifier of the wrong shape answers its Malformed code rather than NotFound (#1507).
 	lt, awsErr := p.requireLaunchTemplate(goCtx, ctx, ltID, ltName)
 	if awsErr != nil {
 		return nil, awsErr
@@ -7850,13 +7779,10 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 //
 // AWS states the rule on both members: "Either AvailabilityZone or AvailabilityZoneId must be
 // specified, but not both." Each is Required: No on its own, which is why neither can be
-// checked with [ec2MissingParameter] — the requirement is on the pair. Before #712 substrate
-// read neither alternative: AvailabilityZoneId was ignored outright, and an absent
-// AvailabilityZone silently became region+"a", so a request that AWS refuses produced a volume
-// in a zone the caller never named and a request naming a zone *by ID* produced one in zone a.
-// Both failures are worse than a refusal for the same reason: the call reported success, so a
-// test asserting the volume landed where it was asked for could only fail later, when an
-// attach to an instance in another zone failed for no visible cause.
+// checked with [ec2MissingParameter] — the requirement is on the pair (#712). Defaulting an
+// absent zone, or ignoring a zone named by ID, would be worse than a refusal: the call would
+// report success, so a test asserting the volume landed where it was asked for could only
+// fail later, when an attach to an instance in another zone failed for no visible cause.
 //
 // A zone *name* is recorded as given and not checked against [ec2SeededZones]; a zone *ID*
 // must resolve, because it has to be translated into the name the record and every response
@@ -7903,12 +7829,11 @@ func ec2VolumeZone(region string, params map[string]string) (string, *AWSError) 
 
 // createVolume creates an EBS volume, tagging it from TagSpecification.N.
 //
-// Size and the zone follow AWS's two combination rules as of #712 — see [ec2VolumeZone] for
+// Size and the zone follow AWS's two combination rules (#712) — see [ec2VolumeZone] for
 // the zone pair, and "You must specify either a snapshot ID or a volume size" for the other.
-// A request naming neither Size nor SnapshotId used to get a silent 8 GiB volume, and one
-// naming an unparseable, zero or negative Size got the same, so `Size=-1` and `Size=huge`
-// both produced 8 GiB. [ec2DefaultVolumeSizeGiB] no longer backs this operation; it still
-// backs the launch path, where a mapping that names no size is legal and AWS does supply a
+// A request naming neither, or an unparseable, zero or negative Size, is refused rather than
+// given a default volume. [ec2DefaultVolumeSizeGiB] does not back this operation; it backs
+// the launch path, where a mapping that names no size is legal and AWS does supply a
 // default.
 //
 // The tags come from [ec2LaunchTagsForResource] scoped to "volume", which is the same
@@ -7967,9 +7892,8 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	// A named snapshot is checked and its size honored, the same two rules the launch
-	// path applies through [ec2CheckMappingSnapshot] — CreateVolume had an independent
-	// copy of the gap, so a restore from a 30 GiB snapshot produced an 8 GiB volume here
-	// too, and one naming a snapshot no account holds succeeded outright (#689). Both
+	// path applies through [ec2CheckMappingSnapshot], so a restore from a 30 GiB snapshot
+	// produces a 30 GiB volume and one naming a snapshot no account holds is refused (#689). Both
 	// AWS sentences are on CreateVolume's own Size member: "If you specify a snapshot,
 	// the default is the snapshot size" and "You can specify a volume size that is equal
 	// to or larger than the snapshot size."
@@ -8019,7 +7943,7 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 	encrypted := strings.ToLower(req.Params["Encrypted"]) == "true"
-	// Recorded as given, and tolerant where Size is now strict (#712): a value that does not
+	// Recorded as given, and tolerant where Size is strict (#712): a value that does not
 	// parse leaves the field at zero and the field is then omitted from the response, which
 	// is what a volume with no provisioned performance looks like. The two differ because
 	// their absences differ — a volume must have a size, so an unusable Size has no
@@ -8105,14 +8029,10 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 	// both a malformed volume ID and an unknown filter name answers
 	// InvalidVolumeID.Malformed. TestEC2_MalformedBeatsNotFound pins it.
 	//
-	// The hand-rolled loop this replaces (#731) did three things wrong, all of them
-	// silent. It never refused: an ID naming no volume narrowed the answer to nothing
-	// instead of raising InvalidVolume.NotFound, so a consumer's error branch was
-	// unreachable and a test asserting it passed while verifying the opposite. It broke
-	// on the first empty *value* rather than the first missing *key*, so an explicitly
-	// empty VolumeId.1 discarded VolumeId.2 and everything after it. And it read only
-	// the indexed form, so the un-indexed VolumeId some hand-built requests send was
-	// ignored entirely — a request naming one volume was answered about every volume.
+	// The shared ID walk (#731) refuses an ID naming no volume with InvalidVolume.NotFound,
+	// so a consumer's error branch is reachable; it stops at the first missing *key* rather
+	// than the first empty *value*, so an explicitly empty VolumeId.1 does not discard
+	// VolumeId.2; and it reads the un-indexed VolumeId some hand-built requests send.
 	// The three pagination parameters are read before anything is resolved, and the
 	// combination refusal before the ID list's own syntax, for the reasons
 	// [ec2RefuseIDsWithMaxResults] and [ec2NextTokenOffset] give: a refusal that depends on
@@ -8142,16 +8062,11 @@ func (p *EC2Plugin) describeVolumes(reqCtx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 
-	// Filters come from the shared [extractEC2Filters] walk rather than a hand-rolled
-	// one. The hand-rolled loop this replaces switched on the filter name *inside* the
-	// value loop, into nine map[string]bool sets — a shape that cannot express
-	// tag:<key>, since the key is part of the name (#670).
-	//
-	// Two behavior changes come with the shared walk, both fidelity improvements worth
-	// naming rather than leaving to be discovered. It records an empty filter value as a
-	// value, where the old loop's `if val == "" { break }` truncated the list at it. And
-	// it keeps a filter whose value list is empty, so `tag:Env` with no value is a filter
-	// that matches nothing rather than one that was never seen.
+	// Filters come from the shared [extractEC2Filters] walk, which can express tag:<key>,
+	// since the key is part of the name (#670). It records an empty filter value as a value
+	// rather than truncating the list at it, and it keeps a filter whose value list is
+	// empty, so `tag:Env` with no value is a filter that matches nothing rather than one
+	// that was never seen.
 	filters := extractEC2Filters(req.Params)
 
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, ec2VolumeStatePrefix(reqCtx.AccountID, reqCtx.Region))
@@ -8416,13 +8331,9 @@ func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // deleteSnapshot deletes the snapshot SnapshotId names, refusing an ID that names nothing
 // and one an AMI still references.
 //
-// The record has been deleted since #325 — the doc comment this replaces claimed otherwise
-// ("Substratefs does not persist snapshots; the operation succeeds"), which was false for
-// long enough that #710 was filed to fix a deletion that already worked. What did not work
-// was the validation. A well-formed ID naming no snapshot answered 200 and `return true`,
-// so a consumer's cleanup could delete the wrong ID, or the same ID twice, or an ID it had
-// typoed, and be told each time that a snapshot had been deleted. AWS documents
-// InvalidSnapshot.NotFound: "The specified snapshot does not exist."
+// A well-formed ID naming no snapshot is refused (#710), so a consumer's cleanup that deletes
+// the wrong ID, the same ID twice, or a typoed ID is not told a snapshot was deleted. AWS
+// documents InvalidSnapshot.NotFound: "The specified snapshot does not exist."
 //
 // # The in-use rule
 //
@@ -8433,7 +8344,7 @@ func (p *EC2Plugin) detachVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // (see [ec2RootMappingSnapshot]) — so consulting that member alone *is* AWS's scoping rather
 // than an approximation of it.
 //
-// Since #711 an AMI can also reference non-root snapshots, through the rest of its recorded
+// An AMI can also reference non-root snapshots (#711), through the rest of its recorded
 // mapping, and this rule deliberately does not protect those: AWS's sentence names the root
 // device specifically, and #671 settled that substrate models what the API model states. The
 // consequence is observable and is the one API-reachable route to an AMI whose mapping names
