@@ -74,3 +74,13 @@ func (r pageSizeRange) resolve(v *int) (int, bool) {
 func (r pageSizeRange) outOfRange(v int) string {
 	return fmt.Sprintf("%s must be between %d and %d, was %d", r.member, r.min, r.max, v)
 }
+
+// check resolves v as [pageSizeRange.resolve] does and renders the refusal for a value outside the
+// range through refuse, the constructor of the calling service's published code.
+func (r pageSizeRange) check(v *int, refuse func(message string) *AWSError) (int, *AWSError) {
+	n, ok := r.resolve(v)
+	if !ok {
+		return 0, refuse(r.outOfRange(*v))
+	}
+	return n, nil
+}

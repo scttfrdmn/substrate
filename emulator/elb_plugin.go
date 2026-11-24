@@ -204,14 +204,16 @@ func (p *ELBPlugin) createLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 }
 
 func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// The cursor is resolved before any state is read (#1244); see [elbPageCursor].
-	offset, pageSize, awsErr := elbPageCursor(req)
-	if awsErr != nil {
-		return nil, awsErr
-	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	names := extractIndexedParams(req.Params, "Names.member")
 	arns := extractIndexedParams(req.Params, "LoadBalancerArns.member")
+	// The cursor is resolved before any state is read; see [elbMarker].
+	pr, awsErr := elbMarker(req, "DescribeLoadBalancers", map[string][]string{
+		"Names": names, "LoadBalancerArns": arns,
+	})
+	if awsErr != nil {
+		return nil, awsErr
+	}
 
 	allKeys, err := p.state.List(context.Background(), elbNamespace, "lb:"+scope+"/")
 	if err != nil {
@@ -253,14 +255,18 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 		return nil, err
 	}
 	// Paged after every named record is found, so a missing name is refused whichever page it
-	// would have fallen on. The order is the key order [StateManager.List] guarantees (#865).
-	page, next := pageByOffsetToken(matched, offset, pageSize)
+	// would have fallen on. The listing is in ARN order, which the cursor compares in.
+	res, err := page(matched, func(lb elbLBItem) cursorKey { return cursorKey{Sort: lb.LoadBalancerArn} }, pr)
+	if err != nil {
+		return nil, err
+	}
+	pg, next := res.Items, res.Next
 	type lbResult struct {
 		LoadBalancers []elbLBItem `xml:"LoadBalancers>member"`
 		NextMarker    string      `xml:"NextMarker,omitempty"`
 	}
 	return queryOKResponse(reqCtx, "DescribeLoadBalancers", elbXMLNS,
-		lbResult{LoadBalancers: page, NextMarker: next})
+		lbResult{LoadBalancers: pg, NextMarker: next})
 }
 
 func (p *ELBPlugin) deleteLoadBalancer(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -365,14 +371,16 @@ func (p *ELBPlugin) createTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 }
 
 func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// The cursor is resolved before any state is read (#1244); see [elbPageCursor].
-	offset, pageSize, awsErr := elbPageCursor(req)
-	if awsErr != nil {
-		return nil, awsErr
-	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	names := extractIndexedParams(req.Params, "Names.member")
 	arns := extractIndexedParams(req.Params, "TargetGroupArns.member")
+	// The cursor is resolved before any state is read; see [elbMarker].
+	pr, awsErr := elbMarker(req, "DescribeTargetGroups", map[string][]string{
+		"Names": names, "TargetGroupArns": arns, "LoadBalancerArn": {req.Params["LoadBalancerArn"]},
+	})
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	if err := p.elbRequireHeld(scope, elbLBKeyPrefix, req.Params["LoadBalancerArn"], elbKindLoadBalancer); err != nil {
 		return nil, err
 	}
@@ -414,13 +422,18 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 	if err := elbRequireEveryARN(names, heldNames, elbKindTargetGroup); err != nil {
 		return nil, err
 	}
-	page, next := pageByOffsetToken(matched, offset, pageSize)
+	// The listing is in ARN order, which the cursor compares in.
+	res, err := page(matched, func(item elbTGItem) cursorKey { return cursorKey{Sort: item.TargetGroupArn} }, pr)
+	if err != nil {
+		return nil, err
+	}
+	pg, next := res.Items, res.Next
 	type tgResult struct {
 		TargetGroups []elbTGItem `xml:"TargetGroups>member"`
 		NextMarker   string      `xml:"NextMarker,omitempty"`
 	}
 	return queryOKResponse(reqCtx, "DescribeTargetGroups", elbXMLNS,
-		tgResult{TargetGroups: page, NextMarker: next})
+		tgResult{TargetGroups: pg, NextMarker: next})
 }
 
 func (p *ELBPlugin) deleteTargetGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -699,14 +712,16 @@ func (p *ELBPlugin) createListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 }
 
 func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// The cursor is resolved before any state is read (#1244); see [elbPageCursor].
-	offset, pageSize, awsErr := elbPageCursor(req)
-	if awsErr != nil {
-		return nil, awsErr
-	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	listenerARNs := extractIndexedParams(req.Params, "ListenerArns.member")
 	lbARN := req.Params["LoadBalancerArn"]
+	// The cursor is resolved before any state is read; see [elbMarker].
+	pr, awsErr := elbMarker(req, "DescribeListeners", map[string][]string{
+		"ListenerArns": listenerARNs, "LoadBalancerArn": {lbARN},
+	})
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	if err := p.elbRequireHeld(scope, elbLBKeyPrefix, lbARN, elbKindLoadBalancer); err != nil {
 		return nil, err
 	}
@@ -741,13 +756,18 @@ func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (
 	if err := elbRequireEveryARN(listenerARNs, held, elbKindListener); err != nil {
 		return nil, err
 	}
-	page, next := pageByOffsetToken(matched, offset, pageSize)
+	// The listing is in ARN order, which the cursor compares in.
+	res, err := page(matched, func(item elbListenerItem) cursorKey { return cursorKey{Sort: item.ListenerArn} }, pr)
+	if err != nil {
+		return nil, err
+	}
+	pg, next := res.Items, res.Next
 	type listenerResult struct {
 		Listeners  []elbListenerItem `xml:"Listeners>member"`
 		NextMarker string            `xml:"NextMarker,omitempty"`
 	}
 	return queryOKResponse(reqCtx, "DescribeListeners", elbXMLNS,
-		listenerResult{Listeners: page, NextMarker: next})
+		listenerResult{Listeners: pg, NextMarker: next})
 }
 
 func (p *ELBPlugin) deleteListener(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -900,14 +920,16 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 }
 
 func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// The cursor is resolved before any state is read (#1244); see [elbPageCursor].
-	offset, pageSize, awsErr := elbPageCursor(req)
-	if awsErr != nil {
-		return nil, awsErr
-	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	ruleARNs := extractIndexedParams(req.Params, "RuleArns.member")
 	listenerARN := req.Params["ListenerArn"]
+	// The cursor is resolved before any state is read; see [elbMarker].
+	pr, awsErr := elbMarker(req, "DescribeRules", map[string][]string{
+		"RuleArns": ruleARNs, "ListenerArn": {listenerARN},
+	})
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	if err := p.elbRequireHeld(scope, elbListenerKeyPrefix, listenerARN, elbKindListener); err != nil {
 		return nil, err
 	}
@@ -942,13 +964,18 @@ func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if err := elbRequireEveryARN(ruleARNs, held, elbKindRule); err != nil {
 		return nil, err
 	}
-	page, next := pageByOffsetToken(matched, offset, pageSize)
+	// The listing is in ARN order, which the cursor compares in.
+	res, err := page(matched, func(item elbRuleItem) cursorKey { return cursorKey{Sort: item.RuleArn} }, pr)
+	if err != nil {
+		return nil, err
+	}
+	pg, next := res.Items, res.Next
 	type ruleResult struct {
 		Rules      []elbRuleItem `xml:"Rules>member"`
 		NextMarker string        `xml:"NextMarker,omitempty"`
 	}
 	return queryOKResponse(reqCtx, "DescribeRules", elbXMLNS,
-		ruleResult{Rules: page, NextMarker: next})
+		ruleResult{Rules: pg, NextMarker: next})
 }
 
 func (p *ELBPlugin) deleteRule(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

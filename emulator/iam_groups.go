@@ -107,7 +107,8 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -131,7 +132,7 @@ func (p *IAMPlugin) listGroupsForUser(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, err
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(names, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(names, pg)
 
 	groups := make([]*IAMGroup, 0, len(page))
 	for _, name := range page {

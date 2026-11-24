@@ -13,7 +13,7 @@
 | GetDistributionConfig | Answers the configuration the create or last update sent, with what `CreateDistribution` defaults filled in, and the `ETag` header — see [An update replaces the configuration](#an-update-replaces-the-configuration) |
 | UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb. Replaces the configuration; requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412); refuses `MissingBody`, `IllegalUpdate` and `InvalidArgument`/400 one member per call (#1271) |
 | DeleteDistribution | Requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412) and a disabled distribution (`DistributionNotDisabled`/409) (#1271). Releases the distribution's `CallerReference` (#1116) |
-| ListDistributions | Each `DistributionSummary` copies its configuration members from the stored configuration and answers `LastModifiedTime` and `ETag` (#1115). Each distribution it reports spends one observation of its own seeded `Status` window (#1381) |
+| ListDistributions | Each `DistributionSummary` copies its configuration members from the stored configuration and answers `LastModifiedTime` and `ETag` (#1115). Each distribution it reports spends one observation of its own seeded `Status` window (#1381). [Pages on `Marker`/`MaxItems`](#the-two-listings-page) |
 | CreateInvalidation | Keeps and answers the `InvalidationBatch`; a resubmitted batch returns the first invalidation (#1360) |
 | GetInvalidation | `NoSuchDistribution` and `NoSuchInvalidation` are both published and name different absences (#1091) |
 | ListInvalidations | Refuses a distribution that does not exist rather than answering an empty list (#1091) |
@@ -22,7 +22,7 @@
 | ListTagsForResource | Reports the `<Tags><Items>` members sorted by key — see [A tag set read back out of a map](/reference/concepts/listing-order#a-tag-set-read-back-out-of-a-map) |
 | CreateOriginAccessControl | 201 with the `ETag` and `Location` headers; the four required config members are validated against their published enums — see [The origin access control family](#the-origin-access-control-family) |
 | GetOriginAccessControl | 200 with the `ETag` header; absent → `NoSuchOriginAccessControl` |
-| ListOriginAccessControls | An account using no origin access controls answers **no `Items` element** |
+| ListOriginAccessControls | An account using no origin access controls answers **no `Items` element**. [Pages on `Marker`/`MaxItems`](#the-two-listings-page) |
 | DeleteOriginAccessControl | 204. `If-Match` required: missing or malformed → `InvalidIfMatchVersion`, well-formed but stale → `PreconditionFailed`. `OriginAccessControlInUse` is not answered — see below |
 
 All three tagging operations share the `POST`/`GET /2020-05-31/tagging` path and are told apart
@@ -90,11 +90,10 @@ a stale one — and it is a statement about substrate's own minting rather than 
 CloudFront accepts. A quoted `If-Match` is accepted as well as a bare one, since HTTP ETags are
 conventionally quoted and CloudFront's are not.
 
-`ListOriginAccessControls` answers the whole list, and an account using none answers **no `Items`
+An account using no origin access controls answers **no `Items`
 element at all** rather than an empty one — the page states exactly that, and it is the difference
-between a caller's `len(Items) == 0` and a decode that has nothing to decode. `Marker`, `MaxItems`
-and `NextMarker` are published members and are not rendered, for the reason `ListDistributions`
-omits them: substrate holds no value for a page boundary it never draws.
+between a caller's `len(Items) == 0` and a decode that has nothing to decode. The listing pages as
+[`ListDistributions` does](#the-two-listings-page).
 
 Two published behaviours are deliberately absent. **`OriginAccessControlInUse`/409** on delete needs
 to know that some distribution names the control. Since
@@ -169,8 +168,26 @@ A path ending in a bare slash is *not* that case. `/2020-05-31/distribution/` ha
 slash trimmed before routing, so it is `ListDistributions` — not a `GetDistribution` with an empty
 ID, which is the natural reading of the routing arithmetic and is wrong.
 
-`DistributionList`'s `Marker` and `MaxItems` are `Required: Yes` and are not rendered: Substrate
-paginates no list of distributions, and the page publishes no default page size to report (#1568).
+## The two listings page
+
+[#1568](https://github.com/scttfrdmn/substrate/issues/1568). `ListDistributions` and
+`ListOriginAccessControls` read the `Marker` and `MaxItems` query parameters and list in **ID order**.
+
+- Every page answers `Marker` (the request's, empty when absent), `MaxItems`, `IsTruncated` and
+  `Quantity` (the page's item count); `NextMarker` is present only when `IsTruncated` is true, and is
+  the ID of the page's last item, as `API_ListDistributions` publishes ("which is also the ID of the
+  last distribution on that page").
+- The page starts strictly after the `Marker`, so a create or delete between pages neither skips nor
+  repeats an item that survives. Any `Marker` is accepted: one naming a deleted or unknown ID resumes
+  after where that ID sorts ([cursor pagination](/reference/concepts/listing-order#cursor-pagination)).
+- An absent `MaxItems` is **100, substrate's reading**: neither page publishes a default. A `MaxItems`
+  that is not a positive integer is `InvalidArgument`/400, the one code both pages publish; the
+  message is substrate's own.
+- `ListDistributions` pages over the index before it reads any record, so only the distributions on
+  the page spend an observation of their seeded `Status` countdown.
+
+`ListInvalidations` reads neither member and answers every batch; its page publishes a
+most-recent-first order, which needs its own cursor ([#1677](https://github.com/scttfrdmn/substrate/issues/1677)).
 
 ## A CallerReference is used once
 

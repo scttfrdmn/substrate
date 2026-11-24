@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"testing"
 	"time"
 
@@ -179,27 +180,187 @@ func TestRAMPagination_AnExpiryMidWalkSkipsNoShare(t *testing.T) {
 	assert.Empty(t, page2.NextToken)
 }
 
-// TestRAMPagination_AnOffsetPastAShrunkenListingClamps records the offset cursor's behavior on
-// ListPrincipals when the listing shrinks between pages: a token past the shrunken end is still one
-// substrate issued, and answers an empty final page.
-func TestRAMPagination_AnOffsetPastAShrunkenListingClamps(t *testing.T) {
+// ramEntry is one ListPrincipals or ListResources item's cursor pair.
+type ramEntry struct {
+	Share string `json:"resourceShareArn"`
+	ID    string `json:"id"`
+	ARN   string `json:"arn"`
+}
+
+// key is the entry's (share, entity) pair, which is also the listing's order.
+func (e ramEntry) key() string { return e.Share + "|" + e.ID + e.ARN }
+
+// ramEntries decodes a page's items.
+func ramEntries(t *testing.T, items []json.RawMessage) []ramEntry {
+	t.Helper()
+	out := make([]ramEntry, 0, len(items))
+	for _, raw := range items {
+		var e ramEntry
+		require.NoError(t, json.Unmarshal(raw, &e))
+		out = append(out, e)
+	}
+	return out
+}
+
+// TestRAMPagination_ListingsRenderInCursorOrder pins the order ListPrincipals and ListResources
+// compare in: resource-share ARN, then principal ID or resource ARN, whatever the association order.
+func TestRAMPagination_ListingsRenderInCursorOrder(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
-	a := ramOwnershipShare(t, ts, "a", []string{"111111111111"}, nil)
-	b := ramOwnershipShare(t, ts, "b", []string{"222222222222"}, nil)
+	ramOwnershipShare(t, ts, "ordered", []string{"333333333333", "111111111111", "222222222222"},
+		[]string{
+			"arn:aws:ec2:us-east-1:123456789012:subnet/subnet-c",
+			"arn:aws:ec2:us-east-1:123456789012:subnet/subnet-a",
+		})
+	ramOwnershipShare(t, ts, "second", []string{"444444444444"}, nil)
 
-	page1 := ramPageCall(t, ts, "/listprincipals", "principals", map[string]any{"resourceOwner": "SELF", "maxResults": 1})
-	require.Len(t, page1.Items, 1)
-	require.NotEmpty(t, page1.NextToken)
-	for _, arn := range []string{a, b} {
-		status, raw := ramOwnershipCall(t, ts, "/deleteresourceshare", map[string]any{"resourceShareArn": arn})
-		require.Equal(t, http.StatusOK, status, "%s", raw)
+	for _, tc := range []struct{ path, member string }{
+		{"/listprincipals", "principals"},
+		{"/listresources", "resources"},
+	} {
+		page := ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF"})
+		keys := []string{}
+		for _, e := range ramEntries(t, page.Items) {
+			keys = append(keys, e.key())
+		}
+		assert.True(t, sort.StringsAreSorted(keys), "%s lists in (share, entity) order: %v", tc.path, keys)
 	}
-	page2 := ramPageCall(t, ts, "/listprincipals", "principals", map[string]any{
-		"resourceOwner": "SELF", "maxResults": 1, "nextToken": page1.NextToken,
-	})
-	assert.Empty(t, page2.Items, "the offset past the shrunken end clamps to an empty page")
-	assert.Empty(t, page2.NextToken, "and the walk ends")
+}
+
+// TestRAMPagination_AWalkSurvivesMidWalkChanges walks each listing a page at a time and, between the
+// first and second pages, deletes a share, disassociates the entity the token names, and associates a
+// new one on each side of the cursor. Every item that survives is returned exactly once.
+func TestRAMPagination_AWalkSurvivesMidWalkChanges(t *testing.T) {
+	t.Parallel()
+	subnet := func(s string) string { return "arn:aws:ec2:us-east-1:123456789012:subnet/subnet-" + s }
+	for _, tc := range []struct {
+		path, member, assocMember string
+		entity                    func(ramEntry) string
+		values                    func(...string) []string
+	}{
+		{"/listprincipals", "principals", "principals", func(e ramEntry) string { return e.ID },
+			func(s ...string) []string {
+				out := []string{}
+				for _, v := range s {
+					out = append(out, "1111111111"+v)
+				}
+				return out
+			}},
+		{"/listresources", "resources", "resourceArns", func(e ramEntry) string { return e.ARN },
+			func(s ...string) []string {
+				out := []string{}
+				for _, v := range s {
+					out = append(out, subnet(v))
+				}
+				return out
+			}},
+	} {
+		t.Run(tc.member, func(t *testing.T) {
+			t.Parallel()
+			ts := emulator.StartTestServer(t)
+			create := func(name string, values []string) string {
+				if tc.member == "principals" {
+					return ramOwnershipShare(t, ts, name, values, nil)
+				}
+				return ramOwnershipShare(t, ts, name, nil, values)
+			}
+			create("s1", tc.values("10", "20", "30"))
+			create("s2", tc.values("40", "50"))
+			create("s3", tc.values("60"))
+			whole := ramEntries(t, ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF"}).Items)
+			require.Len(t, whole, 6)
+
+			page1 := ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF", "maxResults": 2})
+			first := ramEntries(t, page1.Items)
+			require.Len(t, first, 2)
+			require.NotEmpty(t, page1.NextToken)
+			cursor := first[1]
+			// The deleted share is the last in the listing that is not the cursor's.
+			doomed := ""
+			for _, e := range whole {
+				if e.Share != cursor.Share {
+					doomed = e.Share
+				}
+			}
+			require.NotEmpty(t, doomed)
+
+			// The cursor's own entity is disassociated, one is added before the cursor and one after,
+			// and a later share is deleted outright.
+			change := func(path string, values []string) {
+				status, raw := ramOwnershipCall(t, ts, path, map[string]any{
+					"resourceShareArn": cursor.Share, tc.assocMember: values,
+				})
+				require.Equal(t, http.StatusOK, status, "%s", raw)
+			}
+			change("/disassociateresourceshare", []string{tc.entity(cursor)})
+			change("/associateresourceshare", tc.values("00", "99"))
+			status, raw := ramOwnershipCall(t, ts, "/deleteresourceshare", map[string]any{"resourceShareArn": doomed})
+			require.Equal(t, http.StatusOK, status, "%s", raw)
+
+			walked := append([]ramEntry(nil), first...)
+			token := page1.NextToken
+			for pages := 0; token != ""; pages++ {
+				require.Less(t, pages, 10, "the walk terminates")
+				pg := ramPageCall(t, ts, tc.path, tc.member, map[string]any{
+					"resourceOwner": "SELF", "maxResults": 2, "nextToken": token,
+				})
+				walked = append(walked, ramEntries(t, pg.Items)...)
+				token = pg.NextToken
+			}
+
+			seen := map[string]int{}
+			for _, e := range walked {
+				seen[e.key()]++
+				assert.Equal(t, 1, seen[e.key()], "%s returned twice", e.key())
+			}
+			for _, e := range whole[2:] {
+				if e.Share == doomed {
+					assert.Zero(t, seen[e.key()], "an item of the deleted share is not listed")
+					continue
+				}
+				assert.Equal(t, 1, seen[e.key()], "the surviving item %s is returned exactly once", e.key())
+			}
+			added := tc.values("99")[0]
+			assert.Equal(t, 1, seen[cursor.Share+"|"+added], "an item added after the cursor is reached")
+			assert.Zero(t, seen[cursor.Share+"|"+tc.values("00")[0]], "an item added before the cursor is not")
+		})
+	}
+}
+
+// TestRAMPagination_ATokenIsBoundToItsFilters refuses a ListPrincipals or ListResources token reused
+// with different filter members, and a forged token, with InvalidNextTokenException/400.
+func TestRAMPagination_ATokenIsBoundToItsFilters(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	for i := range 3 {
+		ramOwnershipShare(t, ts, fmt.Sprintf("bound-%d", i),
+			[]string{fmt.Sprintf("11111111111%d", i)},
+			[]string{fmt.Sprintf("arn:aws:ec2:us-east-1:123456789012:subnet/subnet-%d", i)})
+	}
+	forged := base64.StdEncoding.EncodeToString([]byte(`{"o":"ListPrincipals","h":"0000000000000000","s":"x","t":"y"}`))
+	for _, tc := range []struct {
+		path, member string
+		filter       map[string]any
+	}{
+		{"/listprincipals", "principals", map[string]any{"principals": []string{"111111111111"}}},
+		{"/listresources", "resources", map[string]any{"resourceType": "ec2:Subnet"}},
+	} {
+		page := ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF", "maxResults": 1})
+		require.NotEmpty(t, page.NextToken)
+
+		reused := map[string]any{"resourceOwner": "SELF", "nextToken": page.NextToken}
+		for k, v := range tc.filter {
+			reused[k] = v
+		}
+		for name, body := range map[string]map[string]any{
+			"a token reused with another filter": reused,
+			"a forged token":                     {"resourceOwner": "SELF", "nextToken": forged},
+		} {
+			status, code := ramOwnershipErrorCode(t, ts, tc.path, body)
+			assert.Equal(t, http.StatusBadRequest, status, "%s %s", tc.path, name)
+			assert.Equal(t, "InvalidNextTokenException", code, "%s %s", tc.path, name)
+		}
+	}
 }
 
 // ramOwnershipPage is one GetResourceShares page with its token.

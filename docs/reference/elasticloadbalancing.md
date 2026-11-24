@@ -46,13 +46,24 @@ All six paginated operations — ELBv2 `DescribeLoadBalancers`, `DescribeTargetG
   issued is refused `ValidationError`/400, never answered with page one, because a paging loop
   cannot see a cursor that resets ([#915](https://github.com/scttfrdmn/substrate/issues/915)). No
   operation publishes a code for a bad marker; `ValidationError` is the Query Common Errors page's
-  code, which each operation links as its own, and the message is substrate's own. A marker past the
-  end answers an empty last page, because a listing can shrink during a walk.
+  code, which each operation links as its own, and the message is substrate's own.
+- **The five resource describes page on a value cursor**
+  ([#1528](https://github.com/scttfrdmn/substrate/issues/1528)): each lists in **ARN order** (classic
+  `DescribeLoadBalancers`: **name order**), and the marker is the shared
+  [cursor token](/reference/concepts/listing-order#cursor-pagination) naming the page's last ARN or
+  name. The next page starts strictly after it, so a create or delete between pages neither skips
+  nor repeats a record that survives, and a marker naming a deleted record resumes where it was. The
+  marker is bound to its operation and to the request's filter members (`Names`, `LoadBalancerArns`,
+  `TargetGroupArns`, `ListenerArns`, `RuleArns`, `LoadBalancerArn`, `ListenerArn`,
+  `LoadBalancerNames`), compared as sets; a marker from another describe or reused with different
+  filters is refused `ValidationError`/400. A name listed twice in classic `LoadBalancerNames` is
+  listed once.
+- `DescribeAccountLimits` lists a fixed set, so its marker is a base64 offset; one past the end
+  answers an empty last page.
 - `NextMarker` is present when a further page exists and **absent**, not empty, when the walk is
   exhausted, as the v2 pages publish ("Otherwise, this is null").
-- The four describes page over the key order the state store guarantees
-  ([#865](https://github.com/scttfrdmn/substrate/issues/865)), after every named ARN or name has
-  been resolved, so a name naming nothing is refused whichever page it would have fallen on.
+- The describes page after every named ARN or name has been resolved, so a name naming nothing is
+  refused whichever page it would have fallen on.
 
 Every operation whose output shape carries no members answers
 `<OperationResponse><OperationResult/><ResponseMetadata>…</ResponseMetadata></OperationResponse>`.
@@ -395,7 +406,7 @@ decision, on the ground that the operation publishes no code for a bad marker. T
 already refused a marker it never issued, for the reason
 [#915](https://github.com/scttfrdmn/substrate/issues/915) gives — a paging loop cannot see a cursor
 that resets. The operation now takes the plugin's one cursor rule (see [Paging](#paging-the-six-paginated-operations)): the
-marker is the same opaque cursor the other five operations issue, an unissued one is refused
+marker is a base64 offset into its fixed set, an unissued one is refused
 `ValidationError`/400, and an offset past the end stays an empty last page, which is a walk that has
 ended rather than a malformed cursor.
 

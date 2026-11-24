@@ -1111,61 +1111,61 @@ func TestSimulate_OperationsAreAuthorized(t *testing.T) {
 	}
 }
 
-// TestSimulate_MarkerEdges covers the cursor's tolerant arms.
-//
-// paginateIAMKeys treats an undecodable Marker as the start of the list rather than
-// as an error, and the simulator matches it: refusing a cursor a caller
-// round-tripped would be worse than restarting a page. A cursor past the end
-// likewise returns an empty final page rather than indexing out of range.
+// TestSimulate_MarkerEdges covers the cursor's edges: a Marker the simulator did not
+// issue is InvalidInput/400, published by both simulate operations, rather than page
+// one; a cursor past the end is an empty final page rather than indexing out of range.
 func TestSimulate_MarkerEdges(t *testing.T) {
 	t.Parallel()
 
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	tests := []struct {
-		name       string
-		marker     string
-		wantCount  int
-		wantAction string
+		name      string
+		marker    string
+		wantCode  string
+		wantCount int
 	}{
-		{
-			name:       "a marker substrate did not mint restarts the list",
-			marker:     "not-base64!!",
-			wantCount:  1,
-			wantAction: "s3:GetObject",
-		},
-		{
-			name:       "base64 of a non-number restarts the list",
-			marker:     base64.StdEncoding.EncodeToString([]byte("ninety")),
-			wantCount:  1,
-			wantAction: "s3:GetObject",
-		},
-		{
-			name:      "a marker past the end is an empty final page",
-			marker:    base64.StdEncoding.EncodeToString([]byte("99")),
-			wantCount: 0,
-		},
+		{name: "a marker substrate did not mint is refused", marker: "not-base64!!", wantCode: "InvalidInput"},
+		{name: "base64 of a non-number is refused", marker: enc("ninety"), wantCode: "InvalidInput"},
+		{name: "base64 of a negative index is refused", marker: enc("-1"), wantCode: "InvalidInput"},
+		{name: "base64 of a form the encoder never emits is refused", marker: enc("01"), wantCode: "InvalidInput"},
+		{name: "a marker past the end is an empty final page", marker: enc("99")},
+		{name: "the issued marker resumes after the first result", marker: enc("1"), wantCount: 1},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := newIAMTestServer(t)
+	for _, op := range []string{"SimulateCustomPolicy", "SimulatePrincipalPolicy"} {
+		for _, tc := range tests {
+			t.Run(op+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				srv := newIAMTestServer(t)
+				body := map[string]any{
+					"ActionNames":     []string{"s3:GetObject", "s3:PutObject"},
+					"PolicyInputList": []string{iamPolicyJSON(t, "Allow", []string{"s3:*"}, "*")},
+					"MaxItems":        1,
+					"Marker":          tc.marker,
+				}
+				if op == "SimulatePrincipalPolicy" {
+					body["PolicySourceArn"] = "arn:aws:iam::123456789012:user/sim-marker"
+					iamRequireOK(t, srv, "CreateUser", map[string]any{"UserName": "sim-marker"})
+				}
 
-			got := iamSimulate(t, srv, "SimulateCustomPolicy", map[string]any{
-				"ActionNames":     []string{"s3:GetObject", "s3:PutObject"},
-				"PolicyInputList": []string{iamPolicyJSON(t, "Allow", []string{"s3:*"}, "*")},
-				"MaxItems":        1,
-				"Marker":          tc.marker,
-			})
-			require.Len(t, got.results(), tc.wantCount)
-			if tc.wantAction != "" {
-				assert.Equal(t, tc.wantAction, got.results()[0].ActionName)
-			}
-			if tc.wantCount == 0 {
+				if tc.wantCode != "" {
+					resp := iamRequest(t, srv, op, body)
+					require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+					var result map[string]any
+					decodeIAMXML(t, resp, &result)
+					assert.Equal(t, tc.wantCode, result["__type"])
+					return
+				}
+				got := iamSimulate(t, srv, op, body)
+				require.Len(t, got.results(), tc.wantCount)
 				truncated, marker := got.page()
 				assert.False(t, truncated)
 				assert.Empty(t, marker)
-			}
-		})
+				if tc.wantCount == 1 {
+					assert.Equal(t, "s3:PutObject", got.results()[0].ActionName)
+				}
+			})
+		}
 	}
 }
 

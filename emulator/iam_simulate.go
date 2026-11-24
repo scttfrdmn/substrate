@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -236,6 +235,14 @@ func (p *IAMPlugin) parseSimulateRequest(req *AWSRequest) (*iamSimulateRequest, 
 			fmt.Sprintf("MaxItems must be between %d and %d",
 				iamMaxItemsMin, iamSimulateMaxMaxItems),
 			http.StatusBadRequest)
+	}
+	// A Marker the simulator did not issue is refused with the same published InvalidInput
+	// ("The request was rejected because an invalid or out-of-range value was supplied for an
+	// input parameter.", API_SimulatePrincipalPolicy and API_SimulateCustomPolicy, Errors) rather
+	// than answered with page one. The message is substrate's own.
+	if _, ok := decodeSimulationMarker(params.Marker); !ok {
+		return nil, iamErrorResponse("InvalidInput",
+			"Marker '"+params.Marker+"' is not a marker this service issued", http.StatusBadRequest)
 	}
 
 	// "If this parameter is not provided, then the value defaults to * (all
@@ -707,7 +714,8 @@ func simulationUserName(callerArn string) string {
 func paginateSimulationResults(results []iamSimulationResult, marker string, maxItems int) (
 	page []iamSimulationResult, nextMarker string, isTruncated bool,
 ) {
-	start := decodeSimulationMarker(marker)
+	// parseSimulateRequest has refused a marker that does not decode.
+	start, _ := decodeSimulationMarker(marker)
 	if start > len(results) {
 		start = len(results)
 	}
@@ -721,32 +729,20 @@ func paginateSimulationResults(results []iamSimulationResult, marker string, max
 	return results[start:end], encodeSimulationMarker(end), true
 }
 
-// encodeSimulationMarker encodes a result index as an opaque page cursor, base64 as
-// paginateIAMKeys does so a caller cannot tell substrate's two cursor kinds apart.
+// encodeSimulationMarker encodes a result index as an opaque page cursor: base64 of the
+// decimal index, as [encodeOffsetPaginationToken] renders it.
+//
+// An index is a stable cursor here because the result list is computed from the request
+// alone, so the same request lists the same results on every page.
 func encodeSimulationMarker(index int) string {
-	return base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(index)))
+	return encodeOffsetPaginationToken(index)
 }
 
-// decodeSimulationMarker returns the index a cursor names, or 0 for anything it
-// cannot read.
-//
-// A marker substrate did not mint is treated as the start of the list rather than
-// as an error: paginateIAMKeys does the same with an undecodable marker, and the
-// alternative — InvalidInput on a cursor a caller round-tripped — would be worse
-// than restarting a page.
-func decodeSimulationMarker(marker string) int {
-	if marker == "" {
-		return 0
-	}
-	raw, err := base64.StdEncoding.DecodeString(marker)
-	if err != nil {
-		return 0
-	}
-	index, err := strconv.Atoi(string(raw))
-	if err != nil || index < 0 {
-		return 0
-	}
-	return index
+// decodeSimulationMarker returns the index a cursor names, reporting false for a marker
+// [encodeSimulationMarker] could not have produced ([decodeOffsetPaginationToken]). An
+// empty marker is the first page.
+func decodeSimulationMarker(marker string) (int, bool) {
+	return decodeOffsetPaginationToken(marker)
 }
 
 // iamEvaluationResultsXML encodes <EvaluationResults> for a page.

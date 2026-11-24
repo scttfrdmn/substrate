@@ -65,6 +65,45 @@ reservations through a map and then ranges that map, so sorting `List` made the 
 a reservation deterministic while leaving `reservationSet`'s own member order in Go's map order.
 It is now ordered by reservation ID.
 
+## Cursor pagination
+
+A listing that changes between pages needs a cursor that names a *value*, not a position. An offset
+counts positions, so a record created or deleted ahead of it shifts every later record by one place
+and a walk skips or repeats a record. A value cursor names the last record returned, and the next
+page is every record that sorts strictly after it. One primitive implements that rule for every
+listing migrated to it (`emulator/pagination.go`,
+[#1612](https://github.com/scttfrdmn/substrate/issues/1612)):
+
+- **Order.** Each item has a key of a primary value and a tie-break (a RAM principal's ID within its
+  share). The listing is rendered in key order, ascending unless the operation publishes otherwise, so
+  the order a caller sees is the order the cursor compares in.
+- **Resuming.** The next page starts strictly after the cursor's key. A create or delete anywhere in the
+  listing leaves every surviving record returned exactly once. A cursor naming a record that has since
+  been deleted resumes where that record was; it is not refused, because the token was issued.
+- **Truncation.** A page is truncated, and carries a token, only when a further item exists, so the last
+  page carries none and a listing that is an exact multiple of the page size costs no empty page.
+- **The token.** Where the operation's cursor is opaque, the token is base64 (standard, padded) of the
+  JSON object `{"o","h","s","t"}`: the operation that issued it, the fnv-64a hash of the request's
+  filter members (as a set, so member and value order do not matter), and the last item's key. It is
+  accepted only if it round-trips byte for byte, so a token from another operation, a token reused with
+  different filter members, a truncated or hand-edited one, and a bare offset are all refused before
+  any state is read, each with the code the operation's own page publishes.
+- **Raw-ID cursors.** Where AWS publishes the cursor as an identifier rather than an opaque token, the
+  same rule applies to the identifier. CloudFront's `Marker` is the ID of the previous page's last item,
+  and IAM's is base64 of the last item's key; any well-formed one is accepted and resumes after where it
+  sorts.
+
+| Operations | Cursor | Bad cursor | Page size |
+|-----------|--------|-----------|-----------|
+| ELBv2 `DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeListeners`, `DescribeRules`; classic `DescribeLoadBalancers` ([#1528](https://github.com/scttfrdmn/substrate/issues/1528)) | opaque token over the ARN (classic: name) | `ValidationError`/400 | `PageSize` 1–400 |
+| RAM `ListPrincipals`, `ListResources` ([#1566](https://github.com/scttfrdmn/substrate/issues/1566)) | opaque token over (share ARN, principal ID or resource ARN) | `InvalidNextTokenException`/400 | `maxResults` 1–500 |
+| CodePipeline `ListPipelines` ([#1543](https://github.com/scttfrdmn/substrate/issues/1543)) | opaque token over the name | `InvalidNextTokenException`/400 | `maxResults` 1–1000 (`ValidationException`) |
+| CloudFront `ListDistributions`, `ListOriginAccessControls` ([#1568](https://github.com/scttfrdmn/substrate/issues/1568)) | raw ID | not refused | `MaxItems` a positive integer, default 100 (`InvalidArgument`) |
+| IAM's key listings and tag listings | base64 of the last key | `ValidationError`/400 | `MaxItems` 1–1000 |
+
+ELB `DescribeAccountLimits` lists a fixed set and keeps its offset cursor. The other offset paginators
+in the tree are listed for migration in protocol batches in [#1677](https://github.com/scttfrdmn/substrate/issues/1677).
+
 ## Every listing audited against those three tiers
 
 [#865](https://github.com/scttfrdmn/substrate/issues/865) fixed the ordering defect at its source

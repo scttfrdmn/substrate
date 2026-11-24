@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Pagination: one cursor primitive resumes strictly after the last item returned, with tokens bound to their operation and filter members (#1612).
+- CodePipeline: `ListPipelines` pages on `maxResults` (1–1000) and `nextToken` (#1543).
+- CloudFront: `ListDistributions` and `ListOriginAccessControls` page on `Marker`/`MaxItems` and answer `Marker`, `MaxItems` and `NextMarker` (#1568).
+
+### Fixed
+
+- ELB: the five resource describes page on a value cursor, so a create or delete mid-walk neither skips nor repeats a record (#1528).
+- RAM: `ListPrincipals` and `ListResources` page on a (share ARN, entity) cursor, so a mid-walk change neither skips nor repeats an item (#1566).
+- CodePipeline: an unreadable pipeline record fails `ListPipelines` instead of shortening it (#1543).
+- IAM: an unissued `Marker` is refused instead of answered with page one, and a deleted marker key resumes in place (#1612).
+
+### Compatibility
+
+- ELB: v2 describes list in ARN order and classic `DescribeLoadBalancers` in name order; markers from earlier builds of the five resource describes are refused `ValidationError` (#1528).
+- RAM: `ListPrincipals` and `ListResources` list in share-ARN then principal-ID or resource-ARN order; earlier tokens, and tokens reused with different filters, are refused `InvalidNextTokenException` (#1566).
+- CloudFront: list responses carry `Marker` and `MaxItems`, and an absent `MaxItems` is a page of 100; page on `NextMarker` to read more (#1568).
+- IAM: a malformed `Marker` is `ValidationError`/400 (`InvalidInput` on the simulate operations); tag listings' `Marker` is base64 of the last key, not the next key (#1612).
+
 ## [v0.132.0] - 2026-11-24
 
 ### Added

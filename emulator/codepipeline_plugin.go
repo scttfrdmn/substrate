@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -253,18 +254,66 @@ func (p *CodePipelinePlugin) deletePipeline(reqCtx *RequestContext, req *AWSRequ
 	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
-func (p *CodePipelinePlugin) listPipelines(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+// codepipelineListPipelinesPaging is ListPipelines' paging contract (API_ListPipelines).
+//
+// `maxResults` publishes "Valid Range: Minimum value of 1. Maximum value of 1000." and no default; an
+// absent one is 1000, the published maximum, which is substrate's reading. An out-of-range value is
+// ValidationException/400 and an unissued `nextToken` is InvalidNextTokenException/400, both
+// published on the page; the messages are its glosses of the two codes.
+var codepipelineListPipelinesPaging = jsonPaging{
+	op:   "ListPipelines",
+	size: pageSizeRange{member: "maxResults", min: 1, max: 1000, def: 1000},
+	invalidSize: func(message string) *AWSError {
+		return &AWSError{Code: "ValidationException", Message: message, HTTPStatus: http.StatusBadRequest}
+	},
+	invalidToken: func() *AWSError {
+		return &AWSError{
+			Code: "InvalidNextTokenException",
+			// API_ListPipelines, Errors.
+			Message:    "The next token was specified in an invalid format. Make sure that the next token you provide is the token returned by a previous call.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	},
+}
+
+// listPipelines answers ListPipelines in name order, paged on a name cursor.
+//
+// The paging members are validated before any state is read. A pipeline record that cannot be read
+// fails the listing; an index entry whose record is gone is passed over.
+func (p *CodePipelinePlugin) listPipelines(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		MaxResults *int   `json:"maxResults"`
+		NextToken  string `json:"nextToken"`
+	}
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, codepipelineInvalidBody()
+		}
+	}
+	pr, awsErr := jsonNextToken(codepipelineListPipelinesPaging, nil, input.NextToken, input.MaxResults)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
 	goCtx := context.Background()
 	names, err := loadStringIndex(goCtx, p.state, codepipelineNamespace, codepipelineNamesKey(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("codepipeline listPipelines load index: %w", err)
 	}
 
-	summaries := make([]map[string]interface{}, 0, len(names))
-	for _, name := range names {
+	res, err := page(names, func(name string) cursorKey { return cursorKey{Sort: name} }, pr)
+	if err != nil {
+		return nil, codepipelineListPipelinesPaging.invalidToken()
+	}
+	summaries := make([]map[string]interface{}, 0, len(res.Items))
+	for _, name := range res.Items {
 		pl, err := p.loadPipeline(reqCtx.AccountID, reqCtx.Region, name)
-		if err != nil {
+		var notFound *AWSError
+		if errors.As(err, &notFound) && notFound.Code == "PipelineNotFoundException" {
 			continue
+		}
+		if err != nil {
+			return nil, err
 		}
 		summaries = append(summaries, map[string]interface{}{
 			"name":    pl.Name,
@@ -274,9 +323,11 @@ func (p *CodePipelinePlugin) listPipelines(reqCtx *RequestContext, _ *AWSRequest
 		})
 	}
 
-	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{
-		"pipelines": summaries,
-	})
+	out := map[string]interface{}{"pipelines": summaries}
+	if res.Next != "" {
+		out["nextToken"] = res.Next
+	}
+	return codepipelineJSONResponse(http.StatusOK, out)
 }
 
 func (p *CodePipelinePlugin) startPipelineExecution(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

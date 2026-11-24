@@ -136,11 +136,8 @@ type cfOACSummaryWire struct {
 
 // cfOACListWire is the OriginAccessControlList document.
 //
-// Marker, MaxItems and NextMarker are published members and are not rendered, because substrate
-// answers the list whole and so holds no value for them — the same reading [listDistributions]
-// takes for DistributionList, and the same one docs/reference/cloudfront.md states for the three
-// DistributionConfig members substrate cannot answer. Inventing a MaxItems would assert a page
-// size AWS publishes nowhere.
+// Marker and MaxItems echo the request ([cfListPage]); NextMarker is present only when IsTruncated
+// is true, and is the ID of the page's last control.
 //
 // Items is a pointer to a slice so that an account using no OACs answers **no Items element at
 // all**, which is what the reference states: "If you're not using origin access controls for your
@@ -150,6 +147,9 @@ type cfOACSummaryWire struct {
 // deliberate and reviewable.
 type cfOACListWire struct {
 	XMLName     xml.Name            `xml:"OriginAccessControlList"`
+	Marker      string              `xml:"Marker"`
+	NextMarker  string              `xml:"NextMarker,omitempty"`
+	MaxItems    int                 `xml:"MaxItems"`
 	IsTruncated bool                `xml:"IsTruncated"`
 	Items       *[]cfOACSummaryWire `xml:"Items>OriginAccessControlSummary,omitempty"`
 	Quantity    int                 `xml:"Quantity"`
@@ -223,17 +223,23 @@ func cfOACResponse(status int, oac CloudFrontOriginAccessControl) (*AWSResponse,
 
 // listOriginAccessControls handles GET /2020-05-31/origin-access-control.
 //
-// An unreadable record is skipped rather than failing the list, following [listDistributions]:
-// one corrupt record must not make the account's other controls unfindable.
-func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext) (*AWSResponse, error) {
+// The listing is in ID order, paged on `Marker`/`MaxItems` through [cfListPage]. An unreadable record
+// is skipped rather than failing the list, following [listDistributions]: one corrupt record must
+// not make the account's other controls unfindable.
+func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	pg, awsErr := cfListPage(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, cloudfrontNamespace, cfOACIDsKey(ctx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("cloudfront listOriginAccessControls loadIndex: %w", err)
 	}
+	res := pageAfter(ids, cfIDKey, pg.after(), pg.maxItems, false)
 
-	summaries := make([]cfOACSummaryWire, 0, len(ids))
-	for _, id := range ids {
+	summaries := make([]cfOACSummaryWire, 0, len(res.Items))
+	for _, id := range res.Items {
 		oac, loadErr := p.loadOriginAccessControl(ctx.AccountID, id)
 		if loadErr != nil {
 			continue
@@ -248,7 +254,15 @@ func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext) (*AWSRe
 		})
 	}
 
-	list := cfOACListWire{Quantity: len(summaries)}
+	list := cfOACListWire{
+		Marker:      pg.marker,
+		MaxItems:    pg.maxItems,
+		IsTruncated: res.Truncated,
+		Quantity:    len(summaries),
+	}
+	if res.Truncated {
+		list.NextMarker = res.Last.Sort
+	}
 	if len(summaries) > 0 {
 		list.Items = &summaries
 	}

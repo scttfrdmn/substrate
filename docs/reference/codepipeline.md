@@ -11,7 +11,7 @@
 | GetPipeline | `version` [answers that stored version](#getpipelineexecution-requires-and-checks-its-pipeline-and-getpipeline-answers-the-version-asked-for) |
 | UpdatePipeline | Merges `roleArn` and `stages`, increments `version`; reports no `metadata` |
 | DeletePipeline | |
-| ListPipelines | Reports name, version and timestamps; `maxResults` and `nextToken` are not read. A pipeline whose record cannot be loaded is skipped |
+| ListPipelines | Reports name, version and timestamps, in name order. Pages on `maxResults` (1–1000; an absent one is 1000, substrate's reading, since the page publishes no default) and `nextToken`, the shared [cursor token](/reference/concepts/listing-order#cursor-pagination) over the last name, so a create or delete between pages neither skips nor repeats a pipeline ([#1543](https://github.com/scttfrdmn/substrate/issues/1543)). An out-of-range `maxResults` is `ValidationException`/400 and an unissued `nextToken` `InvalidNextTokenException`/400, both published on the page. A record that cannot be read fails the call; an index entry whose record is gone is passed over |
 | StartPipelineExecution | The execution is `Succeeded` before the call returns unless [a seed makes it progress](#an-execution-progresses-under-a-seed); `clientRequestToken` and `variables` are not read |
 | GetPipelineState | Reports every stage as `Succeeded` with an [empty `pipelineExecutionId`](#getpipelinestate-reports-a-shape-no-execution-produced) |
 | GetPipelineExecution | Both members are required (`ValidationException`); an execution belonging to another pipeline is `PipelineExecutionNotFoundException`, as the page glosses the code ([#1156](https://github.com/scttfrdmn/substrate/issues/1156), [#1160](https://github.com/scttfrdmn/substrate/issues/1160)) |
@@ -107,8 +107,8 @@ has ever run. A pipeline created and never started reports every stage succeeded
 Every row is 400, the status every CodePipeline page publishes. Until
 [#1156](https://github.com/scttfrdmn/substrate/issues/1156) both not-found codes answered 404, which no
 CodePipeline page publishes, across six operations: `GetPipeline`, `UpdatePipeline`, `DeletePipeline`,
-`StartPipelineExecution`, `GetPipelineState` and `GetPipelineExecution`. `ListPipelines` still swallows
-the refusal and reports a short list, as its page publishes.
+`StartPipelineExecution`, `GetPipelineState` and `GetPipelineExecution`. `ListPipelines` passes over an
+index entry whose record is gone, and fails on a record that cannot be read.
 
 `InvalidStructureException` is published, glossed *"The structure was specified in an invalid format"* —
 but `GetPipeline` does not publish it at all (its three errors are `PipelineNotFoundException`,

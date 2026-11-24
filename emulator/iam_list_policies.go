@@ -83,7 +83,8 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -140,7 +141,7 @@ func (p *IAMPlugin) listPolicies(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 	// Paginated by ARN rather than by state key, so the catalog and state arms interleave in
 	// one stable order instead of the bundled policies landing on their own pages.
-	page, nextMarker, isTruncated := paginateIAMKeys(arns, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(arns, pg)
 
 	policies := make([]*IAMPolicy, 0, len(page))
 	for _, arn := range page {

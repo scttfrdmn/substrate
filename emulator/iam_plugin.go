@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -430,7 +429,8 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -445,7 +445,7 @@ func (p *IAMPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("list users: %w", err)
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(keys, pg)
 
 	users := make([]*IAMUser, 0, len(page))
 	for _, k := range page {
@@ -744,7 +744,8 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -759,7 +760,7 @@ func (p *IAMPlugin) listRoles(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(keys, pg)
 
 	roles := make([]*IAMRole, 0, len(page))
 	for _, k := range page {
@@ -850,7 +851,8 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return iamErrorResponse("ValidationError", "GroupName is required", http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -882,7 +884,7 @@ func (p *IAMPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	if err != nil {
 		return nil, err
 	}
-	page, nextMarker, isTruncated := paginateIAMKeys(memberNames, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(memberNames, pg)
 
 	users := make([]*IAMUser, 0, len(page))
 	for _, name := range page {
@@ -975,7 +977,8 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return iamErrorResponse("ValidationError", err.Error(), http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -990,7 +993,7 @@ func (p *IAMPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("list groups: %w", err)
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(keys, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(keys, pg)
 
 	groups := make([]*IAMGroup, 0, len(page))
 	for _, k := range page {
@@ -2256,7 +2259,8 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 		return iamErrorResponse("ValidationError", "EntityName is required", http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -2270,7 +2274,7 @@ func (p *IAMPlugin) listInlinePolicies(ctx *RequestContext, req *AWSRequest, ent
 		return nil, err
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(names, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(names, pg)
 
 	xmlStr := iamStringListXML("PolicyNames", page) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
@@ -2618,7 +2622,8 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse("ValidationError", "UserName is required", http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -2638,7 +2643,7 @@ func (p *IAMPlugin) listUserTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			http.StatusNotFound), nil
 	}
 
-	return iamTagListingResponse("ListUserTags", user.Tags, params.Marker, params.MaxItems)
+	return iamTagListingResponse("ListUserTags", user.Tags, pg)
 }
 
 func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -2758,7 +2763,8 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -2778,7 +2784,7 @@ func (p *IAMPlugin) listRoleTags(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			http.StatusNotFound), nil
 	}
 
-	return iamTagListingResponse("ListRoleTags", role.Tags, params.Marker, params.MaxItems)
+	return iamTagListingResponse("ListRoleTags", role.Tags, pg)
 }
 
 // --- State helpers ---------------------------------------------------------
@@ -2908,47 +2914,15 @@ func parseIAMBody(body []byte, dst any) error {
 	return nil
 }
 
-// paginateIAMKeys sorts keys alphabetically, applies a Marker cursor, and
-// slices to maxItems. Returns the page, next Marker (base64 of last key), and
-// whether more results exist.
-func paginateIAMKeys(keys []string, marker string, maxItems int) (page []string, nextMarker string, isTruncated bool) {
-	sort.Strings(keys)
-
-	startIdx := 0
-	if marker != "" {
-		decoded, err := base64.StdEncoding.DecodeString(marker)
-		if err == nil {
-			for i, k := range keys {
-				if k == string(decoded) {
-					startIdx = i + 1
-					break
-				}
-			}
-		}
+// paginateIAMKeys returns the page of keys, in sorted order, that starts strictly after pg's
+// Marker, the Marker that resumes after it ([iamEncodeMarker] of its last key), and whether more
+// results exist. A Marker naming a key that has since been deleted resumes where that key was.
+func paginateIAMKeys(keys []string, pg iamPage) (page []string, nextMarker string, isTruncated bool) {
+	res := pageAfter(keys, func(k string) cursorKey { return cursorKey{Sort: k} }, pg.after, pg.size, false)
+	if res.Truncated {
+		nextMarker = iamEncodeMarker(res.Last.Sort)
 	}
-
-	// Only an unsent MaxItems reaches this: every handler refuses an out-of-range
-	// value before calling in (#868, [iamValidateMaxItems]), so this is the documented
-	// default, not a silent rewrite of what the caller asked for. The bounds stay
-	// as a backstop rather than being deleted, so a paginated operation added without the
-	// handler guard truncates to a documented page size instead of slicing on a negative.
-	if maxItems <= 0 || maxItems > iamMaxItemsMax {
-		maxItems = iamMaxItemsDefault
-	}
-
-	end := startIdx + maxItems
-	if end >= len(keys) {
-		end = len(keys)
-		isTruncated = false
-	} else {
-		isTruncated = true
-	}
-
-	page = keys[startIdx:end]
-	if isTruncated && len(page) > 0 {
-		nextMarker = base64.StdEncoding.EncodeToString([]byte(page[len(page)-1]))
-	}
-	return
+	return res.Items, nextMarker, res.Truncated
 }
 
 // parsePrincipalARN extracts the entity type ("user", "role") and everything after the
