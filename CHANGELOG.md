@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lambda: an exact-name seed outranks a `"*"` seed, and seed endpoints accept a qualified name or ARN as `functionName` (#1611).
 - Control plane: a seed write holds the simulated clock, so a seed storing its write time replays to the same state (#1611).
 - S3: a date precondition compares `Last-Modified` in whole seconds, so an echoed `Last-Modified` gets the right 304 or 412 (#1611).
+- Tagging: with no CloudWatch plugin registered, TagResources merges an alarm's tags, and a missing alarm answers 400 rather than 500 (#1609).
 
 ### Compatibility
 
@@ -36,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replay: the `/v1/spawn/task-completion` route is gone, so a recorded stream containing it replays that event as a 404 (#1611).
 - S3: an unseeded `tasks/<id>/completion.json` is now `404 NoSuchKey`; spore.host must seed each record through `/v1/s3/seeded-objects`, for example `{"bucket":"results","key":"tasks/t1/completion.json","contentType":"application/json","body":{"task_id":"t1","exit_code":0,"state":"completed"},"availableAt":"2026-01-01T12:05:00Z"}` (#1611).
 - Docs: old `/services#<anchor>` links redirect in the browser to the anchor's new page; update bookmarks and links to the `/reference/` URLs (#1610).
+- Tagging: TagResources and UntagResources refuse `aws:` keys, and hold EC2 and S3 resources to those services' key, value and 50-tag rules (#1609).
 
 ## [v0.131.0] - 2026-11-23
 

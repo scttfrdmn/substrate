@@ -3240,7 +3240,7 @@ func (d *StackDeployer) stampCFNResourceTags(dr DeployedResource, cctx *cfnConte
 	)
 
 	if target, ok := ec2TaggableResource(d.state, reqCtx, dr.PhysicalID); ok && target.resolved() {
-		if err := ec2ApplyTagsToResource(d.state, reqCtx, dr.PhysicalID, tags, false); err != nil {
+		if err := ec2ApplyTagsThroughOwner(d.registry, d.state, reqCtx, dr.PhysicalID, tags, false); err != nil {
 			d.warnStampFailed(dr, err)
 		}
 		return

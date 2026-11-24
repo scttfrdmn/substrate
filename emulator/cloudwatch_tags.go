@@ -300,7 +300,9 @@ func (p *CloudWatchPlugin) listTaggedResources(ctx context.Context, reqCtx *Requ
 	return cwListTaggedAlarms(ctx, p.state, reqCtx)
 }
 
-// tagResourceByARN implements [resourceTagger].
+// tagResourceByARN implements [resourceTagger]. CloudWatch's own TagResource publishes no rule
+// about the reserved prefix, so an `aws:` key is refused with the tagging API's own answer
+// ([taggingReservedKeyRefusal]); the Tag shape's lengths are checked in [cwMergeAlarmTags].
 func (p *CloudWatchPlugin) tagResourceByARN(
 	_ *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
@@ -312,50 +314,61 @@ func (p *CloudWatchPlugin) tagResourceByARN(
 	if err != nil {
 		return taggingResolveFailed(err)
 	}
+	if refusal := taggingReservedKeyRefusal(add, remove); refusal != nil {
+		return taggingQuotaRefusal(refusal)
+	}
 	return p.tagRecord(context.Background(), key, add, remove, quota)
 }
 
-// tagRecord implements [resourceTagger]: a merge applies TagResource's rules and a removal
-// UntagResource's, under the lock both hold. With quota enforced, the merged set is held to
-// [cwCheckTags], as TagResource holds it.
+// tagRecord implements [resourceTagger], through [cwMergeAlarmTags] under the lock CloudWatch's
+// own TagResource and UntagResource hold.
+func (p *CloudWatchPlugin) tagRecord(
+	ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode,
+) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return cwMergeAlarmTags(ctx, p.state, key, add, remove, quota)
+}
+
+// cwMergeAlarmTags merges add and remove into the alarm stored at key and stamps its tag history,
+// with TagResource's and UntagResource's rules. With quota enforced and tags to add, the merged set
+// is held to [cwCheckTags], as TagResource holds it. It takes the state rather than the plugin, so
+// the tagging plugin's direct path, used when no CloudWatch plugin is registered, runs the same code
+// ([mergeResourceTags]); the plugin's own caller holds [CloudWatchPlugin.mu].
 //
 // A write that adds and removes nothing is refused with the MissingParameter UntagResource answers
 // for an absent TagKeys. That is the answer the tagging API has given for an alarm named in a
-// TagResources with no tags, or an UntagResources with no keys, since it reached alarms (#1618).
-func (p *CloudWatchPlugin) tagRecord(
-	ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode,
+// TagResources with no tags, or an UntagResources with no keys, since #1618.
+func cwMergeAlarmTags(
+	ctx context.Context, state StateManager, key string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
 	if len(add) == 0 && len(remove) == 0 {
 		return taggingQuotaRefusal(cwMissingParameter("TagKeys"))
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	alarm, found, err := p.loadAlarm(ctx, key)
+	raw, err := loadTagRecord(ctx, state, monitoringNamespace, key)
 	if err != nil {
-		return fmt.Errorf("tagging: CloudWatch: %w", err)
+		return err
 	}
-	if !found {
-		return fmt.Errorf("%w: %s/%s", errTagResourceNotFound, monitoringNamespace, key)
+	var alarm CWAlarm
+	if err := json.Unmarshal(raw, &alarm); err != nil {
+		return fmt.Errorf("tagging: CloudWatch decode alarm: %w", err)
 	}
 	tagsBefore := len(alarm.Tags)
-	if len(add) > 0 {
-		merged := mergeStringMap(alarm.Tags, add, nil)
-		if quota == enforceTagQuota {
-			if awsErr := cwCheckTags(merged); awsErr != nil {
-				return taggingQuotaRefusal(awsErr)
-			}
-		}
-		alarm.Tags = merged
-	} else {
-		alarm.Tags = mergeStringMap(alarm.Tags, nil, remove)
-		if len(alarm.Tags) == 0 {
-			alarm.Tags = nil
+	merged := mergeStringMap(alarm.Tags, add, remove)
+	if quota == enforceTagQuota && len(add) > 0 {
+		if awsErr := cwCheckTags(merged); awsErr != nil {
+			return taggingQuotaRefusal(awsErr)
 		}
 	}
-	if err := p.storeAlarm(ctx, key, alarm); err != nil {
-		return fmt.Errorf("tagging: CloudWatch: %w", err)
+	alarm.Tags = merged
+	updated, err := json.Marshal(alarm)
+	if err != nil {
+		return fmt.Errorf("tagging: CloudWatch marshal alarm: %w", err)
 	}
-	if err := cwStampAlarmEverTagged(ctx, p.state, key, tagsBefore, len(add)); err != nil {
+	if err := state.Put(ctx, monitoringNamespace, key, updated); err != nil {
+		return fmt.Errorf("tagging: CloudWatch store alarm: %w", err)
+	}
+	if err := cwStampAlarmEverTagged(ctx, state, key, tagsBefore, len(add)); err != nil {
 		return fmt.Errorf("tagging: CloudWatch: %w", err)
 	}
 	return nil

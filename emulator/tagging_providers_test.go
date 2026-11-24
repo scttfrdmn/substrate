@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,7 @@ type providerEnv struct {
 	srv      http.Handler
 	registry *emulator.PluginRegistry
 	tagging  *emulator.TaggingPlugin
+	state    emulator.StateManager
 }
 
 // newProviderEnv builds a providerEnv. With reach false the tagging plugin is given no registry,
@@ -56,7 +58,7 @@ func newProviderEnv(t *testing.T, reach bool) *providerEnv {
 	registry.Register(tagging)
 	return &providerEnv{
 		t: t, srv: emulator.NewServer(*cfg, registry, store, state, tc, logger),
-		registry: registry, tagging: tagging,
+		registry: registry, tagging: tagging, state: state,
 	}
 }
 
@@ -215,57 +217,156 @@ func TestTaggingProviders_EachPilotWritesItsOwnTags(t *testing.T) {
 	}
 }
 
+// providerParityScript runs one fixed sequence of tagging API requests and returns every response
+// body, with the environment's minted security-group ID replaced so two environments compare.
+func providerParityScript(e *providerEnv) []string {
+	e.t.Helper()
+	sgARN, sgID := e.createSecurityGroup("web")
+	bucketARN := e.createBucket("orders")
+	alarmARN := e.createAlarm("cpu")
+	e.createAlarm("never-tagged")
+	arns := []string{sgARN, bucketARN, alarmARN}
+	var bodies []string
+	call := func(op string, body any) string {
+		out := e.rgta(op, body)
+		bodies = append(bodies, op+" "+strings.ReplaceAll(out, sgID, "sg-ID"))
+		return out
+	}
+
+	call("TagResources", map[string]any{"ResourceARNList": arns, "Tags": map[string]string{"team": "a", "env": "dev"}})
+	call("UntagResources", map[string]any{"ResourceARNList": arns, "TagKeys": []string{"env"}})
+	// Every page, one resource at a time, so the order and the tokens are compared too.
+	token := ""
+	for range 10 {
+		var page struct{ PaginationToken string }
+		body := map[string]any{"ResourcesPerPage": 1}
+		if token != "" {
+			body["PaginationToken"] = token
+		}
+		require.NoError(e.t, json.Unmarshal([]byte(call("GetResources", body)), &page))
+		if token = page.PaginationToken; token == "" {
+			break
+		}
+	}
+	for _, filter := range []string{"ec2", "s3", "cloudwatch:alarm"} {
+		call("GetResources", map[string]any{"ResourceTypeFilters": []string{filter}})
+	}
+	// Absent resources of each pilot, then types the pilot cannot tag.
+	call("TagResources", map[string]any{"ResourceARNList": []string{
+		"arn:aws:ec2:us-east-1:123456789012:security-group/sg-0000000000000000",
+		"arn:aws:s3:::no-such-bucket",
+		"arn:aws:cloudwatch:us-east-1:123456789012:alarm:none",
+	}, "Tags": map[string]string{"k": "v"}})
+	call("TagResources", map[string]any{"ResourceARNList": []string{
+		"arn:aws:ec2:us-east-1:123456789012:vpc-endpoint/vpce-1",
+		"arn:aws:s3:::orders/key",
+		"arn:aws:cloudwatch:us-east-1:123456789012:dashboard/d",
+	}, "Tags": map[string]string{"k": "v"}})
+	call("UntagResources", map[string]any{"ResourceARNList": []string{alarmARN}, "TagKeys": []string{}})
+	return bodies
+}
+
 // TestTaggingProviders_AnswersMatchTheDirectPath runs the same requests against a tagging plugin
-// that reaches the pilots and one that does not, and requires the same answers from both.
+// that reaches the pilots and one that does not, and requires byte-identical answers from both:
+// every FailedResourcesMap, every GetResources page and its token.
 func TestTaggingProviders_AnswersMatchTheDirectPath(t *testing.T) {
 	t.Parallel()
-	for _, reach := range []bool{true, false} {
-		t.Run(fmt.Sprintf("registry=%v", reach), func(t *testing.T) {
+	viaOwners := providerParityScript(newProviderEnv(t, true))
+	direct := providerParityScript(newProviderEnv(t, false))
+	assert.Equal(t, direct, viaOwners)
+
+	// And the answers are the ones the tagging API publishes.
+	joined := strings.Join(viaOwners, "\n")
+	assert.Contains(t, joined, `"team"`, "the merge and the removal landed")
+	assert.NotContains(t, joined, `"env"`)
+	assert.NotContains(t, joined, "never-tagged", "a never-tagged alarm is not reported")
+	assert.Contains(t, joined, `"ErrorCode":"InvalidParameterException","ErrorMessage":"the target ID is invalid, unsupported, or doesn't exist","StatusCode":400`)
+	assert.Contains(t, joined, `"ErrorCode":"InternalServiceException","ErrorMessage":"the resource type in the request is not supported by the Resource Groups Tagging API","StatusCode":500`)
+	assert.Contains(t, joined, `"ErrorCode":"MissingParameter"`)
+}
+
+// TestTaggingProviders_ReservedKeysAreRefused pins that a caller can neither write nor strip an
+// `aws:` key through the tagging API, while CloudFormation's internal stamp path still writes one.
+// A pilot answers with its own service's refusal; without a registry the tagging API answers its
+// own.
+func TestTaggingProviders_ReservedKeysAreRefused(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		reach           bool
+		ec2, s3, alarms string
+	}{
+		{true, "InvalidParameterValue", "InvalidTag", "InvalidParameterException"},
+		{false, "InvalidParameterException", "InvalidParameterException", "InvalidParameterException"},
+	} {
+		t.Run(fmt.Sprintf("registry=%v", tc.reach), func(t *testing.T) {
 			t.Parallel()
-			e := newProviderEnv(t, reach)
+			e := newProviderEnv(t, tc.reach)
 			sgARN, _ := e.createSecurityGroup("web")
 			bucketARN := e.createBucket("orders")
 			alarmARN := e.createAlarm("cpu")
-			arns := []string{sgARN, bucketARN}
-			if reach {
-				// Without a registry the tagging plugin has never been able to write an alarm's
-				// tags: CloudWatch's record is only ever written by CloudWatch.
-				arns = append(arns, alarmARN)
-			}
+			arns := []string{sgARN, bucketARN, alarmARN}
+			want := map[string]string{sgARN: tc.ec2, bucketARN: tc.s3, alarmARN: tc.alarms}
 
-			e.rgta("TagResources", map[string]any{"ResourceARNList": arns, "Tags": map[string]string{"team": "a", "env": "dev"}})
-			e.rgta("UntagResources", map[string]any{"ResourceARNList": arns, "TagKeys": []string{"env"}})
+			stamp := map[string]string{"aws:cloudformation:stack-name": "s", "team": "a"}
+			out := e.rgta("TagResources", map[string]any{"ResourceARNList": arns, "Tags": stamp})
 			for _, arn := range arns {
-				assert.Equal(t, map[string]string{"team": "a"}, e.tagsOf(arn), arn)
-			}
-
-			// Absent resources of each pilot are the tagging API's not-found.
-			missing := []string{
-				"arn:aws:ec2:us-east-1:123456789012:security-group/sg-0000000000000000",
-				"arn:aws:s3:::no-such-bucket",
-				"arn:aws:cloudwatch:us-east-1:123456789012:alarm:none",
-			}
-			out := e.rgta("TagResources", map[string]any{"ResourceARNList": missing, "Tags": map[string]string{"k": "v"}})
-			for _, arn := range missing {
 				code, status := providerFailure(t, out, arn)
-				assert.Equal(t, "InvalidParameterException", code, arn)
+				assert.Equal(t, want[arn], code, arn)
 				assert.Equal(t, http.StatusBadRequest, status, arn)
 			}
 
-			// An ARN of a type the pilot cannot tag is the unsupported-type answer.
-			unsupported := []string{
-				"arn:aws:ec2:us-east-1:123456789012:vpc-endpoint/vpce-1",
-				"arn:aws:s3:::orders/key",
-				"arn:aws:cloudwatch:us-east-1:123456789012:dashboard/d",
-			}
-			out = e.rgta("TagResources", map[string]any{"ResourceARNList": unsupported, "Tags": map[string]string{"k": "v"}})
-			for _, arn := range unsupported {
-				code, status := providerFailure(t, out, arn)
-				assert.Equal(t, "InternalServiceException", code, arn)
-				assert.Equal(t, http.StatusInternalServerError, status, arn)
-			}
+			// The internal path writes the stamp, and the caller cannot strip it.
+			require.NoError(t, emulator.MergeResourceTagsForTest(e.state, "s3", "bucket:orders",
+				map[string]string{"aws:cloudformation:stack-name": "s"}, nil, false))
+			out = e.rgta("UntagResources", map[string]any{"ResourceARNList": []string{bucketARN},
+				"TagKeys": []string{"aws:cloudformation:stack-name"}})
+			code, _ := providerFailure(t, out, bucketARN)
+			assert.Equal(t, tc.s3, code)
+			assert.Equal(t, map[string]string{"aws:cloudformation:stack-name": "s"}, e.tagsOf(bucketARN))
 		})
 	}
+}
+
+// TestTaggingProviders_OwnerKeyRulesApply pins that what a pilot is asked to add is held to its own
+// service's key and value rules, not only to the reserved prefix.
+func TestTaggingProviders_OwnerKeyRulesApply(t *testing.T) {
+	t.Parallel()
+	e := newProviderEnv(t, true)
+	sgARN, _ := e.createSecurityGroup("web")
+	bucketARN := e.createBucket("orders")
+	long := strings.Repeat("k", 129)
+	out := e.rgta("TagResources", map[string]any{"ResourceARNList": []string{sgARN, bucketARN},
+		"Tags": map[string]string{long: "v"}})
+	code, _ := providerFailure(t, out, sgARN)
+	assert.Equal(t, "InvalidParameterValue", code, "CreateTags' key length rule")
+	code, _ = providerFailure(t, out, bucketARN)
+	assert.Equal(t, "InvalidTag", code, "PutBucketTagging's key length rule")
+	out = e.rgta("TagResources", map[string]any{"ResourceARNList": []string{bucketARN},
+		"Tags": map[string]string{"bad#key": "v"}})
+	code, _ = providerFailure(t, out, bucketARN)
+	assert.Equal(t, "InvalidTag", code, "PutBucketTagging's character rule")
+}
+
+// TestTaggingProviders_AlarmMergesAddAndRemoveTogether drives the alarm writer with both halves in
+// one call, the shape only an internal caller can send.
+func TestTaggingProviders_AlarmMergesAddAndRemoveTogether(t *testing.T) {
+	t.Parallel()
+	e := newProviderEnv(t, false)
+	arn := e.createAlarm("both")
+	e.rgta("TagResources", map[string]any{"ResourceARNList": []string{arn}, "Tags": map[string]string{"a": "1", "b": "2"}})
+	require.NoError(t, emulator.MergeResourceTagsForTest(e.state, "monitoring", "alarm:123456789012/us-east-1/both",
+		map[string]string{"c": "3"}, []string{"a"}, true))
+	assert.Equal(t, map[string]string{"b": "2", "c": "3"}, e.tagsOf(arn))
+
+	many := map[string]string{}
+	for i := range 49 {
+		many[fmt.Sprintf("k%02d", i)] = "v"
+	}
+	err := emulator.MergeResourceTagsForTest(e.state, "monitoring", "alarm:123456789012/us-east-1/both", many, []string{"b"}, true)
+	assert.NoError(t, err, "the removal is counted before the quota: 1 + 49 tags fit")
+	err = emulator.MergeResourceTagsForTest(e.state, "monitoring", "alarm:123456789012/us-east-1/both",
+		map[string]string{"x": "1"}, nil, true)
+	assert.Error(t, err, "a 51st tag is refused")
 }
 
 func TestTaggingProviders_QuotasAreTheOwnersAnswer(t *testing.T) {
@@ -273,19 +374,33 @@ func TestTaggingProviders_QuotasAreTheOwnersAnswer(t *testing.T) {
 	e := newProviderEnv(t, true)
 	sgARN, _ := e.createSecurityGroup("full")
 	alarmARN := e.createAlarm("full")
+	bucketARN := e.createBucket("full")
 	seed := map[string]string{"seed": "x"}
-	e.rgta("TagResources", map[string]any{"ResourceARNList": []string{sgARN, alarmARN}, "Tags": seed})
+	e.rgta("TagResources", map[string]any{"ResourceARNList": []string{sgARN, alarmARN, bucketARN}, "Tags": seed})
 	many := map[string]string{}
 	for i := range 51 {
 		many[fmt.Sprintf("k%02d", i)] = "v"
 	}
-	out := e.rgta("TagResources", map[string]any{"ResourceARNList": []string{sgARN, alarmARN}, "Tags": many})
+	out := e.rgta("TagResources", map[string]any{"ResourceARNList": []string{sgARN, alarmARN, bucketARN}, "Tags": many})
 	code, _ := providerFailure(t, out, sgARN)
 	assert.Equal(t, "TagLimitExceeded", code, "EC2's own code for its 50-tag quota")
 	code, _ = providerFailure(t, out, alarmARN)
 	assert.Equal(t, "InvalidParameterValue", code, "CloudWatch's own code for its 50-tag quota")
 	assert.Equal(t, seed, e.tagsOf(sgARN), "a refused merge writes nothing")
 	assert.Equal(t, seed, e.tagsOf(alarmARN), "a refused merge writes nothing")
+	code, _ = providerFailure(t, out, bucketARN)
+	assert.Equal(t, "InvalidTag", code, "S3's own code for its 50-tag bucket limit")
+	assert.Equal(t, seed, e.tagsOf(bucketARN), "a refused merge writes nothing")
+
+	// 50 user tags fit, counting the one already there; the 51st is refused by the merged count.
+	fifty := map[string]string{}
+	for i := range 49 {
+		fifty[fmt.Sprintf("k%02d", i)] = "v"
+	}
+	assert.NotContains(t, e.rgta("TagResources", map[string]any{"ResourceARNList": []string{bucketARN}, "Tags": fifty}), "FailedResourcesMap")
+	out = e.rgta("TagResources", map[string]any{"ResourceARNList": []string{bucketARN}, "Tags": map[string]string{"one-more": "v"}})
+	code, _ = providerFailure(t, out, bucketARN)
+	assert.Equal(t, "InvalidTag", code, "the merged set is counted")
 
 	// An alarm named in a write that adds and removes nothing answers what CloudWatch's
 	// UntagResource answers for an absent TagKeys.
@@ -384,4 +499,47 @@ func TestTaggingProviders_S3TagWritesDoNotRace(t *testing.T) {
 			assert.Equal(t, "v", v)
 		}
 	}
+}
+
+// TestTaggingProviders_CFNStackTagsDoNotRaceCreateTags propagates a stack's changing tags onto a
+// security group while CreateTags writes other keys on it. Both go through EC2's tag lock, so every
+// CreateTags key survives and the group ends with the last stack tag.
+func TestTaggingProviders_CFNStackTagsDoNotRaceCreateTags(t *testing.T) {
+	t.Parallel()
+	f := newCFNStampFixture(t, nil)
+	const template = `{"Resources": {
+		"Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.9.0.0/16"}},
+		"Sg":  {"Type": "AWS::EC2::SecurityGroup", "Properties": {
+			"GroupDescription": "raced", "VpcId": {"Ref": "Vpc"}}}}}`
+	created, err := f.deployer.DeployWithOptions(context.Background(), template, "raced", nil,
+		emulator.CFNDeployOptions{Tags: map[string]string{"round": "0"}})
+	require.NoError(t, err)
+	sg := physicalIDs(t, created)["Sg"]
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := 1; i <= providerRaceWriters; i++ {
+			_, err := f.deployer.UpdateStack(context.Background(), template, "raced", nil,
+				emulator.CFNDeployOptions{Tags: map[string]string{"round": strconv.Itoa(i)}})
+			assert.NoError(t, err)
+		}
+	})
+	for i := range providerRaceWriters {
+		wg.Go(func() {
+			_, err := f.ec2.HandleRequest(&emulator.RequestContext{
+				AccountID: cfnStampAccount, Region: cfnStampRegion, Metadata: map[string]interface{}{},
+			}, &emulator.AWSRequest{Service: "ec2", Operation: "CreateTags", Params: map[string]string{
+				"Action": "CreateTags", "ResourceId.1": sg,
+				"Tag.1.Key": fmt.Sprintf("c%d", i), "Tag.1.Value": "v",
+			}})
+			assert.NoError(t, err)
+		})
+	}
+	wg.Wait()
+	tags := f.tagsFor(t, sg)
+	for i := range providerRaceWriters {
+		assert.Contains(t, tags, fmt.Sprintf("c%d=v", i), "a CreateTags write survives the stack's propagation")
+	}
+	assert.Contains(t, tags, "round="+strconv.Itoa(providerRaceWriters), "the last stack tag is on the group")
+	assert.Contains(t, tags, "aws:cloudformation:logical-id=Sg", "the stamp is still there")
 }

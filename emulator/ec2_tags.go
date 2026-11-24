@@ -351,7 +351,8 @@ func ec2CheckReservedTagKeys(tags []EC2Tag) *AWSError {
 // EC2 answers the Resource Groups Tagging API for its own resources (#1609): GetResources through
 // [EC2Plugin.listTaggedResources], and TagResources, UntagResources and CloudFormation's stamps
 // through [EC2Plugin.tagResourceByARN] and [EC2Plugin.tagRecord], under [EC2Plugin.tagMu], the lock
-// CreateTags and DeleteTags hold. The functions below take the state rather than the plugin, so the
+// CreateTags and DeleteTags hold. CloudFormation's ID-addressed stamps take the same lock through
+// [ec2ApplyTagsThroughOwner]. The functions below take the state rather than the plugin, so the
 // tagging plugin's direct path, used when no EC2 plugin is registered, runs the same code.
 
 // taggingEC2ScannedType is one EC2 type the tagging API scans by state-key prefix.
@@ -580,7 +581,9 @@ func (p *EC2Plugin) listTaggedResources(ctx context.Context, reqCtx *RequestCont
 	return ec2ListTaggedResources(ctx, p.state, reqCtx)
 }
 
-// tagResourceByARN implements [resourceTagger].
+// tagResourceByARN implements [resourceTagger]. What it adds is held to CreateTags' rules and what
+// it removes to DeleteTags' ([ec2CheckTagRules]), so a caller can neither write nor strip an
+// `aws:` key.
 func (p *EC2Plugin) tagResourceByARN(
 	_ *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
@@ -592,7 +595,41 @@ func (p *EC2Plugin) tagResourceByARN(
 	if err != nil {
 		return taggingResolveFailed(err)
 	}
+	checked := make([]EC2Tag, 0, len(add)+len(remove))
+	for _, k := range taggingSortedKeys(add) {
+		checked = append(checked, EC2Tag{Key: k, Value: add[k]})
+	}
+	for _, k := range remove {
+		checked = append(checked, EC2Tag{Key: k})
+	}
+	if awsErr := ec2CheckTagRules(checked); awsErr != nil {
+		return taggingQuotaRefusal(awsErr)
+	}
 	return p.tagRecord(context.Background(), key, add, remove, quota)
+}
+
+// applyTagsByID applies tags to the EC2 resource id through [ec2ApplyTagsToResource], under
+// [EC2Plugin.tagMu]. It applies no key rules, because its callers are CloudFormation's stamp and
+// stack-tag propagation, which write `aws:cloudformation:*`.
+func (p *EC2Plugin) applyTagsByID(reqCtx *RequestContext, id string, tags []EC2Tag, remove bool) error {
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
+	return ec2ApplyTagsToResource(p.state, reqCtx, id, tags, remove)
+}
+
+// ec2ApplyTagsThroughOwner applies tags to the EC2 resource id through the EC2 plugin registered in
+// owners, under its tag lock, or on state directly when owners holds none.
+func ec2ApplyTagsThroughOwner(
+	owners *PluginRegistry, state StateManager, reqCtx *RequestContext, id string, tags []EC2Tag, remove bool,
+) error {
+	if owners != nil {
+		if plugin, ok := owners.Plugin(ec2Namespace); ok {
+			if ec2, ok := plugin.(*EC2Plugin); ok {
+				return ec2.applyTagsByID(reqCtx, id, tags, remove)
+			}
+		}
+	}
+	return ec2ApplyTagsToResource(state, reqCtx, id, tags, remove)
 }
 
 // tagRecord implements [resourceTagger]. The quota is EC2's 50 tags per resource

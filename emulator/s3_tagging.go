@@ -71,31 +71,46 @@ func s3UTF16Len(s string) int {
 // validateS3TagSet checks tags against the published limits for a set of at most maxTags, and
 // returns the set as a map. The response is non-nil when the set is refused.
 func validateS3TagSet(tags []s3Tag, maxTags int, what string) (map[string]string, *AWSResponse) {
+	out, awsErr := s3CheckTagSet(tags, maxTags, what)
+	if awsErr != nil {
+		return nil, s3InvalidTagResponse(awsErr.Message)
+	}
+	return out, nil
+}
+
+// s3InvalidTag is the InvalidTag/400 refusal of a tag set, as an error.
+func s3InvalidTag(message string) *AWSError {
+	return &AWSError{Code: "InvalidTag", Message: message, HTTPStatus: http.StatusBadRequest}
+}
+
+// s3CheckTagSet is [validateS3TagSet] answering an [AWSError], for a caller that is not writing an
+// S3 response.
+func s3CheckTagSet(tags []s3Tag, maxTags int, what string) (map[string]string, *AWSError) {
 	if len(tags) > maxTags {
-		return nil, s3InvalidTagResponse(what + " tags cannot be greater than " + strconv.Itoa(maxTags))
+		return nil, s3InvalidTag(what + " tags cannot be greater than " + strconv.Itoa(maxTags))
 	}
 	out := make(map[string]string, len(tags))
 	for _, t := range tags {
 		if t.Key == "" {
-			return nil, s3InvalidTagResponse("The TagKey you have provided is invalid")
+			return nil, s3InvalidTag("The TagKey you have provided is invalid")
 		}
 		if strings.HasPrefix(strings.ToLower(t.Key), s3ReservedTagPrefix) {
-			return nil, s3InvalidTagResponse("Your TagKey cannot be prefixed with aws:")
+			return nil, s3InvalidTag("Your TagKey cannot be prefixed with aws:")
 		}
 		if !s3TagCharPattern.MatchString(t.Key) {
-			return nil, s3InvalidTagResponse("The TagKey you have provided is invalid")
+			return nil, s3InvalidTag("The TagKey you have provided is invalid")
 		}
 		if !s3TagCharPattern.MatchString(t.Value) {
-			return nil, s3InvalidTagResponse("The TagValue you have provided is invalid")
+			return nil, s3InvalidTag("The TagValue you have provided is invalid")
 		}
 		if s3UTF16Len(t.Key) > s3MaxTagKeyLength {
-			return nil, s3InvalidTagResponse("The TagKey you have provided is too long, max " + strconv.Itoa(s3MaxTagKeyLength))
+			return nil, s3InvalidTag("The TagKey you have provided is too long, max " + strconv.Itoa(s3MaxTagKeyLength))
 		}
 		if s3UTF16Len(t.Value) > s3MaxTagValueLength {
-			return nil, s3InvalidTagResponse("The TagValue you have provided is too long, max " + strconv.Itoa(s3MaxTagValueLength))
+			return nil, s3InvalidTag("The TagValue you have provided is too long, max " + strconv.Itoa(s3MaxTagValueLength))
 		}
 		if _, dup := out[t.Key]; dup {
-			return nil, s3InvalidTagResponse("Cannot provide multiple Tags with the same key")
+			return nil, s3InvalidTag("Cannot provide multiple Tags with the same key")
 		}
 		out[t.Key] = t.Value
 	}
@@ -168,7 +183,9 @@ func resolveTaggingHeader(headers map[string]string) (map[string]string, *AWSRes
 // S3 answers the Resource Groups Tagging API for its buckets (#1609): GetResources through
 // [S3Plugin.listTaggedResources], and TagResources, UntagResources and CloudFormation's stamps
 // through [S3Plugin.tagResourceByARN] and [S3Plugin.tagRecord]. A bucket's tag writes, these and
-// PutBucketTagging's and DeleteBucketTagging's, hold [S3Plugin.lockBucketTags]. The functions below
+// PutBucketTagging's and DeleteBucketTagging's, hold [S3Plugin.lockBucketTags], which orders them
+// with each other and with nothing else: another operation that rewrites the bucket record, such as
+// PutBucketVersioning, does not take it. The functions below
 // take the state rather than the plugin, so the tagging plugin's direct path, used when no S3 plugin
 // is registered, runs the same code.
 
@@ -257,7 +274,9 @@ func (p *S3Plugin) listTaggedResources(ctx context.Context, reqCtx *RequestConte
 	return s3ListTaggedBuckets(ctx, p.state, reqCtx)
 }
 
-// tagResourceByARN implements [resourceTagger].
+// tagResourceByARN implements [resourceTagger]. What it adds is held to PutBucketTagging's key and
+// value rules ([s3CheckTagSet]), and a key it removes may not carry the reserved `aws:` prefix, so a
+// caller can neither write nor strip one.
 func (p *S3Plugin) tagResourceByARN(
 	_ *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
@@ -269,18 +288,57 @@ func (p *S3Plugin) tagResourceByARN(
 	if err != nil {
 		return taggingResolveFailed(err)
 	}
+	tags := make([]s3Tag, 0, len(add))
+	for _, k := range taggingSortedKeys(add) {
+		tags = append(tags, s3Tag{Key: k, Value: add[k]})
+	}
+	if _, awsErr := s3CheckTagSet(tags, s3MaxBucketTags, "Bucket"); awsErr != nil {
+		return taggingQuotaRefusal(awsErr)
+	}
+	for _, k := range remove {
+		if strings.HasPrefix(strings.ToLower(k), s3ReservedTagPrefix) {
+			return taggingQuotaRefusal(s3InvalidTag("Your TagKey cannot be prefixed with aws:"))
+		}
+	}
 	return p.tagRecord(context.Background(), key, add, remove, quota)
 }
 
-// tagRecord implements [resourceTagger]. The tagging API enforces no bucket tag quota, as it never
-// has (quota is unused): S3 is not among the services [taggingCheckTagQuota] checks.
+// tagRecord implements [resourceTagger]. With quota enforced, the merged set may hold at most 50
+// tags, the bucket limit PutBucketTagging enforces. Keys with the reserved `aws:` prefix are not
+// counted: "System created tags that begin with aws: are reserved for AWS use, and do not count
+// against this limit" (Tagging AWS Resources).
 func (p *S3Plugin) tagRecord(
-	ctx context.Context, key string, add map[string]string, remove []string, _ tagQuotaMode,
+	ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
 	defer p.lockBucketTags(strings.TrimPrefix(key, "bucket:"))()
 	raw, err := loadTagRecord(ctx, p.state, s3Namespace, key)
 	if err != nil {
 		return err
 	}
+	if quota == enforceTagQuota && len(add) > 0 {
+		if refusal := s3BucketTagQuotaRefusal(raw, add, remove); refusal != nil {
+			return taggingQuotaRefusal(refusal)
+		}
+	}
 	return s3MergeBucketTags(ctx, p.state, key, raw, add, remove)
+}
+
+// s3BucketTagQuotaRefusal refuses a merge that would leave the bucket record raw with more than
+// [s3MaxBucketTags] tags outside the reserved prefix. An unreadable record is left for the merge to
+// report, as [taggingDecodeForQuota] leaves one.
+func s3BucketTagQuotaRefusal(raw []byte, add map[string]string, remove []string) *AWSError {
+	var b S3Bucket
+	if !taggingDecodeForQuota(raw, &b) {
+		return nil
+	}
+	user := 0
+	for k := range mergeStringMap(b.Tags, add, remove) {
+		if !strings.HasPrefix(strings.ToLower(k), s3ReservedTagPrefix) {
+			user++
+		}
+	}
+	if user > s3MaxBucketTags {
+		return s3InvalidTag("Bucket tags cannot be greater than " + strconv.Itoa(s3MaxBucketTags))
+	}
+	return nil
 }

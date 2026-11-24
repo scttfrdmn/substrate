@@ -61,9 +61,10 @@ type EC2Plugin struct {
 	// dependency check. Where both locks are held, igwMu is taken first.
 	igwMu sync.Mutex
 
-	// tagMu serializes the read-merge-write of a resource's tags: CreateTags, DeleteTags, and the
-	// tagging API's and CloudFormation's writes through [EC2Plugin.tagRecord], so a tag written one
-	// way cannot overwrite one written the other (#1609).
+	// tagMu serializes tag writes with each other: CreateTags, DeleteTags, the tagging API's writes
+	// through [EC2Plugin.tagRecord], and CloudFormation's stamps and stack-tag propagation through
+	// [EC2Plugin.applyTagsByID] (#1609). It orders only those. Another operation that rewrites the
+	// same record, such as an instance state change, does not take it.
 	tagMu sync.Mutex
 }
 

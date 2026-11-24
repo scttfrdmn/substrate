@@ -1508,8 +1508,9 @@ func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) 
 // tagARN applies addTags and removeKeys to the resource arn names, enforcing the owning service's
 // per-resource tag quota.
 //
-// The owning plugin writes it when it implements [resourceTagger], under its own lock. Otherwise the
-// ARN is resolved here ([TaggingPlugin.resolveARN]) and merged through [mergeResourceTags]. Either
+// The owning plugin writes it when it implements [resourceTagger], under its own lock, applying its
+// own key rules. Otherwise the ARN is resolved here ([TaggingPlugin.resolveARN]), an `aws:` key is
+// refused ([taggingReservedKeyRefusal]), and the tags are merged through [mergeResourceTags]. Either
 // way a resolution failure comes back as a [taggingResolveError], so [TaggingPlugin.tagFailure]
 // answers it as the ARN's failure.
 func (p *TaggingPlugin) tagARN(goCtx context.Context, reqCtx *RequestContext, arn string,
@@ -1520,6 +1521,9 @@ func (p *TaggingPlugin) tagARN(goCtx context.Context, reqCtx *RequestContext, ar
 	ns, key, err := p.resolveARN(arn, reqCtx.AccountID)
 	if err != nil {
 		return taggingResolveFailed(err)
+	}
+	if refusal := taggingReservedKeyRefusal(addTags, removeKeys); refusal != nil {
+		return taggingQuotaRefusal(refusal)
 	}
 	return mergeResourceTags(goCtx, p.registry, p.state, ns, key, addTags, removeKeys, enforceTagQuota)
 }
@@ -1638,7 +1642,7 @@ func (p *TaggingPlugin) tagResolveFailure(arn string, err error) failedResources
 func (p *TaggingPlugin) tagMergeFailure(arn string, err error) failedResourcesInfo {
 	var quota *taggingQuotaError
 	if errors.As(err, &quota) {
-		p.logger.Warn("tagging API refused a merge that would exceed a service's tag quota",
+		p.logger.Warn("tagging API refused a merge the owning service refuses",
 			"arn", arn, "code", quota.awsErr.Code, "error", err)
 		return failedResourcesInfo{
 			ErrorCode:    quota.awsErr.Code,
@@ -2157,6 +2161,11 @@ func mergeResourceTags(
 ) error {
 	if t, ok := owners.resourceTagger(ns); ok {
 		return t.tagRecord(goCtx, key, addTags, removeKeys, quota)
+	}
+	// An alarm is merged by CloudWatch's own writer even here, because its tag history is a side-car
+	// record no arm below knows to stamp.
+	if ns == monitoringNamespace {
+		return cwMergeAlarmTags(goCtx, state, key, addTags, removeKeys, quota)
 	}
 	raw, err := loadTagRecord(goCtx, state, ns, key)
 	if err != nil {

@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 )
@@ -36,12 +37,16 @@ type taggableResourceLister interface {
 // tagRecord merges into the record at key in the plugin's own namespace. It is what
 // [mergeResourceTags] calls, so CloudFormation's stamps reach the same writer.
 //
-// Both run under the lock the plugin's own tagging operations hold, so a tag written through the
-// tagging API cannot interleave with one written through the service's own API. Neither refuses an
-// `aws:` key: the internal callers stamp `aws:cloudformation:*`, and the tagging API has never
-// refused one here. quota says whether the service's published per-resource tag quota is enforced
-// ([taggingCheckTagQuota]). A record that is not there is [errTagResourceNotFound], and a quota
-// refusal is a [taggingQuotaError].
+// Both run under the lock the plugin's own tag operations hold, so a tag write through the tagging
+// API and one through the service's own tag operation are serialized with each other. The lock
+// orders tag writes only: a service operation that rewrites the same record without taking it is
+// not ordered against them.
+//
+// tagResourceByARN serves callers, so it applies the owner's key rules to what it is asked to add
+// and remove, and those refuse an `aws:` key. tagRecord applies none, because its callers are
+// internal and stamp `aws:cloudformation:*`. quota says whether the service's published
+// per-resource tag quota is enforced ([taggingCheckTagQuota]). A record that is not there is
+// [errTagResourceNotFound], and a refusal the owner would answer is a [taggingQuotaError].
 type resourceTagger interface {
 	tagResourceByARN(reqCtx *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode) error
 	tagRecord(ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode) error
@@ -60,6 +65,44 @@ func (e *taggingResolveError) Error() string { return e.err.Error() }
 // taggingResolveFailed wraps err as a [taggingResolveError].
 func taggingResolveFailed(err error) error {
 	return &taggingResolveError{err: err}
+}
+
+// taggingReservedTagPrefix is the prefix of tag keys AWS reserves: "System created tags that begin
+// with aws: are reserved for AWS use ... You can't edit or delete a tag that begins with the aws:
+// prefix" (Tagging AWS Resources, Tag naming limits and requirements).
+const taggingReservedTagPrefix = "aws:"
+
+// taggingReservedKeyRefusal refuses a caller's write that adds or removes an `aws:` key, for a
+// service whose own key rules substrate does not model. The tagging API reports it for the resource
+// as InvalidParameterException at 400, the code its page gives for "a provided parameter value is
+// out of range". The message is substrate's own.
+func taggingReservedKeyRefusal(add map[string]string, remove []string) *AWSError {
+	reserved := false
+	for k := range add {
+		reserved = reserved || strings.HasPrefix(k, taggingReservedTagPrefix)
+	}
+	for _, k := range remove {
+		reserved = reserved || strings.HasPrefix(k, taggingReservedTagPrefix)
+	}
+	if !reserved {
+		return nil
+	}
+	return &AWSError{
+		Code:       "InvalidParameterException",
+		Message:    "Tag keys that begin with aws: are reserved for AWS use.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// taggingSortedKeys returns m's keys in order, so a check that stops at the first bad tag names the
+// same one on every run.
+func taggingSortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // taggingARNOwner returns the name of the plugin that owns resources whose ARN carries service as
