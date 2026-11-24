@@ -8,12 +8,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // s3CtrlSeededObjectPrefix is the key prefix for every seeded object, used to
 // clear all of them.
 const s3CtrlSeededObjectPrefix = "seeded-object:"
+
+// s3CtrlSupersededPrefix is the key prefix for the tombstones
+// [S3Plugin.supersedeSeededObject] writes.
+const s3CtrlSupersededPrefix = "seeded-object-superseded:"
 
 // s3SeededObjectDefaultContentType is the Content-Type a seed without one is served with,
 // the same default PutObject applies.
@@ -102,51 +107,115 @@ func (s *s3SeededObject) availableAt() (time.Time, error) {
 	return t, nil
 }
 
-// resolveSeededObject returns the seeded object for bucket and key, matching the
-// exact bucket first and then the "*" wildcard. The caller has already found no real
-// object at the key. It returns handled=false when no seed applies or the seed's
-// availableAt is still ahead of the simulated clock, so the caller's NoSuchKey is the
-// answer. A served seed goes through the caller's normal object path, so range and
-// conditional reads apply to it as to any other object.
-func (p *S3Plugin) resolveSeededObject(ctx context.Context, bucket, key string) (S3Object, []byte, bool, error) {
+// s3SeededObjectSupersededKey returns the state key recording that a write or delete
+// of bucket/key superseded the seed that applied to it.
+func s3SeededObjectSupersededKey(bucket, key string) string {
+	return s3CtrlSupersededPrefix + bucket + "/" + key
+}
+
+// availableSeededObject returns the seed a read of bucket/key observes now: the exact-bucket
+// seed if there is one, otherwise the "*" seed. It returns nil when neither exists, when the
+// one that applies is still ahead of the simulated clock, or when a write or delete of the
+// key has superseded it; see [S3Plugin.supersedeSeededObject].
+func (p *S3Plugin) availableSeededObject(ctx context.Context, bucket, key string) (*s3SeededObject, time.Time, error) {
 	for _, stateKey := range []string{s3SeededObjectKey(bucket, key), s3SeededObjectKey("*", key)} {
 		data, err := p.state.Get(ctx, s3CtrlNamespace, stateKey)
 		if err != nil {
-			return S3Object{}, nil, false, fmt.Errorf("s3 resolveSeededObject get: %w", err)
+			return nil, time.Time{}, fmt.Errorf("s3 seeded object get: %w", err)
 		}
 		if data == nil {
 			continue
 		}
 		var seed s3SeededObject
 		if err := json.Unmarshal(data, &seed); err != nil {
-			return S3Object{}, nil, false, fmt.Errorf("s3 resolveSeededObject unmarshal: %w", err)
+			return nil, time.Time{}, fmt.Errorf("s3 seeded object unmarshal: %w", err)
 		}
 		at, err := seed.availableAt()
 		if err != nil {
-			return S3Object{}, nil, false, fmt.Errorf("s3 resolveSeededObject: %w", err)
+			return nil, time.Time{}, fmt.Errorf("s3 seeded object: %w", err)
 		}
 		if !at.IsZero() && p.tc.Now().Before(at) {
-			return S3Object{}, nil, false, nil
+			return nil, time.Time{}, nil
 		}
-		body, err := seed.bytes()
+		superseded, err := p.state.Get(ctx, s3CtrlNamespace, s3SeededObjectSupersededKey(bucket, key))
 		if err != nil {
-			return S3Object{}, nil, false, fmt.Errorf("s3 resolveSeededObject: %w", err)
+			return nil, time.Time{}, fmt.Errorf("s3 seeded object superseded get: %w", err)
 		}
-		modified := seed.SeededAt
-		if !at.IsZero() {
-			modified = at
+		if superseded != nil {
+			return nil, time.Time{}, nil
 		}
-		hash := md5.Sum(body) //nolint:gosec // S3 ETags are MD5 by definition.
-		return S3Object{
-			Bucket:       bucket,
-			Key:          key,
-			Size:         int64(len(body)),
-			ContentType:  seed.ContentType,
-			ETag:         fmt.Sprintf("%q", fmt.Sprintf("%x", hash)),
-			LastModified: modified.UTC(),
-		}, body, true, nil
+		return &seed, at, nil
 	}
-	return S3Object{}, nil, false, nil
+	return nil, time.Time{}, nil
+}
+
+// resolveSeededObject returns the seeded object for bucket and key; see
+// [S3Plugin.availableSeededObject] for which seed applies. The caller has already found
+// no real object at the key. It returns handled=false when no seed applies, so the
+// caller's NoSuchKey is the answer. A served seed goes through the caller's normal object
+// path, so range and conditional reads apply to it as to any other object.
+func (p *S3Plugin) resolveSeededObject(ctx context.Context, bucket, key string) (S3Object, []byte, bool, error) {
+	seed, at, err := p.availableSeededObject(ctx, bucket, key)
+	if err != nil || seed == nil {
+		return S3Object{}, nil, false, err
+	}
+	body, err := seed.bytes()
+	if err != nil {
+		return S3Object{}, nil, false, fmt.Errorf("s3 resolveSeededObject: %w", err)
+	}
+	modified := seed.SeededAt
+	if !at.IsZero() {
+		modified = at
+	}
+	hash := md5.Sum(body) //nolint:gosec // S3 ETags are MD5 by definition.
+	return S3Object{
+		Bucket:       bucket,
+		Key:          key,
+		Size:         int64(len(body)),
+		ContentType:  seed.ContentType,
+		ETag:         fmt.Sprintf("%q", fmt.Sprintf("%x", hash)),
+		LastModified: modified.UTC(),
+	}, body, true, nil
+}
+
+// supersedeSeededObject records that a write or delete of bucket/key has replaced the
+// seed that currently applies to it, so the seed is not served again once the key is
+// absent. A seed stands for an object written by something outside the account; once
+// that object has been overwritten or deleted, it is gone, as it would be in S3.
+//
+// Only a seed already available is superseded. One whose availableAt is still ahead
+// describes a write that has not happened yet, so a delete before it leaves the seed to
+// appear on time. A tombstone rather than a deletion, because the seed may be the "*"
+// one, which other buckets still observe. A new seed for the key clears the tombstone.
+func (p *S3Plugin) supersedeSeededObject(ctx context.Context, bucket, key string) error {
+	seed, _, err := p.availableSeededObject(ctx, bucket, key)
+	if err != nil || seed == nil {
+		return err
+	}
+	if err := p.state.Put(ctx, s3CtrlNamespace, s3SeededObjectSupersededKey(bucket, key), []byte("{}")); err != nil {
+		return fmt.Errorf("s3 supersede seeded object: %w", err)
+	}
+	return nil
+}
+
+// clearSupersededSeeds removes the tombstones a new or cleared seed for bucket/key makes
+// stale: the one for that bucket, or every bucket's for the key when bucket is "*". An
+// empty key clears every tombstone.
+func (s *Server) clearSupersededSeeds(ctx context.Context, bucket, key string) error {
+	keys, err := s.state.List(ctx, s3CtrlNamespace, s3CtrlSupersededPrefix)
+	if err != nil {
+		return fmt.Errorf("list superseded seeds: %w", err)
+	}
+	for _, k := range keys {
+		b, kk, _ := strings.Cut(strings.TrimPrefix(k, s3CtrlSupersededPrefix), "/")
+		if key != "" && (kk != key || (bucket != "*" && b != bucket)) {
+			continue
+		}
+		if err := s.state.Delete(ctx, s3CtrlNamespace, k); err != nil {
+			return fmt.Errorf("delete superseded seed: %w", err)
+		}
+	}
+	return nil
 }
 
 // handleS3SeedObject handles POST /v1/s3/seeded-objects. It seeds the object a GET
@@ -194,6 +263,10 @@ func (s *Server) handleS3SeedObject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
+	if err := s.clearSupersededSeeds(r.Context(), seed.Bucket, seed.Key); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
 	writeJSONDebug(w, s.logger, map[string]any{"ok": true, "bucket": seed.Bucket, "key": seed.Key})
 }
 
@@ -212,6 +285,13 @@ func (s *Server) handleS3ClearSeededObjects(w http.ResponseWriter, r *http.Reque
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
+		if bucket == "" {
+			bucket = "*"
+		}
+		if err := s.clearSupersededSeeds(r.Context(), bucket, key); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
 		writeJSONDebug(w, s.logger, map[string]any{"ok": true})
 		return
 	}
@@ -225,6 +305,10 @@ func (s *Server) handleS3ClearSeededObjects(w http.ResponseWriter, r *http.Reque
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
+	}
+	if err := s.clearSupersededSeeds(r.Context(), "*", ""); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
 	}
 	writeJSONDebug(w, s.logger, map[string]any{"ok": true})
 }

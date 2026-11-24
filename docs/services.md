@@ -6634,7 +6634,8 @@ DELETE /v1/s3/seeded-objects?bucket=<b>&key=<k>   (key alone clears the "*" seed
 - **`availableAt`** is an RFC 3339 instant on the simulated clock. Before it the key reads as
   absent (`404 NoSuchKey`), which is the "not finished yet" observation a poll loop waits on.
   At or after it the object is served, with `Last-Modified` set to `availableAt`. Without it the
-  object is served immediately, with `Last-Modified` set to the time of the seed.
+  object is served immediately, with `Last-Modified` set to the simulated time of the seed,
+  which is also the time its control-plane event records.
 
 ```console
 $ curl -X POST http://localhost:4566/v1/s3/seeded-objects -d '{
@@ -6642,12 +6643,26 @@ $ curl -X POST http://localhost:4566/v1/s3/seeded-objects -d '{
     "body": {"task_id": "t1", "exit_code": 0, "state": "completed"},
     "availableAt": "2026-01-01T12:05:00Z"}'
 $ aws s3api get-object --bucket results --key tasks/t1/completion.json /dev/stdout
-{"exit_code":0,"state":"completed","task_id":"t1"}
+{"task_id":"t1","exit_code":0,"state":"completed"}
 ```
 
-**A seed is used only when no real object exists at the key.** A `PutObject` to the key wins
-from then on. A read naming an explicit `versionId` never resolves to a seed, because a seed
-has no version history. An unseeded key is an ordinary `404 NoSuchKey`, whatever its shape.
+**A seed is used only when no real object exists at the key.** A read naming an explicit
+`versionId` never resolves to a seed, because a seed has no version history. An unseeded key is
+an ordinary `404 NoSuchKey`, whatever its shape.
+
+**A write or delete of the key replaces the seed.** The seed stands for an object something else
+wrote, so once a `PutObject`, `CopyObject`, `CompleteMultipartUpload`, `DeleteObject` or
+`DeleteObjects` has overwritten or deleted that object, it is gone, as it would be in S3. The key
+then reads as whatever the bucket holds: the written object, a delete marker in a versioned
+bucket, or `404 NoSuchKey`, including after the written versions are themselves deleted. This
+applies only to a seed already available. A delete before `availableAt` deletes nothing, and the
+seed still appears on time. For a `"*"` seed it applies to that bucket alone. Posting the seed
+again, or clearing it, makes it apply afresh.
+
+**`CopyObject` and `UploadPartCopy` read a seeded source** the way `GetObject` does, so a seeded
+key can be copied. The other object operations treat a seeded key as absent: `GetObjectAcl`,
+`PutObjectAcl`, `GetObjectTagging`, `PutObjectTagging`, `DeleteObjectTagging`,
+`SelectObjectContent`, `ListObjectVersions`, and the existence check of a conditional write.
 
 **The seed is served through the normal object path.** `HeadObject` reports the same
 `Content-Length`, `ETag` (an MD5 of the body), `Content-Type` and `Last-Modified` as `GetObject`,
@@ -7535,22 +7550,34 @@ pseudo-parameter resolution like every other property.
 
 Substrate never runs a function's code. Running a handler is the workload behind the API rather
 than an observation through it, so per the scope rule it is out of scope. `Invoke` instead answers
-the first of these that applies:
+a seed or the stub:
 
-1. **A seeded error**, through `POST`/`DELETE /v1/lambda/invoke-error`. The response carries
-   `X-Amz-Function-Error` (`Handled` or `Unhandled`, default `Unhandled`) and an error payload, or the
-   seed's own `payload` verbatim.
-2. **A seeded result**, through `POST`/`DELETE /v1/lambda/invoke-result`. The seed's `payload`, any
-   JSON value, is returned verbatim with no `X-Amz-Function-Error`.
-3. **The stub** `{"statusCode":200,"body":"null"}`, with no `X-Amz-Function-Error`.
+- **A seeded error**, through `POST`/`DELETE /v1/lambda/invoke-error`. The response carries
+  `X-Amz-Function-Error` (`Handled` or `Unhandled`, default `Unhandled`) and an error payload, or the
+  seed's own `payload` verbatim.
+- **A seeded result**, through `POST`/`DELETE /v1/lambda/invoke-result`. The seed's `payload`, any
+  JSON value, is returned verbatim with no `X-Amz-Function-Error`.
+- **The stub** `{"statusCode":200,"body":"null"}`, with no `X-Amz-Function-Error`, when no seed
+  applies.
+
+A seed for the function's own name outranks a `"*"` seed of either kind, and at the same scope an
+error outranks a result. The first that exists answers, in this order:
+
+1. the error seeded for the function;
+2. the result seeded for the function;
+3. the `"*"` error;
+4. the `"*"` result.
+
+So a wildcard failure does not mask a result seeded for one function.
 
 ```
 POST   /v1/lambda/invoke-result   {"functionName","payload"}
 DELETE /v1/lambda/invoke-result?functionName=<name>   (or with no query, clear all)
 ```
 
-Both seeds are keyed by function name, or by `"*"` for any function, and an exact name wins over
-the wildcard. `functionName` defaults to `"*"`, and `payload` is required. Clearing result seeds
+Both seeds are keyed by function name, or by `"*"` for any function. `functionName` defaults to
+`"*"`, and in a POST or DELETE it takes the forms `Invoke` does: a name, a qualified name
+(`resize:v1`), or a full or partial ARN, all keyed by the bare name. `payload` is required. Clearing result seeds
 leaves error seeds in place, and the reverse. Every path that invokes a function reads the same
 seeds, including an event-source mapping's poll, a Step Functions task, a Scheduler target and an
 API Gateway proxy integration.

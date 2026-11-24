@@ -280,6 +280,9 @@ func TestS3SeededObject_StoreFaults(t *testing.T) {
 		{"POST, seed write", func(m *cfFaultStateManager) { m.failPut = record }, http.MethodPost, "/v1/s3/seeded-objects", `{"key":"k2"}`},
 		{"DELETE one", func(m *cfFaultStateManager) { m.failDelete = record }, http.MethodDelete, "/v1/s3/seeded-objects?key=k", ""},
 		{"DELETE all", func(m *cfFaultStateManager) { m.failDelete = record }, http.MethodDelete, "/v1/s3/seeded-objects", ""},
+		{"GET, tombstone read", func(m *cfFaultStateManager) { m.failGet = "seeded-object-superseded:" }, http.MethodGet, "/results/k", ""},
+		{"DeleteObject, tombstone write", func(m *cfFaultStateManager) { m.failPut = "seeded-object-superseded:" }, http.MethodDelete, "/results/k", ""},
+		{"PutObject, seed read", func(m *cfFaultStateManager) { m.failGet = record }, http.MethodPut, "/results/k", "x"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -297,4 +300,204 @@ func TestS3SeededObject_StoreFaults(t *testing.T) {
 			assert.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
 		})
 	}
+}
+
+// s3EnableVersioning turns versioning on for bucket.
+func s3EnableVersioning(t *testing.T, srv *emulator.Server, bucket string) {
+	t.Helper()
+	w := s3Request(t, srv, http.MethodPut, "/"+bucket+"?versioning", []byte(
+		`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`), nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+}
+
+// TestS3SeededObject_AWriteOrDeleteSupersedesTheSeed pins that a seed stands for one
+// object, which a delete or an overwrite removes: once the key has been written or
+// deleted, the seed is not served again, in an unversioned or a versioned bucket.
+func TestS3SeededObject_AWriteOrDeleteSupersedesTheSeed(t *testing.T) {
+	t.Parallel()
+	const path = "/results/out.json"
+	tests := []struct {
+		name      string
+		versioned bool
+		wildcard  bool
+		steps     func(t *testing.T, srv *emulator.Server)
+		wantBody  string // "" means 404 NoSuchKey
+	}{
+		{
+			name: "DeleteObject, unversioned",
+			steps: func(t *testing.T, srv *emulator.Server) {
+				require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+			},
+		},
+		{
+			name:     "DeleteObject of a wildcard seed, unversioned",
+			wildcard: true,
+			steps: func(t *testing.T, srv *emulator.Server) {
+				require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+			},
+		},
+		{
+			name: "DeleteObjects, unversioned",
+			steps: func(t *testing.T, srv *emulator.Server) {
+				w := s3Request(t, srv, http.MethodPost, "/results?delete",
+					[]byte(`<Delete><Object><Key>out.json</Key></Object></Delete>`), nil)
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			},
+		},
+		{
+			name: "PutObject then DeleteObject, unversioned",
+			steps: func(t *testing.T, srv *emulator.Server) {
+				require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, path, []byte("written"), nil).Code)
+				require.Equal(t, "written", s3Request(t, srv, http.MethodGet, path, nil, nil).Body.String())
+				require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+			},
+		},
+		{
+			name: "CopyObject onto the key then DeleteObject, unversioned",
+			steps: func(t *testing.T, srv *emulator.Server) {
+				require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results/src", []byte("copied"), nil).Code)
+				require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, path, nil,
+					map[string]string{"X-Amz-Copy-Source": "/results/src"}).Code)
+				require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+			},
+		},
+		{
+			name:      "DeleteObject then delete the marker, versioned",
+			versioned: true,
+			steps: func(t *testing.T, srv *emulator.Server) {
+				del := s3Request(t, srv, http.MethodDelete, path, nil, nil)
+				require.Equal(t, http.StatusNoContent, del.Code)
+				require.Equal(t, http.StatusNotFound, s3Request(t, srv, http.MethodGet, path, nil, nil).Code)
+				marker := del.Header().Get("x-amz-version-id")
+				require.NotEmpty(t, marker)
+				require.Equal(t, http.StatusNoContent,
+					s3Request(t, srv, http.MethodDelete, path+"?versionId="+marker, nil, nil).Code)
+			},
+		},
+		{
+			name:      "PutObject then delete its version, versioned",
+			versioned: true,
+			steps: func(t *testing.T, srv *emulator.Server) {
+				put := s3Request(t, srv, http.MethodPut, path, []byte("written"), nil)
+				require.Equal(t, http.StatusOK, put.Code)
+				require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete,
+					path+"?versionId="+put.Header().Get("x-amz-version-id"), nil, nil).Code)
+			},
+		},
+		{
+			name: "posting the seed again restores it",
+			steps: func(t *testing.T, srv *emulator.Server) {
+				require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+				seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "out.json", "body": "again"})
+			},
+			wantBody: "again",
+		},
+		{
+			name:     "posting a wildcard seed again restores it",
+			wildcard: true,
+			steps: func(t *testing.T, srv *emulator.Server) {
+				require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+				seedS3Object(t, srv, map[string]any{"key": "out.json", "body": "again"})
+			},
+			wantBody: "again",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv, _ := newS3TestServer(t)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/other", nil, nil).Code)
+			if tt.versioned {
+				s3EnableVersioning(t, srv, "results")
+			}
+			seed := map[string]any{"bucket": "results", "key": "out.json", "body": "seeded"}
+			if tt.wildcard {
+				seed["bucket"] = "*"
+			}
+			seedS3Object(t, srv, seed)
+			require.Equal(t, "seeded", s3Request(t, srv, http.MethodGet, path, nil, nil).Body.String())
+
+			tt.steps(t, srv)
+
+			get := s3Request(t, srv, http.MethodGet, path, nil, nil)
+			if tt.wantBody == "" {
+				assert.Equal(t, http.StatusNotFound, get.Code, get.Body.String())
+				assert.Contains(t, get.Body.String(), "NoSuchKey")
+				assert.Equal(t, http.StatusNotFound, s3Request(t, srv, http.MethodHead, path, nil, nil).Code)
+			} else {
+				assert.Equal(t, tt.wantBody, get.Body.String())
+			}
+			if tt.wildcard && tt.wantBody == "" {
+				assert.Equal(t, "seeded", s3Request(t, srv, http.MethodGet, "/other/out.json", nil, nil).Body.String(),
+					"a wildcard seed superseded in one bucket still answers in another")
+			}
+		})
+	}
+}
+
+// TestS3SeededObject_ADeleteBeforeAvailableAtDeletesNothing pins the other half: a seed
+// still ahead of the clock describes a write that has not happened, so deleting the key
+// first leaves it to appear on time. Clearing the seed clears a tombstone with it.
+func TestS3SeededObject_ADeleteBeforeAvailableAtDeletesNothing(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+	seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "late", "body": "late", "availableAt": "2026-06-01T00:00:00Z"})
+	seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "now", "body": "now"})
+
+	require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, "/results/late", nil, nil).Code)
+	require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, "/results/now", nil, nil).Code)
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPost, "/v1/control/time",
+		[]byte(`{"time":"2026-06-01T00:00:00Z"}`), nil).Code)
+	assert.Equal(t, "late", s3Request(t, srv, http.MethodGet, "/results/late", nil, nil).Body.String())
+	assert.Equal(t, http.StatusNotFound, s3Request(t, srv, http.MethodGet, "/results/now", nil, nil).Code)
+
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodDelete, "/v1/s3/seeded-objects?bucket=results&key=now", nil, nil).Code)
+	seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "now", "body": "fresh"})
+	assert.Equal(t, "fresh", s3Request(t, srv, http.MethodGet, "/results/now", nil, nil).Body.String())
+
+	require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, "/results/now", nil, nil).Code)
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodDelete, "/v1/s3/seeded-objects", nil, nil).Code)
+	seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "now", "body": "after clear-all"})
+	assert.Equal(t, "after clear-all", s3Request(t, srv, http.MethodGet, "/results/now", nil, nil).Body.String())
+}
+
+// TestS3SeededObject_CopySource pins that CopyObject reads a seeded source the way
+// GetObject does, body and all.
+func TestS3SeededObject_CopySource(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+	seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "seeded.txt", "body": "from a seed"})
+
+	w := s3Request(t, srv, http.MethodPut, "/results/copy.txt", nil,
+		map[string]string{"X-Amz-Copy-Source": "/results/seeded.txt"})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "from a seed", s3Request(t, srv, http.MethodGet, "/results/copy.txt", nil, nil).Body.String())
+
+	missing := s3Request(t, srv, http.MethodPut, "/results/copy2.txt", nil,
+		map[string]string{"X-Amz-Copy-Source": "/results/absent.txt"})
+	assert.Equal(t, http.StatusNotFound, missing.Code)
+}
+
+// TestReplay_ASeedWrittenOnARunningClockReplaysToTheSameState pins that a seed which
+// stores the time it was written stores the instant its event records. The clock runs
+// during the recording, so without the hold the handler's reading and the event's
+// timestamp would differ, and the replayed state would not match the live one.
+func TestReplay_ASeedWrittenOnARunningClockReplaysToTheSameState(t *testing.T) {
+	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies())
+	require.False(t, ts.TimeController().Frozen(), "the point is a running clock")
+	cpCreateBucket(t, ts, "running")
+	status, body := cpControlPlaneRequest(t, ts, http.MethodPost, "/v1/s3/seeded-objects",
+		[]byte(`{"bucket":"running","key":"k","body":"x"}`))
+	require.Equal(t, http.StatusOK, status, body)
+
+	sm, ok := ts.StateManager().(emulator.SnapshotableStateManager)
+	require.True(t, ok)
+	live, err := sm.Snapshot(t.Context())
+	require.NoError(t, err)
+	at, err := ts.ReplaySandbox(t).StateAt(t.Context(), emulator.DefaultStreamID, 100)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(live), string(at.State), "the replayed seed stores the recorded seededAt")
 }

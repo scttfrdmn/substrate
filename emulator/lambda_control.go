@@ -42,32 +42,61 @@ type lambdaSeededError struct {
 // lambdaCtrlKey returns the state key for a seeded error. Function-scoped seeds
 // use "invoke-error:{name}"; the wildcard uses "invoke-error:*".
 func lambdaCtrlKey(functionName string) string {
-	if functionName == "" {
-		functionName = "*"
-	}
-	return "invoke-error:" + functionName
+	return "invoke-error:" + lambdaSeedFunctionName(functionName)
 }
 
-// resolveSeededError returns the seeded failure for a function, matching by exact
-// name first then the "*" wildcard. It returns (nil, nil) when no seed applies,
-// so the caller falls back to the nominal success path.
-func (p *LambdaPlugin) resolveSeededError(functionName string) (*lambdaSeededError, error) {
-	goCtx := context.Background()
-	for _, key := range []string{lambdaCtrlKey(functionName), lambdaCtrlKey("*")} {
-		data, err := p.state.Get(goCtx, lambdaCtrlNamespace, key)
-		if err != nil {
-			return nil, fmt.Errorf("lambda resolveSeededError get: %w", err)
-		}
-		if data == nil {
-			continue
-		}
-		var seed lambdaSeededError
-		if err := json.Unmarshal(data, &seed); err != nil {
-			return nil, fmt.Errorf("lambda resolveSeededError unmarshal: %w", err)
-		}
-		return &seed, nil
+// lambdaSeedFunctionName reduces the forms Invoke accepts as FunctionName to the bare
+// name a seed is keyed by, which is the name [LambdaPlugin.invoke] looks seeds up
+// under: a full or partial ARN (arn:aws:lambda:us-west-2:123456789012:function:my-function,
+// 123456789012:function:my-function) and a qualified name (my-function:v1) all name
+// my-function. Empty is the "*" wildcard.
+func lambdaSeedFunctionName(functionName string) string {
+	if functionName == "" || functionName == "*" {
+		return "*"
 	}
-	return nil, nil //nolint:nilnil // (nil, nil) = "no seed applies", handled by caller.
+	parts := strings.Split(functionName, ":")
+	for i, part := range parts {
+		if part == "function" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return parts[0]
+}
+
+// resolveInvokeSeeds returns the seeded error or the seeded result an invoke of
+// functionName answers, at most one of them, or neither when no seed applies.
+//
+// A seed for the function's own name outranks a "*" seed of either kind, and at the
+// same scope an error outranks a result. So the order is exact error, exact result,
+// "*" error, "*" result: a wildcard failure does not mask a result seeded for one
+// function, and a result never masks an error seeded at the same scope.
+func (p *LambdaPlugin) resolveInvokeSeeds(functionName string) (*lambdaSeededError, *lambdaSeededResult, error) {
+	goCtx := context.Background()
+	for _, name := range []string{functionName, "*"} {
+		data, err := p.state.Get(goCtx, lambdaCtrlNamespace, lambdaCtrlKey(name))
+		if err != nil {
+			return nil, nil, fmt.Errorf("lambda invoke-error seed get: %w", err)
+		}
+		if data != nil {
+			var seed lambdaSeededError
+			if err := json.Unmarshal(data, &seed); err != nil {
+				return nil, nil, fmt.Errorf("lambda invoke-error seed unmarshal: %w", err)
+			}
+			return &seed, nil, nil
+		}
+		data, err = p.state.Get(goCtx, lambdaCtrlNamespace, lambdaResultKey(name))
+		if err != nil {
+			return nil, nil, fmt.Errorf("lambda invoke-result seed get: %w", err)
+		}
+		if data != nil {
+			var seed lambdaSeededResult
+			if err := json.Unmarshal(data, &seed); err != nil {
+				return nil, nil, fmt.Errorf("lambda invoke-result seed unmarshal: %w", err)
+			}
+			return nil, &seed, nil
+		}
+	}
+	return nil, nil, nil
 }
 
 // errorPayload returns the response body for a seeded failure: the verbatim
@@ -174,7 +203,8 @@ func (s *Server) clearLambdaSeeds(w http.ResponseWriter, r *http.Request, prefix
 // lambdaSeededResult is a seeded successful Invoke result. Substrate does not run
 // the handler, so without a seed an invoke answers a fixed stub payload; a seed
 // sets the payload a caller's success branch reads. Keyed by function name or the
-// "*" wildcard. A seeded error for the same function takes precedence.
+// "*" wildcard; see [LambdaPlugin.resolveInvokeSeeds] for how it ranks against a
+// seeded error.
 type lambdaSeededResult struct {
 	// FunctionName the seed applies to, or "*" for any function.
 	FunctionName string `json:"functionName"`
@@ -186,32 +216,7 @@ type lambdaSeededResult struct {
 // lambdaResultKey returns the state key for a seeded result. Function-scoped
 // seeds use "invoke-result:{name}"; the wildcard uses "invoke-result:*".
 func lambdaResultKey(functionName string) string {
-	if functionName == "" {
-		functionName = "*"
-	}
-	return "invoke-result:" + functionName
-}
-
-// resolveSeededResult returns the seeded result for a function, matching by
-// exact name first then the "*" wildcard. It returns (nil, nil) when no seed
-// applies, so the caller answers the stub payload.
-func (p *LambdaPlugin) resolveSeededResult(functionName string) (*lambdaSeededResult, error) {
-	goCtx := context.Background()
-	for _, key := range []string{lambdaResultKey(functionName), lambdaResultKey("*")} {
-		data, err := p.state.Get(goCtx, lambdaCtrlNamespace, key)
-		if err != nil {
-			return nil, fmt.Errorf("lambda resolveSeededResult get: %w", err)
-		}
-		if data == nil {
-			continue
-		}
-		var seed lambdaSeededResult
-		if err := json.Unmarshal(data, &seed); err != nil {
-			return nil, fmt.Errorf("lambda resolveSeededResult unmarshal: %w", err)
-		}
-		return &seed, nil
-	}
-	return nil, nil //nolint:nilnil // (nil, nil) = "no seed applies", handled by caller.
+	return "invoke-result:" + lambdaSeedFunctionName(functionName)
 }
 
 // body returns the seeded payload as the invoke response body.
@@ -221,8 +226,8 @@ func (s *lambdaSeededResult) body() []byte {
 
 // handleLambdaSeedInvokeResult handles POST /v1/lambda/invoke-result. It seeds
 // the payload a successful Invoke returns for the given function (default "*").
-// The response carries no X-Amz-Function-Error, and a seeded invoke-error for the
-// same function still wins. Body: {"functionName","payload"}, where payload is any
+// The response carries no X-Amz-Function-Error; see [LambdaPlugin.resolveInvokeSeeds]
+// for the order a result and an error seed are resolved in. Body: {"functionName","payload"}, where payload is any
 // JSON value and is required.
 func (s *Server) handleLambdaSeedInvokeResult(w http.ResponseWriter, r *http.Request) {
 	var seed lambdaSeededResult

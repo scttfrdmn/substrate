@@ -608,28 +608,23 @@ func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string)
 		return nil, err
 	}
 
-	// A seeded failure short-circuits every path below: substrate never runs the
-	// handler, so seeding is the only way a caller's error branch becomes
-	// reachable. The status stays 200 — per the Invoke reference, "the status code
-	// in the API response doesn't reflect function errors".
-	seed, seedErr := p.resolveSeededError(fn.FunctionName)
+	// Substrate never runs the handler, so a seed is the only way a caller's error
+	// branch, or a specific success payload, becomes reachable; see
+	// [LambdaPlugin.resolveInvokeSeeds] for which seed wins. A seeded failure still
+	// answers 200 — per the Invoke reference, "the status code in the API response
+	// doesn't reflect function errors". With no seed, the stub payload is the nominal
+	// success.
+	seededErr, seededResult, seedErr := p.resolveInvokeSeeds(fn.FunctionName)
 	if seedErr != nil {
 		return nil, seedErr
 	}
-	if seed != nil {
-		body := seed.errorPayload(ctx.RequestID)
-		return invokeResponse(body, seed.functionErrorHeader(),
+	if seededErr != nil {
+		body := seededErr.errorPayload(ctx.RequestID)
+		return invokeResponse(body, seededErr.functionErrorHeader(),
 			lambdaLogTail(req, fn, ctx.RequestID, true)), nil
 	}
-
-	// A seeded success result comes next, so a caller's success branch can read a
-	// specific payload; without one, the stub payload is the nominal success.
-	result, resultErr := p.resolveSeededResult(fn.FunctionName)
-	if resultErr != nil {
-		return nil, resultErr
-	}
-	if result != nil {
-		return invokeResponse(result.body(), "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
+	if seededResult != nil {
+		return invokeResponse(seededResult.body(), "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
 	}
 
 	stubPayload := []byte(`{"statusCode":200,"body":"null"}`)

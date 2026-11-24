@@ -137,13 +137,17 @@ func evaluateReadPreconditions(c s3ConditionalHeaders, obj *S3Object) *AWSRespon
 	// If-None-Match evaluated false and did not return above; If-Modified-Since is
 	// then redundant with it, so S3 skips it. Likewise a satisfied If-Match
 	// suppresses If-Unmodified-Since.
+	// Last-Modified is rendered in whole seconds (an HTTP date has no finer unit), so
+	// the comparison is too: a caller echoing the header back must match the object it
+	// came from, not fall a fraction of a second behind it.
+	modified := obj.LastModified.Truncate(time.Second)
 	if c.hasIfModifiedSince && !c.hasIfNoneMatch {
-		if since, ok := parseHTTPDate(c.IfModifiedSince); ok && !obj.LastModified.After(since) {
+		if since, ok := parseHTTPDate(c.IfModifiedSince); ok && !modified.After(since) {
 			return &AWSResponse{StatusCode: http.StatusNotModified, Headers: map[string]string{"ETag": obj.ETag}}
 		}
 	}
 	if c.hasIfUnmodifiedSince && !c.hasIfMatch {
-		if since, ok := parseHTTPDate(c.IfUnmodifiedSince); ok && obj.LastModified.After(since) {
+		if since, ok := parseHTTPDate(c.IfUnmodifiedSince); ok && modified.After(since) {
 			return s3PreconditionFailedResponse()
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -534,6 +535,98 @@ func TestInvokeResult_StoreFaults(t *testing.T) {
 			resp := lambdaRequest(t, srv, tt.method, tt.path, tt.body)
 			defer resp.Body.Close() //nolint:errcheck
 			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
+// TestInvoke_SeedPrecedence pins the order an invoke resolves its seeds in: exact error,
+// exact result, "*" error, "*" result. A seed for the function's own name outranks any
+// wildcard, and at one scope an error outranks a result.
+func TestInvoke_SeedPrecedence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                    string
+		exactErr, wildErr       bool
+		exactResult, wildResult bool
+		want                    string // "error", "exact", "wild" or "stub"
+	}{
+		{name: "exact error beats exact result", exactErr: true, exactResult: true, want: "error"},
+		{name: "exact result beats wildcard error", wildErr: true, exactResult: true, want: "exact"},
+		{name: "exact error beats wildcard result", exactErr: true, wildResult: true, want: "error"},
+		{name: "wildcard error beats wildcard result", wildErr: true, wildResult: true, want: "error"},
+		{name: "wildcard result alone", wildResult: true, want: "wild"},
+		{name: "all four", exactErr: true, wildErr: true, exactResult: true, wildResult: true, want: "error"},
+		{name: "none", want: "stub"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newLambdaTestServer(t)
+			createInvokeTestFunction(t, srv, "fn")
+			seedResult := func(name, payload string) {
+				code, body := lambdaControl(t, srv, http.MethodPost, "/v1/lambda/invoke-result",
+					map[string]any{"functionName": name, "payload": payload})
+				require.Equal(t, http.StatusOK, code, body)
+			}
+			if tt.exactErr {
+				seedInvokeError(t, srv, map[string]any{"functionName": "fn", "errorType": "Handled"})
+			}
+			if tt.wildErr {
+				seedInvokeError(t, srv, map[string]any{"functionName": "*", "errorType": "Handled"})
+			}
+			if tt.exactResult {
+				seedResult("fn", "exact")
+			}
+			if tt.wildResult {
+				seedResult("*", "wild")
+			}
+
+			body, errored := invokeBody(t, srv, "fn")
+			switch tt.want {
+			case "error":
+				assert.True(t, errored, body)
+			case "stub":
+				assert.False(t, errored)
+				assert.JSONEq(t, `{"statusCode":200,"body":"null"}`, body)
+			default:
+				assert.False(t, errored, body)
+				assert.JSONEq(t, `"`+tt.want+`"`, body)
+			}
+		})
+	}
+}
+
+// TestInvokeSeeds_NormaliseTheFunctionName pins that a seed POST or DELETE may name the
+// function in any form Invoke accepts — a qualified name, a full ARN or a partial one —
+// and keys the seed by the bare name an invoke looks it up under.
+func TestInvokeSeeds_NormaliseTheFunctionName(t *testing.T) {
+	t.Parallel()
+	const arn = "arn:aws:lambda:us-east-1:123456789012:function:fn"
+	for _, name := range []string{"fn:v1", arn, arn + ":prod", "123456789012:function:fn"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := newLambdaTestServer(t)
+			createInvokeTestFunction(t, srv, "fn")
+
+			code, body := lambdaControl(t, srv, http.MethodPost, "/v1/lambda/invoke-result",
+				map[string]any{"functionName": name, "payload": "seeded"})
+			require.Equal(t, http.StatusOK, code, body)
+			assert.JSONEq(t, `{"ok":true,"functionName":"fn"}`, body)
+			got, _ := invokeBody(t, srv, "fn")
+			assert.JSONEq(t, `"seeded"`, got)
+
+			seedInvokeError(t, srv, map[string]any{"functionName": name, "errorType": "Handled"})
+			_, errored := invokeBody(t, srv, "fn")
+			assert.True(t, errored)
+
+			query := "?functionName=" + url.QueryEscape(name)
+			code, _ = lambdaControl(t, srv, http.MethodDelete, "/v1/lambda/invoke-error"+query, nil)
+			require.Equal(t, http.StatusOK, code)
+			code, _ = lambdaControl(t, srv, http.MethodDelete, "/v1/lambda/invoke-result"+query, nil)
+			require.Equal(t, http.StatusOK, code)
+			got, errored = invokeBody(t, srv, "fn")
+			assert.False(t, errored)
+			assert.JSONEq(t, `{"statusCode":200,"body":"null"}`, got)
 		})
 	}
 }

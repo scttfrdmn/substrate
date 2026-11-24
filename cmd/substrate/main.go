@@ -362,11 +362,23 @@ func replayStateSummary(cfg substrate.ReplayConfig, results *substrate.ReplayRes
 	return fmt.Sprintf("MISMATCH (%d error(s))", len(results.StateErrors))
 }
 
-// logConfigWarnings logs each warning [substrate.LoadConfig] collected, such as a
-// removed key the configuration still sets.
-func logConfigWarnings(logger substrate.Logger, cfg *substrate.Config) {
-	for _, w := range cfg.Warnings {
-		logger.Warn(w)
+// loadConfig is [substrate.LoadConfig] for the CLI: it also prints each warning the
+// load collected, such as a removed key the configuration still sets, to stderr.
+func loadConfig(path string) (*substrate.Config, error) {
+	cfg, err := substrate.LoadConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	printConfigWarnings(os.Stderr, cfg)
+	return cfg, nil
+}
+
+// printConfigWarnings writes each of cfg's warnings to w, one per line. It writes to
+// stderr rather than through the logger so that a warning is shown at every log level,
+// including the error-only level `substrate debug` runs at.
+func printConfigWarnings(w io.Writer, cfg *substrate.Config) {
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(w, "substrate: warning: %s\n", warning) //nolint:errcheck // best-effort diagnostic.
 	}
 }
 
@@ -382,7 +394,7 @@ func newServerCmd() *cobra.Command {
 		Long: `Start the Substrate HTTP server. AWS SDKs and tools pointed at the
 configured address will have their requests emulated and recorded.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := substrate.LoadConfig(configPath)
+			cfg, err := loadConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
@@ -401,7 +413,6 @@ configured address will have their requests emulated and recorded.`,
 			logLevel := slog.LevelInfo
 			jsonLog := cfg.Log.Format == "json"
 			logger := substrate.NewDefaultLogger(logLevel, jsonLog)
-			logConfigWarnings(logger, cfg)
 
 			registry := substrate.NewPluginRegistry()
 			// Frozen at run.epoch when one is set, before any plugin is registered
@@ -508,7 +519,7 @@ configured address will have their requests emulated and recorded.`,
 			signal.Notify(sighup, syscall.SIGHUP)
 			go func() {
 				for range sighup {
-					newCfg, loadErr := substrate.LoadConfig(configPath)
+					newCfg, loadErr := loadConfig(configPath)
 					if loadErr != nil {
 						logger.Warn("config reload failed", "err", loadErr)
 						continue
@@ -562,13 +573,12 @@ any determinism differences.`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			streamID := args[0]
 
-			cfg, err := substrate.LoadConfig(configPath)
+			cfg, err := loadConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
 
 			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
-			logConfigWarnings(logger, cfg)
 			ctx := context.Background()
 
 			wiring, err := newReplayEngineWiring(ctx, cfg, logger)
@@ -659,13 +669,12 @@ func newExportCmd() *cobra.Command {
 		Long: `Export events from the Substrate event store to stdout or a file.
 Supports NDJSON (newline-delimited JSON) and CSV output formats.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cfg, err := substrate.LoadConfig(configPath)
+			cfg, err := loadConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
 
 			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
-			logConfigWarnings(logger, cfg)
 			loadCtx := context.Background()
 			store, err := newLoadedEventStore(loadCtx, cfg,
 				substrate.NewTimeController(time.Now()), logger)
@@ -777,7 +786,7 @@ policy concerns. No emulator state is modified.`,
 			}
 
 			var costs *substrate.CostController
-			cfg, cfgErr := substrate.LoadConfig(configPath)
+			cfg, cfgErr := loadConfig(configPath)
 			if cfgErr == nil {
 				costs = substrate.NewCostController(cfg.Costs.ToCostConfig())
 			}
@@ -833,12 +842,11 @@ the event with that sequence ran.`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			streamID := args[0]
 
-			cfg, err := substrate.LoadConfig(configPath)
+			cfg, err := loadConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
 			logger := substrate.NewDefaultLogger(slog.LevelInfo, cfg.Log.Format == "json")
-			logConfigWarnings(logger, cfg)
 			ctx := context.Background()
 
 			// The configured backend, not a hardcoded memory one. A fresh memory
@@ -911,12 +919,11 @@ state before any event; a sequence past the last event is the final state.
 			if err != nil {
 				return fmt.Errorf("sequence %q is not a number", args[0])
 			}
-			cfg, err := substrate.LoadConfig(configPath)
+			cfg, err := loadConfig(configPath)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
 			}
 			logger := substrate.NewDefaultLogger(slog.LevelError, cfg.Log.Format == "json")
-			logConfigWarnings(logger, cfg)
 			ctx := context.Background()
 
 			store, err := newLoadedEventStore(ctx, cfg, substrate.NewTimeController(time.Now()), logger)

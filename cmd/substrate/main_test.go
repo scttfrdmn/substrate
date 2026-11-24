@@ -103,17 +103,18 @@ func (l *recordingLogger) Warn(msg string, _ ...any) { l.warn = append(l.warn, m
 
 func (l *recordingLogger) Error(string, ...any) {}
 
-// TestLogConfigWarnings pins that a removed key a config file still sets reaches the
-// log as a warning, rather than being dropped by the non-strict unmarshal (#1611).
-func TestLogConfigWarnings(t *testing.T) {
+// TestPrintConfigWarnings pins that a removed key a config file still sets reaches
+// stderr as a warning, rather than being dropped by the non-strict unmarshal (#1611).
+func TestPrintConfigWarnings(t *testing.T) {
 	cfg, err := substrate.LoadConfig(writeCLIConfig(t, t.TempDir(), "lambda:\n  docker_enabled: true\n"))
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	logger := &recordingLogger{}
-	logConfigWarnings(logger, cfg)
-	if len(logger.warn) != 1 || !strings.Contains(logger.warn[0], "lambda.docker_enabled was removed") {
-		t.Fatalf("warnings = %q, want one naming lambda.docker_enabled", logger.warn)
+	var out strings.Builder
+	printConfigWarnings(&out, cfg)
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "substrate: warning: config key lambda.docker_enabled was removed") {
+		t.Fatalf("warnings = %q, want one naming lambda.docker_enabled", out.String())
 	}
 }
 
