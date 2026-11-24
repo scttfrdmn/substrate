@@ -31,7 +31,7 @@ onUnmounted(() => window.removeEventListener('hashchange', redirect))
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1162 operations**. This
+Substrate ships **68 built-in service plugins** routing **1171 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -77,7 +77,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 27 | [ElastiCache](/reference/elasticache) | `elasticache` | Query | 17 |
 | 28 | [ELBv2](/reference/elasticloadbalancing) | `elasticloadbalancing` | Query | 24 |
 | 29 | [EMR Serverless](/reference/emrserverless) | `emrserverless` | REST/JSON | 7 |
-| 30 | [EventBridge](/reference/eventbridge) | `eventbridge` | JSON | 12 |
+| 30 | [EventBridge](/reference/eventbridge) | `eventbridge` | JSON | 21 |
 | 31 | [API Gateway (execute-api)](/reference/execute-api) | `execute-api` | REST/JSON | 0 |
 | 32 | [Kinesis Data Firehose](/reference/firehose) | `firehose` | JSON | 6 |
 | 33 | [FSx](/reference/fsx) | `fsx` | JSON | 3 |

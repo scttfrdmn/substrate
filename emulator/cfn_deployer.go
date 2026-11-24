@@ -1201,6 +1201,7 @@ var typePriority = map[string]int{
 	"AWS::SSM::Association":                       5,
 	"AWS::Logs::LogGroup":                         2,
 	"AWS::Logs::LogStream":                        3,
+	"AWS::Events::EventBus":                       2,
 	"AWS::Events::Rule":                           4,
 	"AWS::CloudWatch::Alarm":                      4,
 	// v0.19.0 — API Gateway and ACM.
@@ -5059,59 +5060,6 @@ func (d *StackDeployer) deployLogsLogStream(
 	}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
-	}
-	return dr, cost, nil
-}
-
-// deployEventsRule creates an EventBridge rule for the given CFN resource.
-func (d *StackDeployer) deployEventsRule(
-	ctx context.Context,
-	logicalID string,
-	props map[string]interface{},
-	streamID string,
-	cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	ruleName := resolveStringProp(props, "Name", logicalID, cctx)
-	body := map[string]interface{}{
-		"Name":  ruleName,
-		"State": resolveStringProp(props, "State", "ENABLED", cctx),
-	}
-	if ep, ok := props["EventPattern"]; ok {
-		body["EventPattern"] = cfnJSONDocument(ep, cctx)
-	}
-	if se, ok := props["ScheduleExpression"]; ok {
-		body["ScheduleExpression"] = resolveValue(se, cctx)
-	}
-	if desc, ok := props["Description"]; ok {
-		body["Description"] = resolveValue(desc, cctx)
-	}
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return DeployedResource{}, 0, fmt.Errorf("marshal events rule body: %w", err)
-	}
-	req := &AWSRequest{
-		Service:   "eventbridge",
-		Operation: "PutRule",
-		Body:      bodyBytes,
-		Headers:   map[string]string{},
-		Params:    map[string]string{},
-	}
-	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
-	dr := DeployedResource{
-		LogicalID:  logicalID,
-		Type:       "AWS::Events::Rule",
-		PhysicalID: ruleName,
-		ARN:        ebRuleARN(cctx.region, cctx.accountID, ruleName),
-	}
-	if routeErr != nil {
-		dr.Error = routeErr.Error()
-	} else if resp != nil {
-		var result struct {
-			RuleArn string `json:"RuleArn"`
-		}
-		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil && result.RuleArn != "" {
-			dr.ARN = result.RuleArn
-		}
 	}
 	return dr, cost, nil
 }

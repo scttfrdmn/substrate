@@ -95,6 +95,9 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::EC2::Route":                       (*StackDeployer).updateEC2Route,
 	"AWS::EC2::SubnetRouteTableAssociation": (*StackDeployer).updateEC2SubnetRouteTableAssociation,
 	"AWS::SQS::QueuePolicy":                 (*StackDeployer).updateQueuePolicy,
+	// #1613.
+	"AWS::Events::EventBus": (*StackDeployer).updateEventsEventBus,
+	"AWS::Events::Rule":     (*StackDeployer).updateEventsRule,
 }
 
 // cfnUpdateUnmodelled maps a type to why a change to one of its updatable properties cannot be

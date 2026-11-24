@@ -548,7 +548,7 @@
   "retries-the-dead-letter-queue-and-the-seed": "/reference/scheduler#retries-the-dead-letter-queue-and-the-seed",
   "route-53": "/reference/route53",
   "route-targets": "/reference/ec2#route-targets",
-  "rules-carry-tags": "/reference/eventbridge#rules-carry-tags",
+  "rules-carry-tags": "/reference/eventbridge#tags",
   "run-ids": "/reference/omics#run-ids",
   "runinstances-accepts-a-type-describeinstancetypes-refuses": "/reference/ec2#runinstances-accepts-a-type-describeinstancetypes-refuses",
   "runinstances-requires-a-resolvable-ami": "/reference/ec2#runinstances-requires-a-resolvable-ami",

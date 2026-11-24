@@ -145,7 +145,7 @@ func TestEBTags_RefusalsNameWhatIsWrong(t *testing.T) {
 	}{
 		{"an absent rule", "ListTagsForResource", map[string]any{"ResourceARN": ruleARN("absent")}, "ResourceNotFoundException"},
 		{"a rule on another bus", "ListTagsForResource", map[string]any{"ResourceARN": ruleARN("orders/refusals")}, "ResourceNotFoundException"},
-		{"an event bus", "TagResource", map[string]any{"ResourceARN": "arn:aws:events:us-east-1:" + taggingTestAccount + ":event-bus/default", "Tags": ebTagList("a", "b")}, "ResourceNotFoundException"},
+		{"an absent event bus", "TagResource", map[string]any{"ResourceARN": "arn:aws:events:us-east-1:" + taggingTestAccount + ":event-bus/absent", "Tags": ebTagList("a", "b")}, "ResourceNotFoundException"},
 		{"another service's ARN", "ListTagsForResource", map[string]any{"ResourceARN": "arn:aws:sqs:us-east-1:" + taggingTestAccount + ":q"}, "ValidationError"},
 		{"an untaggable EventBridge resource", "ListTagsForResource", map[string]any{"ResourceARN": "arn:aws:events:us-east-1:" + taggingTestAccount + ":archive/a"}, "ValidationError"},
 		{"no ARN", "ListTagsForResource", map[string]any{}, "ValidationError"},
@@ -168,21 +168,39 @@ func TestEBTags_RefusalsNameWhatIsWrong(t *testing.T) {
 func TestEBTags_TheARNsAccountAndRegionNameTheRule(t *testing.T) {
 	ts := smTagServer(t)
 	westARN := ebPutRule(t, ts, ebWest2Target, map[string]any{"Name": "west", "EventPattern": `{"source":["x"]}`})
+	eastTwin := ebPutRule(t, ts, ebTarget, map[string]any{"Name": "west", "EventPattern": `{"source":["x"]}`})
+	require.Equal(t, strings.Replace(westARN, "us-west-2", "us-east-1", 1), eastTwin)
 
-	// Called through us-east-1, the us-west-2 ARN still names the us-west-2 rule (#826).
-	status, raw, code := ebCall(t, ts, ebTarget, "TagResource", map[string]any{"ResourceARN": westARN, "Tags": ebTagList("region", "west")})
+	// The ARN names the us-west-2 rule (#826), which a us-east-1 caller cannot reach: each tag
+	// operation answers it not found rather than acting on the caller's rule of the same name.
+	for _, tc := range []struct {
+		op   string
+		body map[string]any
+	}{
+		{"TagResource", map[string]any{"ResourceARN": westARN, "Tags": ebTagList("region", "west")}},
+		{"UntagResource", map[string]any{"ResourceARN": westARN, "TagKeys": []string{"region"}}},
+		{"ListTagsForResource", map[string]any{"ResourceARN": westARN}},
+		{"TagResource", map[string]any{"ResourceARN": strings.Replace(eastTwin, taggingTestAccount, "210987654321", 1), "Tags": ebTagList("a", "b")}},
+	} {
+		status, raw, code := ebCall(t, ts, ebTarget, tc.op, tc.body)
+		assert.Equal(t, "ResourceNotFoundException", code, "%s: %s", tc.op, raw)
+		assert.Equal(t, http.StatusBadRequest, status)
+	}
+	assert.Empty(t, ebTags(t, ts, eastTwin), "the caller's own rule of that name is untouched")
+
+	status, raw, code := ebCall(t, ts, ebWest2Target, "TagResource", map[string]any{"ResourceARN": westARN, "Tags": ebTagList("region", "west")})
 	require.Empty(t, code, raw)
 	require.Equal(t, http.StatusOK, status)
-	assert.Equal(t, []emulator.EBTag{{Key: "region", Value: "west"}}, ebTags(t, ts, westARN))
-
-	eastTwin := strings.Replace(westARN, "us-west-2", "us-east-1", 1)
-	_, _, code = ebCall(t, ts, ebTarget, "ListTagsForResource", map[string]any{"ResourceARN": eastTwin})
-	assert.Equal(t, "ResourceNotFoundException", code, "and no us-east-1 rule of that name exists")
+	_, raw, _ = ebCall(t, ts, ebWest2Target, "ListTagsForResource", map[string]any{"ResourceARN": westARN})
+	assert.JSONEq(t, `{"Tags":[{"Key":"region","Value":"west"}]}`, raw, "a us-west-2 caller reaches it")
 }
 
 func TestEBTags_ACustomBusRuleARNNamesItsBus(t *testing.T) {
 	ts := smTagServer(t)
 	busARN := "arn:aws:events:us-east-1:" + taggingTestAccount + ":event-bus/orders"
+	status, raw, code := ebCall(t, ts, ebTarget, "CreateEventBus", map[string]any{"Name": "orders"})
+	require.Empty(t, code, raw)
+	require.Equal(t, http.StatusOK, status)
 	for _, tc := range []struct{ rule, bus string }{
 		{"by-name", "orders"},
 		{"by-arn", busARN},

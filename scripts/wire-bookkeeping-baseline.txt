@@ -253,6 +253,9 @@ emulator/emrserverless_plugin.go	EMRServerlessApp	AccountID	accountID
 emulator/emrserverless_plugin.go	EMRServerlessApp	Region	region
 emulator/emrserverless_plugin.go	EMRServerlessJobRun	AccountID	accountID
 emulator/emrserverless_plugin.go	EMRServerlessJobRun	Region	region
+emulator/eventbridge_types.go	EBEventBus	CreatedAt	created_at,omitzero
+emulator/eventbridge_types.go	EBEventBus	EverTagged	ever_tagged,omitempty
+emulator/eventbridge_types.go	EBEventBus	UpdatedAt	updated_at,omitzero
 emulator/eventbridge_types.go	EBRule	EverTagged	ever_tagged,omitempty
 emulator/eventstore.go	Event	AccountID	account_id
 emulator/eventstore.go	Event	Region	region

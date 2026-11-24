@@ -173,7 +173,7 @@ func TestTaggingProviders_ThePilotsImplementBothInterfaces(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
 	listers, taggers := emulator.TaggingProvidersForTest(ts.Registry())
-	pilots := []string{"ec2", "monitoring", "s3"}
+	pilots := []string{"ec2", "eventbridge", "monitoring", "s3"}
 	assert.Equal(t, pilots, listers)
 	assert.Equal(t, pilots, taggers)
 }

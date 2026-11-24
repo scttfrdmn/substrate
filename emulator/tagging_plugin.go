@@ -424,7 +424,7 @@ func (p *TaggingPlugin) resourceDescriptors() []resourceDescriptor {
 		{typePrefix: "kms", scan: p.scanKMSKeys},
 		{typePrefix: "sns", scan: p.scanSNSTopics},
 		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
-		{typePrefix: "events", scan: p.scanEventBridgeRules},
+		{typePrefix: "events", scan: p.taggingStateScan(ebListTaggedResources)},
 		{typePrefix: "ssm", scan: p.scanSSMParameters},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindLoadBalancer)},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindTargetGroup)},
@@ -1851,6 +1851,15 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 		}
 		return monitoringNamespace, key, nil
 
+	case "events":
+		// A rule (rule/{name}, rule/{bus}/{name}) or bus (event-bus/{name}) ARN, through
+		// [ebParseTagARN], which EventBridge's own tagging operations parse through (#1640).
+		key, err := ebTagStateKey(arn, resource, callerAccount, "")
+		if err != nil {
+			return "", "", err
+		}
+		return eventbridgeNamespace, key, nil
+
 	case "logs":
 		// arn:aws:logs:{region}:{acct}:log-group:{name} — through [cwlParseLogGroupTagARN], which is
 		// what CloudWatch Logs' own three tagging operations parse through, so the two cannot
@@ -2182,6 +2191,11 @@ func mergeResourceTags(
 	// record no arm below knows to stamp.
 	if ns == monitoringNamespace {
 		return cwMergeAlarmTags(goCtx, state, key, addTags, removeKeys, quota)
+	}
+	// EventBridge's writer handles both of its record kinds and the default bus, which has no record
+	// until a tag write gives it one.
+	if ns == eventbridgeNamespace {
+		return ebTagMapAt(goCtx, state, key, addTags, removeKeys, quota)
 	}
 	raw, err := loadTagRecord(goCtx, state, ns, key)
 	if err != nil {
