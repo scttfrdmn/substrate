@@ -32,7 +32,7 @@ var registry = map[string]int{}
 
 const limit = 5
 
-// helper links its neighbours: [Plugin], [*Plugin], [Plugin.handle], [Plugin.state],
+// helper links its neighbors: [Plugin], [*Plugin], [Plugin.handle], [Plugin.state],
 // [Plugin.Router], [Lister.list], [handle], [registry], [limit], [error], [nil],
 // [chi.Router.Group], [jsonx.Marshal], [strings.Cut], [other.Exported], and
 // [TestHelper] from the external test package.
