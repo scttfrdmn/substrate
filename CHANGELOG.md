@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Lambda: `POST`/`DELETE /v1/lambda/invoke-result` seeds the payload a successful `Invoke` returns, with no `X-Amz-Function-Error` (#1611).
 - S3: `POST`/`DELETE /v1/s3/seeded-objects` seeds the object a GET, HEAD or copy of an unwritten key observes, until a write or delete replaces it (#1611).
+- Tooling: `make comment-history-check` refuses added Go comments that narrate issue history, and `make doc-links-check` refuses dangling `[ident]` doc links; both run in CI (#1609).
 
 ### Changed
 
 - Code: release-named files renamed by domain (#1609).
+- Code: comments describe the code as it is (a CLAUDE.md rule), and issue-history narration is trimmed from 22 of the heaviest files (#1609).
 - Docs: the service reference is one page per plugin plus six concept pages under `docs/reference/`, indexed by `docs/services.md` (#1610).
 - Tagging: CloudWatch, EC2 and S3 list and tag their own resources for the tagging API, under their own tag locks (#1609).
 
@@ -27,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lambda: an exact-name seed outranks a `"*"` seed, and seed endpoints accept a qualified name or ARN as `functionName` (#1611).
 - Control plane: a seed write holds the simulated clock, so a seed storing its write time replays to the same state (#1611).
 - S3: a date precondition compares `Last-Modified` in whole seconds, so an echoed `Last-Modified` gets the right 304 or 412 (#1611).
+- Comments: dangling doc links and wrong claims about crypto/rand identifiers, `randomHex`, EC2 ID lengths, Lambda ESM pollers and plugin counts are corrected (#1609).
 - Tagging: with no CloudWatch plugin registered, TagResources merges an alarm's tags, and a missing alarm answers 400 rather than 500 (#1609).
 
 ### Compatibility
