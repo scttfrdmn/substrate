@@ -96,3 +96,74 @@ func TestWireValidation_AnUnknownMemberKeepsThePluginsRefusal(t *testing.T) {
 func TestWireValidation_ASentenceNamesTheFirstMissingMember(t *testing.T) {
 	assert.Equal(t, "The parameter B must be provided and must not be blank.", emulator.WireMissingAfterInvalidForTest())
 }
+
+// TestWireValidation_PluginHelpersDeclineWhatTheyCannotRead pins the helpers' refusals to guess:
+// a service or operation not validated, a member the input lacks, a body that will not parse or
+// a value of the wrong kind, and an enum path that leads nowhere, all answer nothing.
+func TestWireValidation_PluginHelpersDeclineWhatTheyCannotRead(t *testing.T) {
+	acm := func(body string) *emulator.AWSRequest {
+		return &emulator.AWSRequest{Body: []byte(body), Headers: map[string]string{}, Params: map[string]string{}}
+	}
+	assert.Empty(t, emulator.WireCheckMemberForTest("no-such-service", "Op", acm(`{}`), "Name"))
+	assert.Empty(t, emulator.WireCheckMemberForTest("ec2", "CreateVpc", acm(`{}`), "CidrBlock"), "not in the EC2 slice")
+	assert.Empty(t, emulator.WireCheckMemberForTest("acm", "NoSuchOperation", acm(`{}`), "Name"))
+	assert.Empty(t, emulator.WireCheckMemberForTest("acm", "RequestCertificate", acm(`{}`), "NoSuchMember"))
+	assert.Empty(t, emulator.WireCheckMemberForTest("acm", "RequestCertificate", acm(`{`), "DomainName"), "unparseable body")
+	assert.Empty(t, emulator.WireCheckMemberForTest("acm", "RequestCertificate", acm(`{"DomainName":5}`), "DomainName"),
+		"a value of the wrong kind")
+	assert.Empty(t, emulator.WireCheckMemberForTest("acm", "RequestCertificate", acm(`{"DomainName":"a.example"}`), "DomainName"))
+	assert.NotEmpty(t, emulator.WireCheckMemberForTest("acm", "RequestCertificate", acm(`{}`), "DomainName"))
+	assert.Empty(t, emulator.WireCheckMemberForTest("route53", "CreateHostedZone",
+		&emulator.AWSRequest{Path: "/elsewhere", Body: []byte(`<a/>`)}, "Name"), "a path the template does not match")
+
+	assert.Contains(t, emulator.WireEnumAtForTest("route53", "ChangeResourceRecordSets",
+		"ChangeBatch", "Changes", "ResourceRecordSet", "Type"), "AAAA")
+	assert.Nil(t, emulator.WireEnumAtForTest("route53", "NoSuchOperation", "ChangeBatch"))
+	assert.Nil(t, emulator.WireEnumAtForTest("route53", "ChangeResourceRecordSets", "NoSuchMember"))
+	assert.Nil(t, emulator.WireEnumAtForTest("route53", "ChangeResourceRecordSets", "ChangeBatch"), "a structure has no enum")
+
+	err := emulator.R53InvalidTypeForTest(1, "a")
+	assert.Equal(t, "InvalidInput", err.Code)
+	assert.Contains(t, err.Message, `change 2: "a" is not a valid resource record set Type`)
+	assert.Contains(t, err.Message, "AAAA")
+}
+
+// TestWireValidation_BlankParametersAreThePluginsToRefuse pins the plugins' own refusals for a
+// required parameter sent blank, which the model gives no minimum length, so the gate lets it
+// through: each answers the service's missing-parameter sentence.
+func TestWireValidation_BlankParametersAreThePluginsToRefuse(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	for _, tc := range []struct {
+		call wirePilotCall
+		want string
+	}{
+		{elastiCacheCall("CreateCacheCluster", map[string]string{"CacheClusterId": ""}), "CacheClusterId"},
+		{elastiCacheCall("ModifyCacheCluster", map[string]string{"CacheClusterId": ""}), "CacheClusterId"},
+		{elastiCacheCall("DeleteCacheCluster", map[string]string{"CacheClusterId": ""}), "CacheClusterId"},
+		{elastiCacheCall("CreateReplicationGroup", map[string]string{"ReplicationGroupId": "",
+			"ReplicationGroupDescription": "d"}), "ReplicationGroupId"},
+		{elastiCacheCall("ModifyReplicationGroup", map[string]string{"ReplicationGroupId": ""}), "ReplicationGroupId"},
+		{elastiCacheCall("DeleteReplicationGroup", map[string]string{"ReplicationGroupId": ""}), "ReplicationGroupId"},
+		{elastiCacheCall("CreateCacheSubnetGroup", map[string]string{"CacheSubnetGroupName": "",
+			"CacheSubnetGroupDescription": "d", "SubnetIds.SubnetIdentifier.1": "subnet-1"}), "CacheSubnetGroupName"},
+		{elastiCacheCall("DeleteCacheSubnetGroup", map[string]string{"CacheSubnetGroupName": ""}), "CacheSubnetGroupName"},
+		{elastiCacheCall("CreateCacheParameterGroup", map[string]string{"CacheParameterGroupName": "",
+			"CacheParameterGroupFamily": "redis7", "Description": "d"}), "CacheParameterGroupName"},
+		{elastiCacheCall("DeleteCacheParameterGroup", map[string]string{"CacheParameterGroupName": ""}), "CacheParameterGroupName"},
+		{elastiCacheCall("ListTagsForResource", map[string]string{"ResourceName": ""}), "ResourceName"},
+		{elastiCacheCall("AddTagsToResource", map[string]string{"ResourceName": "",
+			"Tags.Tag.1.Key": "k", "Tags.Tag.1.Value": "v"}), "ResourceName"},
+		{elastiCacheCall("RemoveTagsFromResource", map[string]string{"ResourceName": "", "TagKeys.member.1": "k"}),
+			"ResourceName"},
+		{ec2Call("ImportKeyPair", map[string]string{"KeyName": "", "PublicKeyMaterial": "c3No"}), "keyName"},
+		{ec2Call("ImportKeyPair", map[string]string{"KeyName": "k", "PublicKeyMaterial": ""}), "publicKeyMaterial"},
+		{ec2Call("DeletePlacementGroup", map[string]string{"GroupName": ""}), "groupName"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			status, body := tc.call.do(t, ts)
+			require.Equal(t, http.StatusBadRequest, status, string(body))
+			_, message := wireErrorOf(t, body)
+			assert.Contains(t, message, " "+tc.want, message)
+		})
+	}
+}

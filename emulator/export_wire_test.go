@@ -138,3 +138,20 @@ func WireMissingAfterInvalidForTest() string {
 		{kind: wireMissing, path: "b", wire: "B", constraint: "Member must not be null"},
 	}).Message
 }
+
+// WireCheckMemberForTest exposes wireCheckMember, returning the refusal's message or "".
+func WireCheckMemberForTest(service, operation string, req *AWSRequest, name string) string {
+	if err := wireCheckMember(service, operation, req, name); err != nil {
+		return err.Message
+	}
+	return ""
+}
+
+// WireEnumAtForTest exposes wireEnumAt.
+func WireEnumAtForTest(service, operation string, path ...string) []string {
+	return wireEnumAt(service, operation, path...)
+}
+
+// R53InvalidTypeForTest exposes r53InvalidType, the refusal for a record Type the gate's walk did
+// not see.
+func R53InvalidTypeForTest(i int, rrType string) *AWSError { return r53InvalidType(i, rrType) }
