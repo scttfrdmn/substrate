@@ -86,6 +86,24 @@
 | UntagInstanceProfile | |
 | ListInstanceProfileTags | |
 | GetAccountAuthorizationDetails | Reports the account's users, groups, roles and managed policies with their inline and attached policies in one response. `Filter` selects populations, `MaxItems` counts across all four — see below |
+| CreateOpenIDConnectProvider | `Url` must begin with `https://`; the ARN ends in the URL without it. A second provider for one URL is `EntityAlreadyExists`/409, more than 5 thumbprints or 100 client IDs `LimitExceeded`/409. No thumbprint is fetched — see [Identity providers](#identity-providers) |
+| GetOpenIDConnectProvider | Reports `Url` without its scheme, as AWS's sample does |
+| ListOpenIDConnectProviders | |
+| DeleteOpenIDConnectProvider | A missing provider is `NoSuchEntity`/404: the page declares it and makes no idempotency statement |
+| UpdateOpenIDConnectProviderThumbprint | Replaces the list |
+| AddClientIDToOpenIDConnectProvider | Idempotent, per the page |
+| RemoveClientIDFromOpenIDConnectProvider | Idempotent, per the page |
+| TagOpenIDConnectProvider | |
+| UntagOpenIDConnectProvider | |
+| ListOpenIDConnectProviderTags | |
+| CreateSAMLProvider | The metadata document is parsed (XML or base64 XML) for `validUntil` only; its keys are not read |
+| GetSAMLProvider | Reports `SAMLProviderUUID`, `ValidUntil` and the private keys' IDs; a key's text is never stored |
+| ListSAMLProviders | |
+| UpdateSAMLProvider | Metadata, `AssertionEncryptionMode` and one private key added or removed per call, refused in the troubleshooting guide's words |
+| DeleteSAMLProvider | |
+| TagSAMLProvider | |
+| UntagSAMLProvider | |
+| ListSAMLProviderTags | |
 
 ## Policy documents are served as submitted
 
@@ -601,8 +619,7 @@ untouched one.
 **`AssumeRole` is what writes it**, which makes that operation a writer of IAM state. AWS's
 `RoleLastUsed` advances when the role is *used*, and an assume is the only use an emulator that
 models no workload can observe, so the stamp is written by the STS operation onto the IAM
-record. `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not implemented, so there is
-exactly one write site. The role record was already read to evaluate its trust policy, so the
+record. `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` stamp it the same way. The role record was already read to evaluate its trust policy, so the
 stamp costs one `Put` and no extra read, and it is written after the session credentials are
 stored — a caller the trust policy refuses records no use.
 
@@ -694,9 +711,9 @@ sample response renders them as plain JSON; substrate follows the note, as it do
 operations ([#1452](https://github.com/scttfrdmn/substrate/issues/1452)). Before #1452 only
 `PolicyVersionList[].Document` was encoded.
 
-`SAMLProviderList` is a `Filter` value AWS accepts and substrate refuses, because substrate
-models no SAML provider: accepting the filter would select nothing, and a caller reading an empty
-`UserDetailList` could not tell that from an account with no users. Errors come from
+`SAMLProviderList` is a `Filter` value AWS's model accepts, and so does substrate. It selects
+none of the four populations, because the response has no member that could carry a SAML
+provider: a filter naming only it answers four empty lists. Errors come from
 `CommonErrors` — the page itself declares only `ServiceFailure`/500 — so an unknown `Filter`
 value is `ValidationError`/400.
 
@@ -1475,6 +1492,24 @@ reason `DeletePolicy` does. A `VersionId` that is not version-shaped at all is `
 The seeded documents are also readable in process through `emulator.GetManagedPolicy`, and
 are what the IAM policy evaluator reads.
 
+## Identity providers
+
+An OpenID Connect or SAML provider is a record a role's trust policy names as a `Federated`
+principal, which `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` read (see the
+[STS page](/reference/sts#federated-assumes-check-claims-not-signatures)). Substrate contacts no
+provider. `CreateOpenIDConnectProvider` without a `ThumbprintList` stores none, where AWS would
+fetch one, and `OpenIdIdpCommunicationError` is reachable only by seed:
+
+```bash
+curl -X POST localhost:4566/v1/iam/oidc-provider-outcome -d '{"url":"https://idp.example.com"}'
+curl -X DELETE 'localhost:4566/v1/iam/oidc-provider-outcome?url=https://idp.example.com'
+```
+
+`url` defaults to `*`, which matches every URL. The seed holds until it is cleared. Most refusal
+messages are AWS's: the OIDC `EntityAlreadyExists` and `NoSuchEntity` wording is observed from
+the service, and the SAML key and encryption refusals are the IAM troubleshooting guide's. The
+limit and validation messages, and the SAML `NoSuchEntity`, are substrate's own.
+
 ## The bookkeeping a record carries reaches no response
 
 Four IAM records declare bookkeeping members under wire-visible `json` tags:
@@ -1507,6 +1542,8 @@ every key.
 | AWS::IAM::ManagedPolicy | the policy ARN | `CreatePolicy`, then attached to every entry of `Roles`, `Users` and `Groups`. A changed `PolicyDocument` becomes a new default version. `ManagedPolicyName`, `Path` and `Description` replace it. `Fn::GetAtt` `PolicyArn`, `PolicyId`, `DefaultVersionId`, `AttachmentCount`, `IsAttachable`, `PermissionsBoundaryUsageCount`, `CreateDate`, `UpdateDate` |
 | AWS::IAM::User | UserName | `CreateUser` with `Path` and `Tags`; then `PermissionsBoundary`, `Groups` (joined), `ManagedPolicyArns` and `Policies`. Updated in place, except `Path`, which needs the unrouted `UpdateUser` and fails the update. `LoginProfile` is not applied. `UserName` replaces it. `Fn::GetAtt Arn` |
 | AWS::IAM::InstanceProfile | InstanceProfileName | Attaches each entry in `Roles`; resolvable by an `AWS::EC2::Instance`'s `IamInstanceProfile` |
+| AWS::IAM::OIDCProvider | the provider ARN | `CreateOpenIDConnectProvider` with `ClientIdList`, `ThumbprintList` and `Tags`. Those three update in place against the live record; `Url` replaces it. `Fn::GetAtt Arn` |
+| AWS::IAM::SAMLProvider | the provider ARN | `CreateSAMLProvider` with `SamlMetadataDocument`, `AssertionEncryptionMode` and `Tags`, updated in place; `Name` replaces it. `Fn::GetAtt Arn`, `SamlProviderUUID` |
 | AWS::IAM::Group | GroupName | `CreateGroup` with `Path`; then `ManagedPolicyArns` and `Policies`. Updated in place, except `Path` (`UpdateGroup` is not routed). `GroupName` replaces it. `Fn::GetAtt Arn` |
 
 A role, user, group or policy remembers what it has in place: what its deploy and its updates

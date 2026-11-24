@@ -10,6 +10,8 @@
 | GetCallerIdentity | Returns account 123456789012 by default |
 | AssumeRole | Evaluates the role's trust policy, then returns temporary credentials |
 | GetSessionToken | Returns stub temporary credentials |
+| AssumeRoleWithWebIdentity | Unsigned. Checks the token's `iss`, `aud` and `exp` against a registered OIDC provider and the simulated clock, then the role's trust policy — see [below](#federated-assumes-check-claims-not-signatures) |
+| AssumeRoleWithSAML | Unsigned. Checks the assertion's provider, Role attribute and `NotOnOrAfter`, then the trust policy with the `saml:` keys |
 
 ## What `GetCallerIdentity` reports as `UserId`
 
@@ -83,12 +85,66 @@ the same role. The replacement takes effect on the **next** `AssumeRole`; sessio
 already minted under the old policy stay valid, as on AWS. `GetRole` reports the
 stored document, so a test can assert what it set.
 
+## Federated assumes check claims, not signatures
+
+`AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` need no AWS credentials, and the SDKs send
+them unsigned. Substrate routes such a request to STS by its `Action` when nothing else names a
+service, which is what a client pointed at one base endpoint sends.
+
+Substrate decodes the token and verifies no signature. What it checks is what a test can arrange:
+
+| Check | Web identity | SAML | Refusal |
+|-------|--------------|------|---------|
+| The provider is registered in the role's account | `iss`, without `https://`, names an [OIDC provider](/reference/iam#identity-providers) | `PrincipalArn` names a SAML provider | `InvalidIdentityToken`/400 |
+| The audience is registered | `aud` is in the provider's client IDs | — | `InvalidIdentityToken` "Incorrect token audience" |
+| The token is current on the simulated clock | `exp` | every `NotOnOrAfter` | `ExpiredTokenException`/400 |
+| The assertion names this role | — | a `Role` attribute pairs `RoleArn` with `PrincipalArn`, and there is a `NameID` and a `RoleSessionName` | `AccessDenied`/403, or `InvalidIdentityToken` for the session name |
+| The trust policy admits the provider | a `Federated` entry naming it, for `sts:AssumeRoleWithWebIdentity` | the same, for `sts:AssumeRoleWithSAML` | `AccessDenied` "Not authorized to perform sts:AssumeRoleWithWebIdentity" |
+
+The trust policy is evaluated with the provider's ARN as the principal. Only a `Federated` entry
+names one, so an `"AWS": "<account>"` statement does not admit a web identity. A role with no trust
+policy admits no federated caller. `AssumeRole` reads a missing policy as not enforced, but AWS
+requires the provider to be "specified in the role's trust policy".
+
+The condition keys are AWS's. For OIDC, the provider URL without its scheme is the prefix:
+`token.actions.githubusercontent.com:sub` and `:aud` for GitHub Actions, and
+`oidc.eks.<region>.amazonaws.com/id/<id>:sub` for EKS IRSA. `:aud` is `azp` when the token sets it,
+`:oaud` is `aud`, and `:email` and `:amr` are published when the token carries them. For SAML the
+keys are `saml:aud` (the `Recipient`), `saml:iss`, `saml:sub`, `saml:sub_type`, `saml:doc` and
+`saml:namequalifier`. Key names match case-insensitively, so `SAML:aud` works too.
+
+The session is the one `AssumeRole` mints: an `ASIA…` key, the
+`assumed-role/<role>/<session>` ARN, and `RoleLastUsed` on the role. A SAML session ends at the
+assertion's `SessionNotOnOrAfter` when that comes first.
+
+### Seeding what the identity provider decides
+
+A signature or thumbprint that does not verify, a claim the provider rejects, and a provider
+that cannot be reached all depend on the provider, so each is a seed:
+
+```bash
+curl -X POST localhost:4566/v1/sts/federation-outcome \
+  -d '{"provider":"arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com","error":"IDPRejectedClaim","count":1}'
+curl -X DELETE 'localhost:4566/v1/sts/federation-outcome?provider=*'
+```
+
+`error` is `InvalidIdentityToken`, `IDPRejectedClaim` (403) or `IDPCommunicationError`, which
+only the web-identity operation documents. `provider` defaults to `*`. `count` is how many
+assumes the seed answers before it clears itself, so a retry loop can be shown failing and then
+succeeding. Without a count the seed holds until it is cleared. The seed applies only to a token
+whose provider is registered, and it is checked before the audience and the expiry.
+
+Most messages are AWS's. The web-identity provider, audience, expiry and refusal wording is
+observed from the service, and the SAML session-name, provider and signature wording is the IAM
+troubleshooting guide's. The malformed-token, missing-`exp`, SAML expiry and seeded
+`IDPRejectedClaim` and `IDPCommunicationError` messages are substrate's own.
+
 ## The account a session credential carries reaches no response
 
 `STSSessionCredentials` declares its account under a wire-visible `json` tag, because the record is what
 `MemoryStateManager` snapshots and a replay reads back, and what a request signed with the session's key is resolved from. It does not reach a body: `AssumeRole` and `GetSessionToken` answer an XML struct declared for their operation, copying the four published `Credentials` members out of the record, and `GetCallerIdentity` publishes the account as `Account`.
-`TestSTSWire_SessionCredentialResponsesCarryNoBookkeepingMember` in `emulator/sts_wire_test.go` drives all three routed operations, `GetCallerIdentity` signed with an assumed-role session's key, and walks each response's element names for the member
-([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+`TestSTSWire_SessionCredentialResponsesCarryNoBookkeepingMember` in `emulator/sts_wire_test.go` drives `AssumeRole`, `GetSessionToken` and `GetCallerIdentity` (signed with an assumed-role session's key) and walks each response's element names for the member
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). `TestSTSWire_FederatedResponsesCarryNoBookkeepingMember` does the same for the two federated assumes.
 
 ## Cost
 

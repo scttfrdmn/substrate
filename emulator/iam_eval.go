@@ -366,7 +366,17 @@ func principalCovered(p *PolicyPrincipal, principal string) bool {
 	if p.All {
 		return true
 	}
+	// A federated caller is an identity provider's ARN, which an "AWS" entry never names: a bare
+	// account ID or a root ARN delegates to the account's IAM principals, and admitting an OIDC
+	// or SAML provider through one would let any web identity the account trusts anywhere
+	// assume every role trusting the account. AssumeRoleWithWebIdentity's page says "the
+	// identity provider must be specified in the role's trust policy", so only a Federated
+	// entry matches one.
+	federated := iamIsIdentityProviderARN(principal)
 	for _, want := range p.AWS {
+		if federated {
+			break
+		}
 		if awsPrincipalCovers(want, principal) {
 			return true
 		}
@@ -387,6 +397,12 @@ func principalCovered(p *PolicyPrincipal, principal string) bool {
 		}
 	}
 	return false
+}
+
+// iamIsIdentityProviderARN reports whether arn names an IAM OpenID Connect or SAML provider.
+func iamIsIdentityProviderARN(arn string) bool {
+	entityType, _ := parsePrincipalARN(arn)
+	return strings.HasPrefix(arn, "arn:") && (entityType == "oidc-provider" || entityType == "saml-provider")
 }
 
 // awsPrincipalCovers reports whether one "AWS" principal entry names principal.

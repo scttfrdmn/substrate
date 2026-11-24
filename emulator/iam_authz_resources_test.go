@@ -51,8 +51,8 @@ const iamResourcePath = "/division/engineering/"
 const iamResourceCaller = "caller"
 
 // iamARNPlaceholder matches the trailing `${…WithPath}` in an AWS ARN format, the one component
-// that stands for the resource's own name.
-var iamARNPlaceholder = regexp.MustCompile(`\$\{[A-Za-z]+WithPath\}`)
+// that stands for the resource's own name, or an identity provider's `${…ProviderName}`.
+var iamARNPlaceholder = regexp.MustCompile(`\$\{[A-Za-z]+(WithPath|ProviderName)\}`)
 
 // iamResourceMinters is how substrate builds an ARN for each resource type the table names,
 // keyed the way AWS spells the type.
@@ -62,6 +62,10 @@ var iamResourceMinters = map[string]func(accountID, path, name string) string{
 	"group":            emulator.IAMGroupARNForTest,
 	"policy":           emulator.IAMPolicyARNForTest,
 	"instance-profile": emulator.IAMInstanceProfileARNForTest,
+	// An identity provider's ARN carries no path: the OIDC one ends in the provider URL, the SAML
+	// one in its name.
+	"oidc-provider": func(accountID, _, name string) string { return emulator.IAMOIDCProviderARNForTest(accountID, name) },
+	"saml-provider": func(accountID, _, name string) string { return emulator.IAMSAMLProviderARNForTest(accountID, name) },
 }
 
 // TestIAMAuthzOperationResource_EveryRowMatchesWhatAWSPublishes is #770's citation, checked
@@ -465,6 +469,18 @@ func iamResourceDoorCases(t *testing.T) []iamResourceDoorCase {
 				operation: row.Operation,
 				params:    map[string]string{param: arn},
 				want:      arn,
+			})
+
+		case row.Type == "oidc-provider" || row.Type == "saml-provider":
+			// The two creates name the provider by URL and by name; the ARN drops the URL's scheme.
+			value, name := "Corp", "Corp"
+			if row.Type == "oidc-provider" {
+				value, name = "https://token.example.com/tenant", "token.example.com/tenant"
+			}
+			cases = append(cases, iamResourceDoorCase{
+				operation: row.Operation,
+				params:    map[string]string{param: value},
+				want:      iamResourceMinters[row.Type](iamResourceAccount, "/", name),
 			})
 
 		case row.Type == "policy":

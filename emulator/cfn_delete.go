@@ -250,6 +250,8 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	// delete inline policies, leave groups, then delete — and are in cfnSequencedDeleters.
 	"AWS::IAM::InstanceProfile": iamDeleter("DeleteInstanceProfile",
 		"InstanceProfileName"),
+	"AWS::IAM::OIDCProvider": iamDeleter("DeleteOpenIDConnectProvider", "OpenIDConnectProviderArn"),
+	"AWS::IAM::SAMLProvider": iamDeleter("DeleteSAMLProvider", "SAMLProviderArn"),
 	"AWS::KMS::Key": func(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {
 		// KMS models no DeleteKey: a key is scheduled for deletion. The minimum
 		// window is 7 days, which is what CloudFormation itself requests.

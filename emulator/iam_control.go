@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -106,4 +107,72 @@ func (s *Server) handleIAMClearSLRDeletionStatus(w http.ResponseWriter, r *http.
 		}
 	}
 	writeJSONDebug(w, s.logger, map[string]interface{}{"ok": true})
+}
+
+// iamCtrlOIDCOutcomeKey returns the state key for a seeded CreateOpenIDConnectProvider
+// communication failure, keyed by provider URL or by the "*" wildcard.
+func iamCtrlOIDCOutcomeKey(url string) string {
+	return "oidc_provider_outcome:" + url
+}
+
+// handleIAMSeedOIDCProviderOutcome handles POST /v1/iam/oidc-provider-outcome.
+//
+// It makes CreateOpenIDConnectProvider answer `OpenIdIdpCommunicationError` for a URL (or every
+// URL, with "*"), which is the error AWS returns when "IAM cannot connect to the OpenID Connect
+// identity provider URL". Substrate connects to nothing, so the error is reachable only by seed.
+//
+// Body: {"url": "https://..."}; "url" defaults to "*". The seed holds until cleared.
+func (s *Server) handleIAMSeedOIDCProviderOutcome(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	url := body.URL
+	if url == "" {
+		url = "*"
+	}
+	seed, err := json.Marshal(map[string]string{"url": url, "error": "OpenIdIdpCommunicationError"})
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	if err := s.state.Put(r.Context(), iamCtrlNamespace, iamCtrlOIDCOutcomeKey(url), seed); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSONDebug(w, s.logger, map[string]interface{}{"ok": true, "url": url})
+}
+
+// handleIAMClearOIDCProviderOutcome handles DELETE /v1/iam/oidc-provider-outcome. With ?url=...
+// it removes that seed; without, every seeded outcome.
+func (s *Server) handleIAMClearOIDCProviderOutcome(w http.ResponseWriter, r *http.Request) {
+	if err := clearCtrlSeeds(r.Context(), s.state, iamCtrlNamespace, "oidc_provider_outcome:",
+		r.URL.Query().Get("url")); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSONDebug(w, s.logger, map[string]interface{}{"ok": true})
+}
+
+// clearCtrlSeeds deletes the seed under prefix+id, or every seed under prefix when id is empty.
+func clearCtrlSeeds(ctx context.Context, state StateManager, namespace, prefix, id string) error {
+	if id != "" {
+		if err := state.Delete(ctx, namespace, prefix+id); err != nil {
+			return fmt.Errorf("delete seed: %w", err)
+		}
+		return nil
+	}
+	keys, err := state.List(ctx, namespace, prefix)
+	if err != nil {
+		return fmt.Errorf("list seeds: %w", err)
+	}
+	for _, k := range keys {
+		if err := state.Delete(ctx, namespace, k); err != nil {
+			return fmt.Errorf("delete seed: %w", err)
+		}
+	}
+	return nil
 }

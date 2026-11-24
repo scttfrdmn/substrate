@@ -100,6 +100,9 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::Events::Rule":     (*StackDeployer).updateEventsRule,
 	// An alias the CDK points at a new currentVersion on each code change (#1613).
 	"AWS::Lambda::Alias": (*StackDeployer).updateLambdaAlias,
+	// The identity providers (#1613); their Url and Name are Replacement.
+	"AWS::IAM::OIDCProvider": (*StackDeployer).updateIAMOIDCProvider,
+	"AWS::IAM::SAMLProvider": (*StackDeployer).updateIAMSAMLProvider,
 }
 
 // cfnUpdateUnmodelled maps a type to why a change to one of its updatable properties cannot be

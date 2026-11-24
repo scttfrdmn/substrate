@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lambda: `GetFunctionConfiguration`, with `Qualifier` (#1660).
 - Lambda: `GetFunction`, `Invoke`, the permission operations and `DeleteFunction` resolve a version or alias from `Qualifier` or a qualified `FunctionName` (#1613).
 - CloudFormation: `AWS::Lambda::Version` and `AWS::Lambda::Alias`, the alias updated in place. A Version of an unchanged function fails with CloudFormation's observed "A version for this Lambda function exists" wording (#1613).
+- IAM: OpenID Connect providers: create, get, list, delete, thumbprint and client-ID updates, and tags; `POST`/`DELETE /v1/iam/oidc-provider-outcome` seeds `OpenIdIdpCommunicationError` (#1613).
+- IAM: SAML providers: create, get, list, update (metadata, encryption mode, private-key IDs) and delete, and tags (#1613).
+- STS: `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` check the token's claims against a registered provider and the simulated clock, then the trust policy's `Federated` principal and provider condition keys (#1613).
+- STS: `POST`/`DELETE /v1/sts/federation-outcome` seeds `InvalidIdentityToken`, `IDPRejectedClaim` or `IDPCommunicationError` per provider, optionally for a count of assumes (#1613).
+- CloudFormation: `AWS::IAM::OIDCProvider` and `AWS::IAM::SAMLProvider` deploy, update in place and delete (#1613).
 
 ### Changed
 
@@ -45,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependencies: `golang.org/x/text` 0.44.0 with `test/e2e` and `test/iac` tidied, the CDK example on TypeScript 7.0.2, and CI typechecks the CDK app; `@types/node` stays on Node 24's major (#1678, #1663, #1662).
 - EventBridge: rules are keyed per bus, so two buses can each hold a rule of one name, and every rule operation honors `EventBusName` (#1613).
 - EventBridge: a missing rule answers `Rule X does not exist on EventBus Y.`, a missing bus `Event bus X does not exist.`, a taken name `Event bus X already exists.` and a bus with rules `EventBus can't be deleted since it has rules.`, AWS's observed wording; the other bus and permission messages are substrate's own (#1613).
+- IAM: `GetAccountAuthorizationDetails` accepts `Filter=SAMLProviderList`, which selects none of the four populations (#1613).
+
+### Compatibility
+
+- Routing: an unsigned request with no other routing signal and `Action=AssumeRoleWithWebIdentity` or `AssumeRoleWithSAML` reaches STS instead of answering `ServiceNotAvailable` (#1613).
+- IAM: a trust-policy `"AWS"` principal never matches an OIDC or SAML provider; only a `Federated` entry does (#1613).
+- STS/IAM: the federation and provider limit, validation, SAML `NoSuchEntity`, malformed-token, SAML-expiry and seeded `IDPRejectedClaim`/`IDPCommunicationError` messages are substrate's own (#1613).
 
 ### Fixed
 

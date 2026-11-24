@@ -482,15 +482,23 @@ func TestIAMAccountAuthorizationDetails_Filter(t *testing.T) {
 		})
 	}
 
+	t.Run("SAMLProviderList selects no population", func(t *testing.T) {
+		t.Parallel()
+		body := iamAuthzDetailsXML(t, srv, map[string]string{"Filter.member.1": "SAMLProviderList"})
+		for _, wrapper := range []string{"UserDetailList", "GroupDetailList", "RoleDetailList", "Policies"} {
+			assert.Contains(t, body, "<"+wrapper+"></"+wrapper+">", "%s must be empty", wrapper)
+		}
+	})
+
 	t.Run("unknown value refused", func(t *testing.T) {
 		t.Parallel()
 		resp := iamFormRequest(t, srv, "GetAccountAuthorizationDetails",
-			map[string]string{"Filter.member.1": "SAMLProviderList"})
+			map[string]string{"Filter.member.1": "ServerCertificate"})
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 		var result map[string]any
 		decodeIAMXML(t, resp, &result)
 		assert.Equal(t, "ValidationError", result["__type"])
-		assert.Contains(t, result["message"], "SAMLProviderList")
+		assert.Contains(t, result["message"], "ServerCertificate")
 		assert.Contains(t, result["message"], "LocalManagedPolicy",
 			"the refusal names the permitted set so a caller can fix the call from it alone")
 	})

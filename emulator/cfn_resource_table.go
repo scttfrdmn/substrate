@@ -183,6 +183,9 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	// v0.134.0 — the types the CDK emits for a function's currentVersion and its aliases (#1613).
 	"AWS::Lambda::Version": (*StackDeployer).deployLambdaVersion,
 	"AWS::Lambda::Alias":   (*StackDeployer).deployLambdaAlias,
+	// The identity providers a role's trust policy names (#1613).
+	"AWS::IAM::OIDCProvider": (*StackDeployer).deployIAMOIDCProvider,
+	"AWS::IAM::SAMLProvider": (*StackDeployer).deployIAMSAMLProvider,
 }
 
 // cfnEmulatedType reports whether substrate's CloudFormation emulates a resource type.

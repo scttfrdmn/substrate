@@ -1375,6 +1375,16 @@ func IAMAuthzAccountResourceARNForTest(accountID string) string {
 	return iamAuthzAccountResourceARN(accountID)
 }
 
+// IAMOIDCProviderARNForTest wraps iamOIDCProviderARN for external tests.
+func IAMOIDCProviderARNForTest(accountID, hostPath string) string {
+	return iamOIDCProviderARN(accountID, hostPath)
+}
+
+// IAMSAMLProviderARNForTest wraps iamSAMLProviderARN for external tests.
+func IAMSAMLProviderARNForTest(accountID, name string) string {
+	return iamSAMLProviderARN(accountID, name)
+}
+
 // IAMInstanceProfileARNForTest wraps iamInstanceProfileARN, which joined the other four
 // minters with #770.
 func IAMInstanceProfileARNForTest(accountID, path, name string) string {

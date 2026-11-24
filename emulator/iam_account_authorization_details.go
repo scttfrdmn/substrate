@@ -58,16 +58,17 @@ import (
 // which is where the `ValidationError` for a bad `Filter` or an out-of-range `MaxItems`
 // (#868, [iamValidateMaxItems]) comes from.
 
-// iamAuthorizationDetailFilters are the values entityType permits, from the operation's
-// `Filter` parameter: "User | Role | Group | LocalManagedPolicy | AWSManagedPolicy".
+// iamAuthorizationDetailFilters are the values entityType permits: the operation's `Filter`
+// parameter lists "User | Role | Group | LocalManagedPolicy | AWSManagedPolicy", and AWS's model
+// adds a sixth, `SAMLProviderList`.
 //
 // `Filter` is a list, so a caller may name several; an empty list means all four populations,
 // which is what the page's "If it is not included, all attached entities (user, group, role,
-// and policy) are returned" says. AWS's model also lists a sixth value, `SAMLProviderList`,
-// which substrate does not offer because it models no SAML provider at all — naming it here
-// would accept a filter that then selected nothing, and reporting an empty list for a
-// population substrate cannot hold is less honest than refusing the filter.
-var iamAuthorizationDetailFilters = []string{"User", "Role", "Group", "LocalManagedPolicy", "AWSManagedPolicy"}
+// and policy) are returned" says. `SAMLProviderList` is accepted and selects none of them: the
+// response has no member that could carry a SAML provider, so a filter naming only it answers
+// four empty lists.
+var iamAuthorizationDetailFilters = []string{"User", "Role", "Group", "LocalManagedPolicy", "AWSManagedPolicy",
+	"SAMLProviderList"}
 
 // Composite key prefixes for the single ordered space the four populations are paged through.
 //

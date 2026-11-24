@@ -167,6 +167,25 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 	"UntagInstanceProfile":          {Type: "instance-profile", NameParams: []string{"InstanceProfileName"}},
 	"ListInstanceProfileTags":       {Type: "instance-profile", NameParams: []string{"InstanceProfileName"}},
 
+	// Identity providers. Every operation after the create carries the finished ARN; the two
+	// creates carry the URL and the name, which [iamAuthzMintResource] turns into one.
+	"CreateOpenIDConnectProvider":             {Type: "oidc-provider", NameParams: []string{"Url"}},
+	"GetOpenIDConnectProvider":                {Type: "oidc-provider", NameParams: []string{"OpenIDConnectProviderArn"}},
+	"DeleteOpenIDConnectProvider":             {Type: "oidc-provider", NameParams: []string{"OpenIDConnectProviderArn"}},
+	"UpdateOpenIDConnectProviderThumbprint":   {Type: "oidc-provider", NameParams: []string{"OpenIDConnectProviderArn"}},
+	"AddClientIDToOpenIDConnectProvider":      {Type: "oidc-provider", NameParams: []string{"OpenIDConnectProviderArn"}},
+	"RemoveClientIDFromOpenIDConnectProvider": {Type: "oidc-provider", NameParams: []string{"OpenIDConnectProviderArn"}},
+	"TagOpenIDConnectProvider":                {Type: "oidc-provider", NameParams: []string{"OpenIDConnectProviderArn"}},
+	"UntagOpenIDConnectProvider":              {Type: "oidc-provider", NameParams: []string{"OpenIDConnectProviderArn"}},
+	"ListOpenIDConnectProviderTags":           {Type: "oidc-provider", NameParams: []string{"OpenIDConnectProviderArn"}},
+	"CreateSAMLProvider":                      {Type: "saml-provider", NameParams: []string{"Name"}},
+	"GetSAMLProvider":                         {Type: "saml-provider", NameParams: []string{"SAMLProviderArn"}},
+	"UpdateSAMLProvider":                      {Type: "saml-provider", NameParams: []string{"SAMLProviderArn"}},
+	"DeleteSAMLProvider":                      {Type: "saml-provider", NameParams: []string{"SAMLProviderArn"}},
+	"TagSAMLProvider":                         {Type: "saml-provider", NameParams: []string{"SAMLProviderArn"}},
+	"UntagSAMLProvider":                       {Type: "saml-provider", NameParams: []string{"SAMLProviderArn"}},
+	"ListSAMLProviderTags":                    {Type: "saml-provider", NameParams: []string{"SAMLProviderArn"}},
+
 	// PolicySourceArn is a finished ARN of whichever of the three entity types the caller
 	// asked about, so there is nothing to mint and no one Type to name.
 	"SimulatePrincipalPolicy": {NameParams: []string{"PolicySourceArn"}},
@@ -280,6 +299,10 @@ func iamAuthzTagsForARN(state StateManager, arn string) map[string]string {
 	switch resourceType {
 	case "policy":
 		key = iamPolicyKey(arn)
+	case "oidc-provider":
+		key = iamOIDCProviderKey(arnAccountID(arn), nameWithPath)
+	case "saml-provider":
+		key = iamSAMLProviderKey(arnAccountID(arn), nameWithPath)
 	case "user", "role", "instance-profile":
 		// The friendly name, not the name-with-path: an IAM ARN carries both in one
 		// component and the record is keyed by the name alone (#801).
@@ -330,6 +353,11 @@ func iamAuthzMintResource(state StateManager, reqCtx *RequestContext, req *AWSRe
 		arn = iamPolicyARN(reqCtx.AccountID, path, name)
 	case "instance-profile":
 		arn = iamInstanceProfileARN(reqCtx.AccountID, path, name)
+	case "oidc-provider":
+		// CreateOpenIDConnectProvider names the provider by its URL, whose scheme the ARN drops.
+		return authzResource{ARN: iamOIDCProviderARN(reqCtx.AccountID, iamOIDCHostPath(name))}
+	case "saml-provider":
+		return authzResource{ARN: iamSAMLProviderARN(reqCtx.AccountID, name)}
 	default:
 		return authzResource{}
 	}

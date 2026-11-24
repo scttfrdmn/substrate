@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,10 @@ type STSPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// seedMu serializes the read and count-down of a federation seed, so two concurrent assumes
+	// cannot both consume a seed's last use.
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "sts".
@@ -54,6 +59,10 @@ func (p *STSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.assumeRole(ctx, req)
 	case "GetSessionToken":
 		return p.getSessionToken(ctx, req)
+	case "AssumeRoleWithWebIdentity":
+		return p.assumeRoleWithWebIdentity(ctx, req)
+	case "AssumeRoleWithSAML":
+		return p.assumeRoleWithSAML(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), req.Operation)
 	}
@@ -270,38 +279,17 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 
 	now := p.now()
-	expiry := now.Add(time.Duration(duration) * time.Second)
-
-	// AWS's aws:userid for an assumed role: "{role-id}:{caller-specified-role-name}
-	// where role-id is the unique id of the role and the caller-specified-role-name is
-	// specified by the RoleSessionName parameter". The response publishes it as
-	// AssumedRoleId below; the session record carries it so that a request signed with
-	// these credentials can be authorized against it (#771).
-	assumedRoleID := role.RoleID + ":" + sessionName
-
-	creds := STSSessionCredentials{
-		AccessKeyID:     generateIAMID(ctx.IDs, "ASIA"),
-		SecretAccessKey: stsGenerateSecret(ctx.IDs),
-		SessionToken:    stsGenerateToken(ctx.IDs),
-		Expiration:      expiry,
-		PrincipalARN:    fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", ctx.AccountID, roleName, sessionName),
-		AccountID:       ctx.AccountID,
-		PrincipalID:     assumedRoleID,
-	}
-
-	credRaw, err := json.Marshal(creds)
+	creds, err := p.mintRoleSession(goCtx, ctx, ctx.AccountID, roleName, role.RoleID, sessionName,
+		now.Add(time.Duration(duration)*time.Second))
 	if err != nil {
-		return nil, fmt.Errorf("marshal session credentials: %w", err)
-	}
-	if err := p.state.Put(goCtx, stsNamespace, "session:"+creds.AccessKeyID, credRaw); err != nil {
-		return nil, fmt.Errorf("store session credentials: %w", err)
+		return nil, err
 	}
 
 	if err := p.recordRoleLastUsed(goCtx, ctx, roleARN, roleName, &role, now); err != nil {
 		return nil, err
 	}
 
-	assumedRoleARN := fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", ctx.AccountID, roleName, sessionName)
+	assumedRoleID, assumedRoleARN := creds.PrincipalID, creds.PrincipalARN
 
 	type xmlCreds struct {
 		AccessKeyID     string    `xml:"AccessKeyId"`
@@ -344,14 +332,44 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	return stsXMLResponse(http.StatusOK, resp)
 }
 
+// mintRoleSession stores and returns the temporary credentials of an assumed-role session in
+// accountID, expiring at expiry. AssumeRole and the two federated assumes share it, so a
+// session minted by any of them authenticates and authorizes identically.
+//
+// The session's PrincipalID is AWS's aws:userid for an assumed role: "{role-id}:{caller-specified-
+// role-name} where role-id is the unique id of the role and the caller-specified-role-name is
+// specified by the RoleSessionName parameter". The response publishes it as AssumedRoleId; the
+// session record carries it so that a request signed with these credentials can be authorized
+// against it (#771).
+func (p *STSPlugin) mintRoleSession(
+	goCtx context.Context, ctx *RequestContext, accountID, roleName, roleID, sessionName string, expiry time.Time,
+) (STSSessionCredentials, error) {
+	assumedRoleARN := fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", accountID, roleName, sessionName)
+	creds := STSSessionCredentials{
+		AccessKeyID:     generateIAMID(ctx.IDs, "ASIA"),
+		SecretAccessKey: stsGenerateSecret(ctx.IDs),
+		SessionToken:    stsGenerateToken(ctx.IDs),
+		Expiration:      expiry,
+		PrincipalARN:    assumedRoleARN,
+		AccountID:       accountID,
+		PrincipalID:     roleID + ":" + sessionName,
+	}
+	credRaw, err := json.Marshal(creds)
+	if err != nil {
+		return STSSessionCredentials{}, fmt.Errorf("marshal session credentials: %w", err)
+	}
+	if err := p.state.Put(goCtx, stsNamespace, "session:"+creds.AccessKeyID, credRaw); err != nil {
+		return STSSessionCredentials{}, fmt.Errorf("store session credentials: %w", err)
+	}
+	return creds, nil
+}
+
 // recordRoleLastUsed stamps the role's record with the time and region of this assume,
 // which is what `GetRole` reports as `RoleLastUsed` (#816).
 //
 // This is the one place substrate learns that a role was *used*: AWS's `RoleLastUsed`
 // advances on use, and an assume is the only use an emulator that models no workload can
-// observe. `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not implemented here,
-// so this is the single write site rather than one of three; adding either later must call
-// this too.
+// observe. AssumeRole, AssumeRoleWithWebIdentity and AssumeRoleWithSAML all call it.
 //
 // It makes AssumeRole a writer of IAM state, which is worth naming: every other substrate
 // write follows from an operation whose purpose is to mutate, and this is an STS operation
@@ -439,16 +457,7 @@ func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN,
 	// (#714). See [authzPrincipalContext].
 	authzPrincipalContext(condCtx, ctx.Principal)
 
-	// Resource is empty because a trust policy carries no Resource element — the
-	// role it is attached to *is* the resource. resourceMatches treats an empty
-	// resource as a match, so a statement stands or falls on its principal,
-	// action and conditions.
-	result := Evaluate([]PolicyDocument{role.AssumeRolePolicyDocument}, EvaluationRequest{
-		Principal: ctx.Principal.ARN,
-		Action:    "sts:AssumeRole",
-		Resource:  "",
-		Context:   condCtx,
-	})
+	result := stsTrustDecision(role, ctx.Principal.ARN, "sts:AssumeRole", condCtx, nil)
 	if result.Decision == DecisionAllow {
 		return nil
 	}
@@ -472,6 +481,25 @@ func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN,
 		Message:    msg,
 		HTTPStatus: http.StatusForbidden,
 	}
+}
+
+// stsTrustDecision evaluates role's trust policy for principal requesting action, with the
+// condition keys in condCtx (single-valued) and multi (multivalued).
+//
+// Resource is empty because a trust policy carries no Resource element — the role it is
+// attached to *is* the resource. resourceMatches treats an empty resource as a match, so a
+// statement stands or falls on its principal, action and conditions. For a federated assume the
+// principal is the identity provider's ARN, which only a `Federated` entry matches
+// ([principalCovered]).
+func stsTrustDecision(role IAMRole, principal, action string, condCtx map[string]string,
+	multi map[string][]string) EvaluationResult {
+	return Evaluate([]PolicyDocument{role.AssumeRolePolicyDocument}, EvaluationRequest{
+		Principal:    principal,
+		Action:       action,
+		Resource:     "",
+		Context:      condCtx,
+		MultiContext: multi,
+	})
 }
 
 func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

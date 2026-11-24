@@ -503,6 +503,10 @@ func (s *Server) buildRouter() *chi.Mux {
 		// IAM control-plane endpoints (#747).
 		cp.Post("/v1/iam/slr-deletion-status", s.handleIAMSeedSLRDeletionStatus)
 		cp.Delete("/v1/iam/slr-deletion-status", s.handleIAMClearSLRDeletionStatus)
+		cp.Post("/v1/iam/oidc-provider-outcome", s.handleIAMSeedOIDCProviderOutcome)
+		cp.Delete("/v1/iam/oidc-provider-outcome", s.handleIAMClearOIDCProviderOutcome)
+		cp.Post("/v1/sts/federation-outcome", s.handleSTSSeedFederationOutcome)
+		cp.Delete("/v1/sts/federation-outcome", s.handleSTSClearFederationOutcome)
 
 		// Organizations control-plane endpoints (#578).
 		cp.Post("/v1/organizations/feature-set", s.handleOrganizationsSeedFeatureSet)
