@@ -53,10 +53,6 @@ const (
 // separately.
 var s3TagCharPattern = regexp.MustCompile(`^[\p{L}\p{Z}\p{N}_.:/=+\-@]*$`)
 
-// s3ReservedTagPrefix is the prefix reserved for AWS-generated tags, refused in a caller's key.
-// Matched case-insensitively, so "AWS:" cannot be used to slip past it.
-const s3ReservedTagPrefix = "aws:"
-
 // s3InvalidTagResponse is the InvalidTag/400 refusal of a tag set.
 func s3InvalidTagResponse(message string) *AWSResponse {
 	return s3ErrorResponse("InvalidTag", message, http.StatusBadRequest)
@@ -94,7 +90,7 @@ func s3CheckTagSet(tags []s3Tag, maxTags int, what string) (map[string]string, *
 		if t.Key == "" {
 			return nil, s3InvalidTag("The TagKey you have provided is invalid")
 		}
-		if strings.HasPrefix(strings.ToLower(t.Key), s3ReservedTagPrefix) {
+		if taggingReservedKey(t.Key) {
 			return nil, s3InvalidTag("Your TagKey cannot be prefixed with aws:")
 		}
 		if !s3TagCharPattern.MatchString(t.Key) {
@@ -288,25 +284,33 @@ func (p *S3Plugin) tagResourceByARN(
 	if err != nil {
 		return taggingResolveFailed(err)
 	}
+	if awsErr := s3TagKeyRefusal(add, remove); awsErr != nil {
+		return taggingQuotaRefusal(awsErr)
+	}
+	return p.tagRecord(context.Background(), key, add, remove, quota)
+}
+
+// s3TagKeyRefusal holds a tagging API write to PutBucketTagging's key and value rules
+// ([s3CheckTagSet]) for what it adds, and refuses a removal of a key with the reserved prefix.
+// Both the S3 plugin and the tagging plugin's direct path apply it, before looking for the bucket.
+func s3TagKeyRefusal(add map[string]string, remove []string) *AWSError {
 	tags := make([]s3Tag, 0, len(add))
 	for _, k := range taggingSortedKeys(add) {
 		tags = append(tags, s3Tag{Key: k, Value: add[k]})
 	}
 	if _, awsErr := s3CheckTagSet(tags, s3MaxBucketTags, "Bucket"); awsErr != nil {
-		return taggingQuotaRefusal(awsErr)
+		return awsErr
 	}
 	for _, k := range remove {
-		if strings.HasPrefix(strings.ToLower(k), s3ReservedTagPrefix) {
-			return taggingQuotaRefusal(s3InvalidTag("Your TagKey cannot be prefixed with aws:"))
+		if taggingReservedKey(k) {
+			return s3InvalidTag("Your TagKey cannot be prefixed with aws:")
 		}
 	}
-	return p.tagRecord(context.Background(), key, add, remove, quota)
+	return nil
 }
 
-// tagRecord implements [resourceTagger]. With quota enforced, the merged set may hold at most 50
-// tags, the bucket limit PutBucketTagging enforces. Keys with the reserved `aws:` prefix are not
-// counted: "System created tags that begin with aws: are reserved for AWS use, and do not count
-// against this limit" (Tagging AWS Resources).
+// tagRecord implements [resourceTagger]. With quota enforced, the merged set is held to the bucket
+// limit ([s3BucketTagQuotaRefusal]).
 func (p *S3Plugin) tagRecord(
 	ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
@@ -324,8 +328,15 @@ func (p *S3Plugin) tagRecord(
 }
 
 // s3BucketTagQuotaRefusal refuses a merge that would leave the bucket record raw with more than
-// [s3MaxBucketTags] tags outside the reserved prefix. An unreadable record is left for the merge to
-// report, as [taggingDecodeForQuota] leaves one.
+// [s3MaxBucketTags] user tags. An unreadable record is left for the merge to report, as
+// [taggingDecodeForQuota] leaves one.
+//
+// One rule for every bucket writer: at most 50 tags a caller set. "A tag set can contain as many as
+// 50 tags" (Using cost allocation S3 bucket tags), and "System created tags that begin with aws: are
+// reserved for AWS use, and do not count against this limit" (Tagging AWS Resources, Tag naming
+// limits and requirements). PutBucketTagging counts its whole set because a caller's set can hold
+// no reserved key; a merge here counts all but the reserved keys, which only CloudFormation's
+// stamp writes.
 func s3BucketTagQuotaRefusal(raw []byte, add map[string]string, remove []string) *AWSError {
 	var b S3Bucket
 	if !taggingDecodeForQuota(raw, &b) {
@@ -333,7 +344,7 @@ func s3BucketTagQuotaRefusal(raw []byte, add map[string]string, remove []string)
 	}
 	user := 0
 	for k := range mergeStringMap(b.Tags, add, remove) {
-		if !strings.HasPrefix(strings.ToLower(k), s3ReservedTagPrefix) {
+		if !taggingReservedKey(k) {
 			user++
 		}
 	}

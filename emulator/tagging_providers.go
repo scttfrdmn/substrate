@@ -69,8 +69,20 @@ func taggingResolveFailed(err error) error {
 
 // taggingReservedTagPrefix is the prefix of tag keys AWS reserves: "System created tags that begin
 // with aws: are reserved for AWS use ... You can't edit or delete a tag that begins with the aws:
-// prefix" (Tagging AWS Resources, Tag naming limits and requirements).
-const taggingReservedTagPrefix = "aws:"
+// prefix" (Tagging AWS Resources, Tag naming limits and requirements). It is EC2's
+// [ec2ReservedTagPrefix], whose doc records the observed refusal.
+const taggingReservedTagPrefix = ec2ReservedTagPrefix
+
+// taggingReservedKey reports whether key carries the reserved prefix. The match is case-sensitive,
+// as the EC2 User Guide's Tag restrictions give it: "Tag keys and values are case-sensitive" and
+// "The aws: prefix is reserved for AWS use". S3's tagging pages defer to that list ("For basic tag
+// restrictions, see Tag restrictions in the Amazon EC2 User Guide", Tagging your objects), and
+// observed EC2 accepts `AWS:foo` as an ordinary tag ([ec2ReservedTagPrefix]). ECS's Tag shape
+// reserves "aws:, AWS:, or any upper or lowercase combination", which is ECS's own rule and not
+// applied here. EC2's, S3's and the tagging API's checks all call this, so they cannot disagree.
+func taggingReservedKey(key string) bool {
+	return strings.HasPrefix(key, taggingReservedTagPrefix)
+}
 
 // taggingReservedKeyRefusal refuses a caller's write that adds or removes an `aws:` key, for a
 // service whose own key rules substrate does not model. The tagging API reports it for the resource
@@ -79,10 +91,10 @@ const taggingReservedTagPrefix = "aws:"
 func taggingReservedKeyRefusal(add map[string]string, remove []string) *AWSError {
 	reserved := false
 	for k := range add {
-		reserved = reserved || strings.HasPrefix(k, taggingReservedTagPrefix)
+		reserved = reserved || taggingReservedKey(k)
 	}
 	for _, k := range remove {
-		reserved = reserved || strings.HasPrefix(k, taggingReservedTagPrefix)
+		reserved = reserved || taggingReservedKey(k)
 	}
 	if !reserved {
 		return nil

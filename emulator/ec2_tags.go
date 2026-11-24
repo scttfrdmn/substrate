@@ -84,12 +84,12 @@ func ec2TagLimitExceededError() *AWSError {
 func ec2CheckTagLimit(existing, incoming []EC2Tag) *AWSError {
 	keys := make(map[string]struct{}, len(existing)+len(incoming))
 	for _, t := range existing {
-		if !strings.HasPrefix(t.Key, ec2ReservedTagPrefix) {
+		if !taggingReservedKey(t.Key) {
 			keys[t.Key] = struct{}{}
 		}
 	}
 	for _, t := range incoming {
-		if !strings.HasPrefix(t.Key, ec2ReservedTagPrefix) {
+		if !taggingReservedKey(t.Key) {
 			keys[t.Key] = struct{}{}
 		}
 	}
@@ -314,7 +314,7 @@ func ec2CheckTemplateTags(d EC2LaunchTemplateData) *AWSError {
 // which is the very defect #471 exists to close.
 func ec2HasUserTags(tags []EC2Tag) bool {
 	for _, t := range tags {
-		if !strings.HasPrefix(t.Key, ec2ReservedTagPrefix) {
+		if !taggingReservedKey(t.Key) {
 			return true
 		}
 	}
@@ -339,7 +339,7 @@ func ec2HasUserTags(tags []EC2Tag) bool {
 // request must leave nothing behind.
 func ec2CheckReservedTagKeys(tags []EC2Tag) *AWSError {
 	for _, t := range tags {
-		if strings.HasPrefix(t.Key, ec2ReservedTagPrefix) {
+		if taggingReservedKey(t.Key) {
 			return ec2ReservedTagKeyError()
 		}
 	}
@@ -595,6 +595,17 @@ func (p *EC2Plugin) tagResourceByARN(
 	if err != nil {
 		return taggingResolveFailed(err)
 	}
+	if awsErr := ec2TagKeyRefusal(add, remove); awsErr != nil {
+		return taggingQuotaRefusal(awsErr)
+	}
+	return p.tagRecord(context.Background(), key, add, remove, quota)
+}
+
+// ec2TagKeyRefusal holds a tagging API write to EC2's rules ([ec2CheckTagRules]): what it adds to
+// CreateTags' and what it removes to DeleteTags'. Both the EC2 plugin and the tagging plugin's
+// direct path apply it, before looking for the resource, as CreateTags checks its tags before its
+// resource IDs.
+func ec2TagKeyRefusal(add map[string]string, remove []string) *AWSError {
 	checked := make([]EC2Tag, 0, len(add)+len(remove))
 	for _, k := range taggingSortedKeys(add) {
 		checked = append(checked, EC2Tag{Key: k, Value: add[k]})
@@ -602,10 +613,7 @@ func (p *EC2Plugin) tagResourceByARN(
 	for _, k := range remove {
 		checked = append(checked, EC2Tag{Key: k})
 	}
-	if awsErr := ec2CheckTagRules(checked); awsErr != nil {
-		return taggingQuotaRefusal(awsErr)
-	}
-	return p.tagRecord(context.Background(), key, add, remove, quota)
+	return ec2CheckTagRules(checked)
 }
 
 // applyTagsByID applies tags to the EC2 resource id through [ec2ApplyTagsToResource], under

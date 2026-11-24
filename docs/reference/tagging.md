@@ -32,10 +32,13 @@ only: for EC2 and S3, another operation that rewrites the same record does not t
 tagging plugin reads and merges every other service's records itself.
 
 `TagResources` and `UntagResources` refuse an `aws:` key for every resource. AWS reserves the prefix
-("You can't edit or delete a tag that begins with the `aws:` prefix"). EC2 and S3 answer with their
-own refusals (`InvalidParameterValue`, `InvalidTag`), and every other service with
-`InvalidParameterException`/400. An EC2 or S3 resource is also held to its service's key, value and
-50-tag rules.
+("You can't edit or delete a tag that begins with the `aws:` prefix"). The match is case-sensitive,
+as EC2's tag restrictions give it ("Tag keys and values are case-sensitive"), so `AWS:owner` is an
+ordinary tag. EC2 and S3 answer with their own refusals (`InvalidParameterValue`, `InvalidTag`),
+and every other service with `InvalidParameterException`/400. An EC2 or S3 resource is also held to
+its service's key, value and 50-tag rules, with `aws:` tags not counted. A key the rules refuse is
+answered before a missing resource. All of this is the same whether or not the owning plugin is
+registered.
 
 A CloudWatch alarm is reported under `arn:aws:cloudwatch:{region}:{account}:alarm:{name}`, the
 ARN CloudWatch's own `TagResource` takes. `TagResources` and `UntagResources` are applied by
@@ -806,12 +809,13 @@ reached through substrate's own API. Two earlier statements in the reference and
 `CHANGELOG.md` claimed Kinesis was the first quota of any service and that the merge
 covered sixteen arms; both were wrong when written and are corrected with that issue.
 
-**Each service's own checker is called rather than a shared count, because the four
+**Each service's own checker is called rather than a shared count, because they
 disagree in ways a shared count would have to flatten:**
 
 | Service | Cap | Code | Status | Reserved `aws:` keys |
 |---------|-----|------|--------|----------------------|
 | EC2 | 50 | `TagLimitExceeded` | 400 | Excluded from the count |
+| S3 (buckets) | 50 | `InvalidTag` | 400 | Excluded from the count |
 | ELBv2 | 50 | `TooManyTags` | 400 | Excluded from the count |
 | ELB Classic | **10** | `TooManyTags` | 400 | Excluded from the count |
 | IAM | 50 | `LimitExceeded` | **409** | Counted |

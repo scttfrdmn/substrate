@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - S3: an unseeded `tasks/<id>/completion.json` is now `404 NoSuchKey`; spore.host must seed each record through `/v1/s3/seeded-objects`, for example `{"bucket":"results","key":"tasks/t1/completion.json","contentType":"application/json","body":{"task_id":"t1","exit_code":0,"state":"completed"},"availableAt":"2026-01-01T12:05:00Z"}` (#1611).
 - Docs: old `/services#<anchor>` links redirect in the browser to the anchor's new page; update bookmarks and links to the `/reference/` URLs (#1610).
 - Tagging: TagResources and UntagResources refuse `aws:` keys, and hold EC2 and S3 resources to those services' key, value and 50-tag rules (#1609).
+- S3: a tag key beginning `AWS:` or another case of `aws:` is now an ordinary tag, as on EC2; only lowercase `aws:` is reserved (#1609).
 
 ## [v0.131.0] - 2026-11-23
 

@@ -129,6 +129,8 @@ func taggingCheckTagQuota(ns, key string, raw []byte, addTags map[string]string,
 	switch ns {
 	case ec2Namespace:
 		return taggingQuotaRefusal(taggingEC2QuotaRefusal(raw, addTags, removeKeys))
+	case s3Namespace:
+		return taggingQuotaRefusal(s3BucketTagQuotaRefusal(raw, addTags, removeKeys))
 	case elbNamespace:
 		if !elbKeyIsTaggable(key) {
 			return nil

@@ -118,7 +118,6 @@ var s3InvalidTaggingHeaders = []struct {
 	{name: "value too long", header: "k=" + strings.Repeat("v", 257), code: "InvalidTag"},
 	{name: "surrogate pairs count twice", header: "k=" + strings.Repeat("\U0001D400", 129), code: "InvalidTag"},
 	{name: "reserved aws: prefix", header: "aws:createdBy=me", code: "InvalidTag"},
-	{name: "reserved prefix in another case", header: "AWS:x=1", code: "InvalidTag"},
 	{name: "disallowed character in key", header: "a%26b=1", code: "InvalidTag"},
 	{name: "disallowed character in value", header: "k=semi%3Bcolon", code: "InvalidTag"},
 	{name: "duplicate key", header: "A=1&A=2", code: "InvalidTag"},

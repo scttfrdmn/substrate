@@ -263,6 +263,27 @@ func providerParityScript(e *providerEnv) []string {
 		"arn:aws:cloudwatch:us-east-1:123456789012:dashboard/d",
 	}, "Tags": map[string]string{"k": "v"}})
 	call("UntagResources", map[string]any{"ResourceARNList": []string{alarmARN}, "TagKeys": []string{}})
+
+	// Key rules: a reserved key added or removed, an uppercase AWS: key (an ordinary tag), a key
+	// too long, and a reserved key on a missing resource (the key rule answers first).
+	call("TagResources", map[string]any{"ResourceARNList": arns, "Tags": map[string]string{"aws:owner": "me"}})
+	call("UntagResources", map[string]any{"ResourceARNList": arns, "TagKeys": []string{"aws:cloudformation:stack-name"}})
+	call("TagResources", map[string]any{"ResourceARNList": arns, "Tags": map[string]string{"AWS:owner": "me"}})
+	call("TagResources", map[string]any{"ResourceARNList": arns, "Tags": map[string]string{strings.Repeat("k", 129): "v"}})
+	call("TagResources", map[string]any{"ResourceARNList": []string{
+		"arn:aws:ec2:us-east-1:123456789012:security-group/sg-0000000000000000",
+		"arn:aws:s3:::no-such-bucket",
+		"arn:aws:cloudwatch:us-east-1:123456789012:alarm:none",
+	}, "Tags": map[string]string{"aws:owner": "me"}})
+
+	// Quotas: 48 more fit beside the two already there, and the 51st is refused.
+	full := map[string]string{}
+	for i := range 48 {
+		full[fmt.Sprintf("q%02d", i)] = "v"
+	}
+	call("TagResources", map[string]any{"ResourceARNList": arns, "Tags": full})
+	call("TagResources", map[string]any{"ResourceARNList": arns, "Tags": map[string]string{"one-more": "v"}})
+	call("GetResources", map[string]any{"ResourceARNList": arns})
 	return bodies
 }
 
@@ -283,12 +304,17 @@ func TestTaggingProviders_AnswersMatchTheDirectPath(t *testing.T) {
 	assert.Contains(t, joined, `"ErrorCode":"InvalidParameterException","ErrorMessage":"the target ID is invalid, unsupported, or doesn't exist","StatusCode":400`)
 	assert.Contains(t, joined, `"ErrorCode":"InternalServiceException","ErrorMessage":"the resource type in the request is not supported by the Resource Groups Tagging API","StatusCode":500`)
 	assert.Contains(t, joined, `"ErrorCode":"MissingParameter"`)
+	assert.Contains(t, joined, `"ErrorCode":"InvalidTag"`, "S3's own refusals, on both paths")
+	assert.Contains(t, joined, `"ErrorCode":"TagLimitExceeded"`, "EC2's own 50-tag refusal, on both paths")
+	assert.Contains(t, joined, `"AWS:owner"`, "an uppercase AWS: key is an ordinary tag")
+	assert.NotContains(t, joined, `"aws:owner"`, "no reserved key was written")
+	assert.NotContains(t, joined, `"one-more"`, "the 51st tag was refused everywhere")
 }
 
 // TestTaggingProviders_ReservedKeysAreRefused pins that a caller can neither write nor strip an
 // `aws:` key through the tagging API, while CloudFormation's internal stamp path still writes one.
-// A pilot answers with its own service's refusal; without a registry the tagging API answers its
-// own.
+// EC2 and S3 answer with their own service's refusal whether or not their plugin is registered,
+// and CloudWatch with the tagging API's.
 func TestTaggingProviders_ReservedKeysAreRefused(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -296,7 +322,7 @@ func TestTaggingProviders_ReservedKeysAreRefused(t *testing.T) {
 		ec2, s3, alarms string
 	}{
 		{true, "InvalidParameterValue", "InvalidTag", "InvalidParameterException"},
-		{false, "InvalidParameterException", "InvalidParameterException", "InvalidParameterException"},
+		{false, "InvalidParameterValue", "InvalidTag", "InvalidParameterException"},
 	} {
 		t.Run(fmt.Sprintf("registry=%v", tc.reach), func(t *testing.T) {
 			t.Parallel()

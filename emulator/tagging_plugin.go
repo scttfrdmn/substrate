@@ -1509,8 +1509,10 @@ func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) 
 // per-resource tag quota.
 //
 // The owning plugin writes it when it implements [resourceTagger], under its own lock, applying its
-// own key rules. Otherwise the ARN is resolved here ([TaggingPlugin.resolveARN]), an `aws:` key is
-// refused ([taggingReservedKeyRefusal]), and the tags are merged through [mergeResourceTags]. Either
+// own key rules. Otherwise the ARN is resolved here ([TaggingPlugin.resolveARN]), the same key rules
+// are applied ([taggingKeyRefusal]), and the tags are merged through [mergeResourceTags]. Either
+// way an unresolvable ARN is answered first, a key the rules refuse next, and a missing resource
+// after that. Either
 // way a resolution failure comes back as a [taggingResolveError], so [TaggingPlugin.tagFailure]
 // answers it as the ARN's failure.
 func (p *TaggingPlugin) tagARN(goCtx context.Context, reqCtx *RequestContext, arn string,
@@ -1522,10 +1524,24 @@ func (p *TaggingPlugin) tagARN(goCtx context.Context, reqCtx *RequestContext, ar
 	if err != nil {
 		return taggingResolveFailed(err)
 	}
-	if refusal := taggingReservedKeyRefusal(addTags, removeKeys); refusal != nil {
+	if refusal := taggingKeyRefusal(ns, addTags, removeKeys); refusal != nil {
 		return taggingQuotaRefusal(refusal)
 	}
 	return mergeResourceTags(goCtx, p.registry, p.state, ns, key, addTags, removeKeys, enforceTagQuota)
+}
+
+// taggingKeyRefusal applies the key rules of the service owning ns to a write on the direct path:
+// EC2's and S3's own, which their plugins apply too, so a resource gets one answer whether or not
+// its plugin is registered, and the reserved-prefix refusal for every other service.
+func taggingKeyRefusal(ns string, addTags map[string]string, removeKeys []string) *AWSError {
+	switch ns {
+	case ec2Namespace:
+		return ec2TagKeyRefusal(addTags, removeKeys)
+	case s3Namespace:
+		return s3TagKeyRefusal(addTags, removeKeys)
+	default:
+		return taggingReservedKeyRefusal(addTags, removeKeys)
+	}
 }
 
 // taggerFor returns the plugin that writes the tags of the resource arn names, with its name,
