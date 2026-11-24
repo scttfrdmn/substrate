@@ -632,8 +632,8 @@ func (p *APIGatewayPlugin) getResource(ctx *RequestContext, apiID, resID string)
 // "embed" is the third parameter this URI publishes, and it is still not read: every resource is
 // answered with its resourceMethods, where AWS populates that member only for "embed=methods". That
 // is a distinct divergence from the cursor this fixes — it over-reports rather than under-reports —
-// and it is recorded in docs/services.md rather than changed here, because narrowing a response
-// member is a compatibility break that wants its own issue and its own citation.
+// and it is recorded in docs/reference/apigateway.md rather than changed here, because narrowing a
+// response member is a compatibility break that wants its own issue and its own citation.
 func (p *APIGatewayPlugin) getResources(ctx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
 	pageSize, offset, awsErr := apigwPageParams(req)
 	if awsErr != nil {

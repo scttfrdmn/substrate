@@ -261,7 +261,7 @@ func iamResourceNamelessPrincipal() *emulator.Principal {
 // Its Resource is `arn:aws:iam::*:user/${aws:username}` and `arn:aws:iam::*:user/*/…`, so it
 // grants nothing at all unless the request's resource is the caller's own user ARN. Against the
 // old flat `arn:aws:iam::123456789012:*` it matched nothing, which is why #745's variable
-// substitution left the policy still granting nothing (`docs/services.md`).
+// substitution left the policy still granting nothing (`docs/reference/iam.md`).
 //
 // ChangePassword carries no UserName — AWS: it "changes the password of the IAM user who is
 // calling this operation" — so the caller's own user is the resource by documentation rather

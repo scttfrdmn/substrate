@@ -106,7 +106,7 @@ const cfnStateMachineStubDefinition = `{"Comment":"stub","StartAt":"Start",` +
 //
 // DefinitionS3Location is declined rather than modeled: it names an S3 object holding
 // the document, and fetching it would make a deploy depend on a bucket's contents.
-// A template using it gets the stub, and docs/services.md says so.
+// A template using it gets the stub, and docs/reference/states.md says so.
 func cfnStateMachineDefinition(props map[string]interface{}, cctx *cfnContext) string {
 	def := resolveStringProp(props, "DefinitionString", "", cctx)
 	if def == "" {

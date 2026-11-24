@@ -201,7 +201,7 @@ func TestEC2_DescribeSnapshots_FiltersAND(t *testing.T) {
 // that substrate accepts and cannot answer. They constrain nothing rather than being
 // refused, because refusing a filter real EC2 accepts would be a false deny — and rather
 // than matching nothing, because an empty answer is indistinguishable from "no such
-// snapshot" and would hang a caller's wait loop. docs/services.md lists them by name.
+// snapshot" and would hang a caller's wait loop. docs/reference/ec2.md lists them by name.
 //
 // It was four until #715: progress is evaluated now, and its rows live in the table above.
 func TestEC2_DescribeSnapshots_InertFiltersReturnEverything(t *testing.T) {

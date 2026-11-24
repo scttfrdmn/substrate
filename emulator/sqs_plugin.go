@@ -370,7 +370,7 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	// member carries no Map Entries and no Length constraint, the fifty-tag figure is worded as a
 	// recommendation on both this page and TagQueue's, and neither Errors list carries a
 	// too-many-tags code. Kinesis's CreateStream publishes constraints and so refuses; SQS does not
-	// and so must not. See docs/services.md.
+	// and so must not. See docs/reference/sqs.md.
 	q := &SQSQueue{
 		QueueName:             name,
 		QueueURL:              queueURL,

@@ -134,7 +134,7 @@ type RequestContext struct {
 
 	// IDs mints the identifiers this request publishes, derived from RequestID so that
 	// replaying the request mints the same ones (#856). Nil is usable: an [IDMint] method
-	// on a nil receiver draws from crypto/rand, which is what every mint site did before.
+	// on a nil receiver draws from crypto/rand.
 	IDs *IDMint
 
 	// Metadata holds arbitrary key-value pairs for cross-cutting concerns
@@ -156,7 +156,7 @@ type Principal struct {
 	// It is what [authzPrincipalContext] publishes as `aws:username`, and it is
 	// carried here rather than parsed back out of ARN because not every ARN in
 	// that field names a user: a registry hit with no IAM entity behind it
-	// synthesizes `…:user/<access-key-id>` (see [Server.resolveCallerPrincipal]),
+	// synthesizes `…:user/<access-key-id>` (see [buildCallerARN]),
 	// and publishing that as a user name would put a credential ID in a policy
 	// comparison. Empty for every principal for which AWS publishes no
 	// `aws:username` — the account root, an assumed role, and a federated or

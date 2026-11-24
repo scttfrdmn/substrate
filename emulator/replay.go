@@ -1328,9 +1328,9 @@ func generateReplayID() string {
 // event log exists to rule out.
 //
 // It also releases what a plugin started rather than minted: S3's object payloads
-// (#902) and Lambda's event-source-mapping pollers (#903). A replay needs those gone
-// for the same reason it needs the counters rewound — a poller left over from the
-// previous replay polls the queue this one recreates.
+// (#902) and the set of Lambda event-source mappings it polls (#903). A replay needs
+// those gone for the same reason it needs the counters rewound: what the previous
+// replay left in them would not match the state this one rebuilds.
 //
 // The [FaultController] is rewound here too, for the same reason and with the same
 // consequence if it is not: its per-rule fired counts and PRNG positions are state a
@@ -1420,11 +1420,11 @@ func (r *ReplayEngine) computeStateHash(ctx context.Context) string {
 // answers, and the comparison would report a difference for every event.
 //
 // The hash is deterministic for [MemoryStateManager]: Snapshot marshals a map,
-// and encoding/json sorts map keys. It is *not* invariant across a recording and
-// its replay for a stream containing a create, because substrate mints most
-// identifiers from crypto/rand and the minted value ends up in the state key or
-// the record — see #856. A reported mismatch there is a real divergence, not a
-// defect in this function.
+// and encoding/json sorts map keys. It is invariant across a recording and its
+// replay for a stream containing a create too: a create mints its identifiers from
+// the request's [IDMint], keyed by the request ID a replay reuses (see ids.go and
+// #856), so the replay writes the same state keys and records. A reported mismatch
+// is a real divergence, not a defect in this function.
 //
 // An empty string means "not available", and both call sites treat it as "do not
 // compare" rather than as a hash of empty state — a nil state manager and an

@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The twelve describes that parsed no Filter.N at all before #695.
+// Filter.N on twelve EC2 describes (#695).
 //
-// Each accepted a Filter.N on the wire, read none of it, and answered with every resource
-// in the region — the failure #685 fixed for subnets, twelve times over. These tests are
+// Each must evaluate the Filter.N it accepts rather than answer with every resource in the
+// region — the rule #685 applies to subnets, twelve times over. These tests are
 // written per operation rather than as one table because what each filter *means* is
 // per operation: the same name reads a different member, and the split between the names
 // substrate can evaluate and the documented ones it cannot is different on every page.
@@ -103,9 +103,9 @@ func ec2TagResource(t *testing.T, ts *httptest.Server, id, key, value string) {
 
 // TestEC2_VPCFilters_EvaluatedNamesSelect pins the six filters DescribeVpcs can answer.
 //
-// Before #695 every row here returned both VPCs: a caller asking for "the VPC with CIDR
-// 10.9.0.0/16" was handed its neighbors too, with nothing in the response to say the filter
-// had been dropped.
+// Every row here must return only the wanted VPC: a caller asking for "the VPC with CIDR
+// 10.9.0.0/16" handed its neighbors too would have nothing in the response to say the filter
+// had been dropped (#695).
 func TestEC2_VPCFilters_EvaluatedNamesSelect(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -201,9 +201,9 @@ func TestEC2_DescribeVpcs_StateElementIsState(t *testing.T) {
 
 // TestEC2_CreateVpc_AgreesWithDescribe pins that the two operations render one VPC.
 //
-// They rendered different member subsets before #695 — neither carried an owner or a tagSet,
-// and both misspelled the state element — which is the drift one shared renderer prevents,
-// the reason #685 gave for [ec2SubnetItem].
+// Both carry an owner, a tagSet and the published state element through one shared renderer,
+// which is what keeps two renderers from drifting into different member subsets (#695) — the
+// reason #685 gave for [ec2SubnetItem].
 func TestEC2_CreateVpc_AgreesWithDescribe(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -215,7 +215,7 @@ func TestEC2_CreateVpc_AgreesWithDescribe(t *testing.T) {
 	ec2DescribeXML(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.7.0.0/16"}, &created)
 
 	// Asserted before the comparison, because equality alone is satisfied by both
-	// responses being equally blank — which is what the two renderers did before #695.
+	// responses being equally blank.
 	require.NotEmpty(t, created.Vpc.VpcID)
 	require.Equal(t, "available", created.Vpc.State)
 	require.Equal(t, "10.7.0.0/16", created.Vpc.CIDRBlock)
@@ -283,8 +283,8 @@ func ec2CreateIGW(t *testing.T, ts *httptest.Server) string {
 // TestEC2_InternetGatewayFilters_AllSixEvaluated pins the one operation in this batch whose
 // documented filter set substrate can answer completely.
 //
-// The response carried nothing but internetGatewayId before #695, so both halves of every
-// row here are new: the filter, and the member it selects on being readable at all.
+// Each row pins both halves: the filter, and the member it selects on being readable in the
+// response at all (#695).
 func TestEC2_InternetGatewayFilters_AllSixEvaluated(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -409,7 +409,7 @@ func ec2DescribeKeyPairs(t *testing.T, ts *httptest.Server, params map[string]st
 }
 
 // TestEC2_KeyPairFilters_AllFiveEvaluated pins the five filters this page documents, all of
-// which substrate can answer since #708 gave EC2KeyPair a Tags field.
+// which substrate can answer because EC2KeyPair carries a Tags field (#708).
 func TestEC2_KeyPairFilters_AllFiveEvaluated(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -495,8 +495,7 @@ func ec2DescribeAZs(t *testing.T, ts *httptest.Server, params map[string]string)
 }
 
 // TestEC2_AvailabilityZoneSelectors pins every selector this operation documents and
-// substrate can answer. The handler discarded the request entirely before #695 — its
-// signature took `_ *AWSRequest` — so ZoneName.N, ZoneId.N and Filter.N were all ignored.
+// substrate can answer: ZoneName.N, ZoneId.N and Filter.N (#695).
 func TestEC2_AvailabilityZoneSelectors(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -1022,13 +1021,12 @@ func TestEC2_SpotPriceFilters_FiveOfSix(t *testing.T) {
 	})
 
 	t.Run("ProductDescription.N is read at every index", func(t *testing.T) {
-		// Only ProductDescription.1 was consulted before #695, so a caller asking for
-		// two platforms was answered as if it had asked for the first.
+		// Every index must be read, or a caller asking for two platforms is answered as if it
+		// had asked for the first (#695).
 		//
-		// This case carried `MaxResults: "0"` until #1024, which is where the parameter
-		// stopped being inert: it is now refused as a page that can never advance, and the
-		// case never needed it — the AvailabilityZone and InstanceType selectors already cut
-		// the answer to one item.
+		// No MaxResults is sent: `MaxResults: "0"` is refused as a page that can never advance
+		// (#1024), and the AvailabilityZone and InstanceType selectors already cut the answer to
+		// one item.
 		items := describe(map[string]string{
 			"Action":                 "DescribeSpotPriceHistory",
 			"ProductDescription.1":   "Windows",
@@ -1050,9 +1048,9 @@ func TestEC2_SpotPriceFilters_FiveOfSix(t *testing.T) {
 // The clock is frozen because the create-time subtest below filters on a value read out of
 // an earlier response, and a template's createTime renders at second resolution, so three
 // separate creates against a running clock do not reliably share one — see
-// [newEC2TestServerFrozenClock]. Without this the subtest failed whenever the three
-// requests straddled a second boundary, reading as an EC2 filter regression when the
-// emulator was right and the test's premise was wrong (#793).
+// [newEC2TestServerFrozenClock]. Against a running clock the subtest fails whenever the three
+// requests straddle a second boundary, reading as an EC2 filter regression when the emulator
+// is right and the test's premise is wrong (#793).
 func TestEC2_LaunchTemplateFilters_AllFourEvaluated(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServerFrozenClock(t)
@@ -1105,9 +1103,8 @@ func TestEC2_LaunchTemplateFilters_AllFourEvaluated(t *testing.T) {
 	})
 
 	t.Run("every index of both identity lists is read", func(t *testing.T) {
-		// Only LaunchTemplateId.1 and LaunchTemplateName.1 were consulted before #695,
-		// so a caller naming three templates was answered about one — indistinguishable
-		// from the other two not existing.
+		// Every index must be read, or a caller naming three templates is answered about
+		// one — indistinguishable from the other two not existing (#695).
 		items := describe(map[string]string{
 			"Action":                 "DescribeLaunchTemplates",
 			"LaunchTemplateId.1":     wantedID,

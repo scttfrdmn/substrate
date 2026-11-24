@@ -361,7 +361,7 @@ type S3NotificationConfiguration struct {
 	// EventBridgeEnabled records that the bucket asked for delivery to
 	// EventBridge. Substrate stores and reports the choice so a caller can read
 	// back what it configured, but does not dispatch to EventBridge; see
-	// docs/services.md.
+	// docs/reference/s3.md.
 	EventBridgeEnabled bool `json:"EventBridgeEnabled,omitempty"`
 }
 

@@ -33,8 +33,8 @@ import (
 )
 
 // RDS state-key prefixes the tagging path resolves to. Each names one record shape in the rds
-// namespace; the namespace also holds prefixes no ARN addresses (a parameter group, a container
-// handle, the index keys), which is why the merge path guards on this set rather than assuming
+// namespace; the namespace also holds prefixes no ARN addresses (a parameter group, the index
+// keys), which is why the merge path guards on this set rather than assuming
 // every key in the namespace carries tags.
 const (
 	rdsDBInstanceKeyPrefix    = "dbinstance:"
@@ -104,9 +104,9 @@ func rdsResolveARN(arn string) (ns, key string, err error) {
 // rdsKeyIsTaggable reports whether an rds-namespace state key names a record substrate stores
 // tags on — that is, one of the four shapes [rdsResolveARN] can produce.
 //
-// The namespace also holds a parameter group, a container handle and the plugin's own index
-// keys, none of which any ARN addresses. Naming the reachable set here keeps a caller that
-// invented a key from writing a Tags member onto a record whose own service never reads one.
+// The namespace also holds a parameter group and the plugin's own index keys, none of which any ARN
+// addresses. Naming the reachable set here keeps a caller that invented a key from writing a Tags
+// member onto a record whose own service never reads one.
 func rdsKeyIsTaggable(key string) bool {
 	for _, prefix := range []string{
 		rdsDBInstanceKeyPrefix,

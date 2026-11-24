@@ -559,7 +559,7 @@ func (p *StepFunctionsPlugin) updateStateMachine(ctx *RequestContext, req *AWSRe
 // ARN, an activity or execution ARN, and a version or alias ARN are all still InvalidArn/400.
 // Idempotence licenses an ARN that names nothing, not a string that is not the right kind of ARN.
 //
-// The DELETING status is deliberately not modeled; see [StateMachineState] and docs/services.md.
+// The DELETING status is deliberately not modeled; see [StateMachineState] and docs/reference/states.md.
 func (p *StepFunctionsPlugin) deleteStateMachine(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StateMachineArn string `json:"stateMachineArn"`
@@ -797,7 +797,7 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 	_, _ = p.executeASL(def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
 
 	// Nine of the fourteen members API_StartSyncExecution's Response Syntax publishes were absent
-	// (#1071). Seven are answered here. Two stay unreported, deliberately, and docs/services.md
+	// (#1071). Seven are answered here. Two stay unreported, deliberately, and docs/reference/states.md
 	// says so (#1013):
 	//
 	//   - billingDetails reports the metering of a workload substrate does not run. Its

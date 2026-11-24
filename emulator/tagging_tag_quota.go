@@ -15,9 +15,7 @@ import (
 // merge consulted none of them. So `TagResources` was the one way to put a resource over its own
 // service's quota, after which that service's own tagging operation refused every further add: a
 // resource in a state substrate's own reference says cannot exist, reached through substrate's own API.
-// The shipped record said otherwise twice — `CHANGELOG.md` and `docs/services.md` both claimed Kinesis
-// was the first quota of any service and that the shared merge covered sixteen — and both are corrected
-// with this change. It is 23 namespace arms, and Kinesis was the fourth quota, not the first.
+// The merge covers 23 namespace arms; docs/reference/tagging.md tabulates each quota.
 //
 // Three readings this file makes.
 //

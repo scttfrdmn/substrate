@@ -11,9 +11,10 @@ package emulator
 //
 // The policy is stored on the secret record ([SecretState.ResourcePolicy]) as the text the caller
 // submitted, and GetResourcePolicy answers that text. It does **not** take part in authorization:
-// GetSecretValue and every other operation is decided by the caller's identity policies alone, as it
-// was before. Evaluating resource policies is a cross-service change — S3, KMS, SQS and Secrets
-// Manager all store one — and is tracked as #1636. docs/services.md states the same limit.
+// GetSecretValue and every other operation is decided by the caller's identity policies alone, as
+// it was before. Evaluating resource policies is a cross-service change — S3, KMS, SQS and Secrets
+// Manager all store one — and is tracked as #1636. docs/reference/secretsmanager.md states the same
+// limit.
 //
 // # Validation
 //

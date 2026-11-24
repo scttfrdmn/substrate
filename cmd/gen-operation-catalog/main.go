@@ -17,7 +17,7 @@
 //     one level up, and it would break every out-of-tree Plugin implementation.
 //   - A table-driven dispatch (`map[string]handlerFunc`) makes the catalog *be* the
 //     router and so cannot disagree with it at all. That is the better end state, but it
-//     rewrites the dispatch of 67 plugins in service of a documentation check, against
+//     rewrites the dispatch of every plugin in service of a documentation check, against
 //     #1095's "no behavior change to any operation".
 //
 // Generating the catalog from the router's own AST gets the drift-proofness of the second

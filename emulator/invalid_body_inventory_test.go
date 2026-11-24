@@ -76,21 +76,14 @@ type invalidBodyService struct {
 // Step Functions and Systems Manager tables in invalid_body_code_test.go, the two Lambda operations that
 // need a function to exist first, and the four in TestInvalidBodyBelowAResourceLookup.
 //
-// Two hundred and eighteen cases across forty-two entries, counted rather than carried: the figure this
-// comment shipped with, "one hundred and eighty-nine cases across thirty-six entries", was right about the
-// entries and five high on the cases at the moment it was written. A case removed from here without a
+// The table is the count: no figure is carried here, because a count written from a plan rather than
+// from the table goes stale and cannot notice a case going missing. A case removed from here without a
 // reason is a site that stops being checked, which is the whole point of listing operations rather than
-// samples — and a count written from a plan rather than from the table cannot notice one going missing.
+// samples.
 //
-// #1007's third slice grew this table twice over. Forty-six of the rows are guards that predate that
-// slice, in the five services whose code it corrected: their codes had to change too, or the service would
-// answer two different codes for one caller error, and a changed code that no test reads is a code that
-// can drift back.
-//
-// #1066 grew it by thirty-four more, in six entries, four of them services that had never appeared here.
-// Those four are the reason the growth was needed: their guards were all present and all leaking, so the
-// defect was invisible to a sweep looking for a missing guard and invisible to this file, which had no row
-// to look at.
+// Every guard of a service with a row is listed, not only the sites one change touched (#1007): one
+// service must answer one code for one caller error, and a code no test reads can drift. A service
+// whose guards are all present can still leak decoder text, which only a row here catches (#1066).
 var invalidBodyServices = []invalidBodyService{
 	{
 		name:       "kinesis",
@@ -228,10 +221,9 @@ var invalidBodyServices = []invalidBodyService{
 		},
 	},
 	{
-		// SQS, added by #1007. Thirteen sites discarded the unmarshal error, and four of them —
-		// GetQueueAttributes, DeleteQueue, ListQueueTags and PurgeQueue — carried the empty QueueUrl
-		// straight into a queue lookup, so a JSON syntax error answered QueueDoesNotExist: the emulator
-		// told a caller its queue was missing when the queue was fine and the body was not.
+		// SQS (#1007). Four of the sites — GetQueueAttributes, DeleteQueue, ListQueueTags and
+		// PurgeQueue — look a queue up by QueueUrl, so a JSON syntax error must be refused before the
+		// lookup rather than answered QueueDoesNotExist.
 		// TestSQSInvalidBodyIsRefusedBeforeTheQueueLookup covers those four against a queue that exists,
 		// which this table cannot do: it runs every service against an empty server.
 		name:       "sqs",
@@ -629,19 +621,13 @@ var invalidBodyServices = []invalidBodyService{
 		},
 	},
 
-	// #1066's six entries: the services whose every body-parse guard was checked, and every one of them
-	// leaked encoding/json's own error text.
+	// #1066's six entries: services whose every body-parse guard is checked for encoding/json's own
+	// error text. assertNoDecoderText enforces only the sites a row reaches (#950), and these guards
+	// discard no decode error, so a sweep for discarded errors cannot find a leak in them (#1007).
 	//
-	// Thirty of the thirty-five sites are in four services that had no row in this file at all — transfer,
-	// codedeploy, codepipeline and codebuild — and that absence is the whole explanation for how the
-	// leaks survived #950 and #1007. assertNoDecoderText has been the enforcing helper since #950; a site
-	// it never reaches is a site it never enforced, and #1007's sweep passed these four over because it
-	// was looking for a *discarded* decode error and they discard none. The remaining five are single
-	// handlers in services whose rows covered their siblings but not them.
-	//
-	// Two of the four codes changed. The four literals looked self-consistent inside their own plugins —
-	// the same &AWSError{…} at every site — which is the failure mode invalid_body_refusals.go exists to
-	// make visible, and it only became visible once the codes sat next to each other there.
+	// A code literal can look self-consistent inside its own plugin — the same &AWSError{…} at every
+	// site — and still be wrong, which is the failure mode invalid_body_refusals.go exists to make
+	// visible by putting the codes next to each other.
 	{
 		name:       "transfer",
 		host:       "transfer.us-east-1.amazonaws.com",
@@ -750,13 +736,13 @@ func TestInvalidBodyAnswersThePublishedCode(t *testing.T) {
 	}
 }
 
-// TestLambdaInvalidBodyBelowAFunctionLookup covers Lambda's two parse guards, which used to sit below a
-// function-existence check and since #1006 sit above one.
+// TestLambdaInvalidBodyBelowAFunctionLookup covers Lambda's two parse guards that sit above a
+// function-existence check (#1006).
 //
-// AddPermission called loadFunction and TagResource called findFunctionByARN before either reached
-// json.Unmarshal, so on an empty server both answered ResourceNotFoundException at 404 and the guard was
-// unreachable — and a site that cannot be reached is a site whose code goes unchecked. Both answered
-// ValidationException before #950, a code Lambda publishes on neither page.
+// AddPermission and TagResource both look a function up (loadFunction, findFunctionByARN), and parsing
+// the body first is what makes the guard reachable on an empty server — a site that cannot be reached
+// is a site whose code goes unchecked. The code is the published one rather than ValidationException,
+// which Lambda publishes on neither page (#950).
 //
 // Which answer AWS gives is still unverified: no Lambda page states the precedence, the published Errors
 // sections list both codes without ordering them, and substrate vendors no Smithy model to read it off.
@@ -783,7 +769,7 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 
 	// The ARN comes from the create rather than being composed here, because TagResource dispatches on
 	// the ARN in its own path and a hand-built one that differs by an account or a Region would answer
-	// 404 and look like the guard was never fixed.
+	// 404 and look like the guard sits below the lookup.
 	arn := lambdaFunctionARNFromCreate(t, ts, host, "guarded-fn")
 
 	for _, tc := range []invalidBodyCase{
@@ -812,11 +798,12 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 		assertNoDecoderText(t, "AddPermission/memberComplaint", message)
 	})
 
-	// #1006's own assertion: the same two bodies, naming a function that does not exist. Before the
-	// reorder each answered ResourceNotFoundException/404, so a caller debugging a malformed request was
-	// told its function was missing. The absent ARN is derived from the created one by substituting the
-	// name, so account and Region cannot differ — a hand-built ARN that dispatched nowhere would answer
-	// 404 for the wrong reason and pass this test while proving nothing.
+	// #1006's own assertion: the same two bodies, naming a function that does not exist, answer the
+	// parse guard's 400 rather than ResourceNotFoundException/404, so a caller debugging a
+	// malformed request is not told its function is missing. The absent ARN is derived from the
+	// created one by substituting the name, so account and Region cannot differ — a hand-built ARN
+	// that dispatched nowhere would answer 404 for the wrong reason and pass this test while
+	// proving nothing.
 	absentARN := strings.TrimSuffix(arn, "guarded-fn") + "absent-fn"
 	require.NotEqual(t, arn, absentARN, "the absent ARN differs from the created one only in its name")
 
@@ -861,11 +848,10 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 // unmarshal error was observable as the *wrong code*, not merely as a missing one (#1007).
 //
 // GetQueueAttributes, DeleteQueue, ListQueueTags and PurgeQueue read the queue URL through
-// sqsQueueURLFromRequest and pass it straight to loadQueue. When the decode was discarded, a body that
-// would not parse yielded an empty URL and the lookup answered QueueDoesNotExist — so the emulator told
-// a caller its queue was missing when the queue was fine and the body was not, which is the most
-// expensive kind of wrong answer: it sends the reader to look at infrastructure rather than at the
-// request.
+// sqsQueueURLFromRequest and pass it straight to loadQueue. A body that does not parse must be refused
+// before that lookup: answering QueueDoesNotExist would tell a caller its queue was missing when the
+// queue was fine and the body was not, which is the most expensive kind of wrong answer: it sends the
+// reader to look at infrastructure rather than at the request.
 //
 // The queue is created first, which the shared table cannot do. Without it a passing assertion proves
 // only that the code is not QueueDoesNotExist; with it, the refusal is known to have come from the guard
@@ -922,10 +908,10 @@ type invalidBodyMethodCase struct {
 // four Lambda updates and one EFS update are routed on PUT, and ListEmailIdentities is routed on GET with
 // its filters in the body.
 //
-// The Lambda four are reachable without an existing function only since #1007 moved their parse above the
-// lookup. Leaving the lookup first would have answered 404 for an unparseable body naming an absent
-// function, where AddPermission and TagResource — moved by #1006 — answer 400 for the same request: one
-// plugin, two codes, for one class of caller error, which is what #950 removed.
+// The Lambda four are reachable without an existing function because their parse runs before the lookup
+// (#1007). A lookup first would answer 404 for an unparseable body naming an absent function, where
+// AddPermission and TagResource answer 400 for the same request (#1006): one plugin, two codes, for one
+// class of caller error, which #950 rules out.
 var invalidBodyMethodCases = []invalidBodyMethodCase{
 	{
 		name: "UpdateFunctionCode", host: "lambda.us-east-1.amazonaws.com",
@@ -1192,19 +1178,19 @@ type memberService struct {
 // be made once. Adding a twelfth service here is the cheapest way to state that a plugin answers one
 // code for one class of caller error.
 //
-// These are the second half of the inventory in docs/services.md — the "+ N member" column. They matter
-// as much as the parse guards and are easier to miss: a parse guard is one literal per handler, while
-// these are scattered complaints about a missing member or a malformed identifier, and #950 corrected
-// them to the same per-service code precisely so that one plugin cannot answer two codes for one class
-// of caller error.
+// These are the second half of the inventory in docs/reference/concepts/errors.md — the "+ N
+// member" column. They matter as much as the parse guards and are easier to miss: a parse guard is
+// one literal per handler, while these are scattered complaints about a missing member or a
+// malformed identifier, and #950 corrected them to the same per-service code precisely so that one
+// plugin cannot answer two codes for one class of caller error.
 //
 // The body is "{}" wherever a member is being checked. That is deliberate and is the whole reason these
 // cases cannot live in the parse-guard table: "{}" *parses*, so it travels past the parse guard and
 // reaches the member check underneath, where invalidBodyPayload would have stopped one line earlier.
 // Where the identifier comes from the path instead, the body is irrelevant and the path is what carries
 // the case.
-// wafv2ScopedBody supplies the Scope that #1062 made required, so a case can reach the identifier
-// check underneath it. REGIONAL is the value substrate used to invent when the member was absent.
+// wafv2ScopedBody supplies the required Scope (#1062), so a case can reach the identifier
+// check underneath it.
 const wafv2ScopedBody = `{"Scope":"REGIONAL"}`
 
 var memberComplaintServices = []memberService{
@@ -1297,7 +1283,7 @@ var memberComplaintServices = []memberService{
 		code: "BadRequestException",
 		cases: []memberCase{
 			{name: "createEmailIdentity", path: "/v2/email/identities", body: "{}", wantMessage: "EmailIdentity is required"},
-			// Reachable since #1009 dropped parseSESv2Operation's trailing-slash trim.
+			// Reachable because parseSESv2Operation does not trim a trailing slash (#1009).
 			{name: "getEmailIdentity", path: "/v2/email/identities/", method: http.MethodGet, body: "{}", wantMessage: "identity name is required"},
 			{name: "deleteEmailIdentity", path: "/v2/email/identities/", method: http.MethodDelete, body: "{}", wantMessage: "identity name is required"},
 		},
@@ -1308,8 +1294,8 @@ var memberComplaintServices = []memberService{
 		code: "BadRequestException",
 		cases: []memberCase{
 			{name: "createClusterV2", path: "/api/v2/clusters", body: "{}", wantMessage: "clusterName is required"},
-			// Every empty-ARN guard is reachable since #1009 dropped parseKafkaOperation's
-			// trailing-slash trim; before it, only the two with a literal segment after the ARN were.
+			// Every empty-ARN guard is reachable because parseKafkaOperation does not trim a
+			// trailing slash (#1009).
 			{name: "describeCluster", path: "/v1/clusters/", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
 			{name: "deleteCluster", path: "/v1/clusters/", method: http.MethodDelete, body: "{}", wantMessage: "cluster ARN is required"},
 			{name: "describeClusterV2", path: "/api/v2/clusters/", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
@@ -1371,8 +1357,8 @@ var memberComplaintServices = []memberService{
 	{
 		// #1063's one FSx site, and the issue put it on the wrong operation: it is deleteFileSystem,
 		// where API_DeleteFileSystem marks FileSystemId Required: Yes, not describeFileSystems,
-		// where FileSystemIds is Required: No and an absent list means "describe them all". So the
-		// guard is right and only the code was wrong — InvalidRequest is an Amazon S3 string.
+		// where FileSystemIds is Required: No and an absent list means "describe them all". The code
+		// is FSx's BadRequest, not InvalidRequest, which is an Amazon S3 string.
 		name: "fsx",
 		host: "fsx.us-east-1.amazonaws.com",
 		code: "BadRequest",
@@ -1404,11 +1390,10 @@ var memberComplaintServices = []memberService{
 			{name: "associateWebACL", target: "AWSWAF_20190729.AssociateWebACL", body: "{}", wantMessage: "ResourceArn is a required parameter"},
 			{name: "disassociateWebACL", target: "AWSWAF_20190729.DisassociateWebACL", body: "{}", wantMessage: "ResourceArn is a required parameter"},
 			{name: "getWebACLForResource", target: "AWSWAF_20190729.GetWebACLForResource", body: "{}", wantMessage: "ResourceArn is a required parameter"},
-			// #1062's eight Scope sites, each twice. Scope is checked before Id, so "{}" now names
-			// Scope at five operations that used to name Id — and the Id rows would have silently
-			// stopped testing the Id check had they been retargeted rather than paired. The second
-			// row of each pair supplies a Scope so the request reaches the Id check underneath,
-			// which is what keeps #1063's six Id/Name refusals pinned.
+			// #1062's eight Scope sites, each twice. Scope is checked before Id, so "{}" names
+			// Scope at five operations that also check Id. The second row of each pair supplies a
+			// Scope so the request reaches the Id check underneath, which is what keeps #1063's six
+			// Id/Name refusals pinned.
 			//
 			// loadIPSetByID keeps its check, because API_GetIPSet, API_UpdateIPSet and
 			// API_DeleteIPSet all mark Id Required: Yes and listIPSets reads the index.
@@ -1423,7 +1408,7 @@ var memberComplaintServices = []memberService{
 			{name: "deleteIPSet", target: "AWSWAF_20190729.DeleteIPSet", body: "{}", wantMessage: "Scope is a required parameter"},
 			{name: "deleteIPSet/scoped", target: "AWSWAF_20190729.DeleteIPSet", body: wafv2ScopedBody, wantMessage: "Id is a required parameter"},
 			// The two list operations have no second identifier, so a scoped body succeeds and
-			// there is nothing underneath to pair with. Before #1062 both answered 200.
+			// there is nothing underneath to pair with (#1062).
 			{name: "listWebACLs", target: "AWSWAF_20190729.ListWebACLs", body: "{}", wantMessage: "Scope is a required parameter"},
 			{name: "listIPSets", target: "AWSWAF_20190729.ListIPSets", body: "{}", wantMessage: "Scope is a required parameter"},
 			// CreateIPSet answers the same code from wafv2ValidateCreateIPSet, which #755 wrote and
@@ -1486,8 +1471,8 @@ var memberComplaintServices = []memberService{
 	// RoleRequiredException, DeploymentIdRequiredException — and every page that takes the member lists
 	// its code. So the one decision this table forces is made per member, the way dynamodb-streams makes
 	// it per API: one code for one class of caller error, the class being "this member is absent".
-	// Before #1198 all four answered InvalidInputException, which is on only two of these pages and not
-	// on CodeDeploy's Common Errors list.
+	// InvalidInputException is on only two of these pages and not on CodeDeploy's Common Errors list,
+	// so it is not the code for an absent member (#1198).
 	{
 		name: "codedeploy-applicationName",
 		host: "codedeploy.us-east-1.amazonaws.com",
@@ -1570,7 +1555,7 @@ var memberComplaintServices = []memberService{
 	},
 	{
 		// #1197's Transfer Family site. API_CreateUser marks Role, ServerId and UserName Required: Yes,
-		// and Role used to go unchecked, so a user with no access role was created. The code is the
+		// so a user with no access role is refused rather than created. The code is the
 		// one every Transfer page publishes for a malformed request — the same code the plugin's
 		// parse guards answer — and each required member is checked before the server is looked up,
 		// which is why the createUser/role case can name a server that does not exist.
@@ -1606,14 +1591,13 @@ var memberComplaintServices = []memberService{
 // TestMemberComplaintAnswersThePublishedCode asserts the non-parse-guard half of the inventory answers
 // the same per-service code, with the message that tells the two apart.
 //
-// **The five guards this test used to declare unreachable are now here.** `parseKafkaOperation` and
-// `parseSESv2Operation` both opened with `strings.TrimRight(path, "/")`, so a request naming an empty
-// path parameter collapsed onto the collection route — `GET /v1/clusters/` dispatched ListClusters
-// rather than DescribeCluster with an empty ARN — which made MSK's describeCluster, deleteCluster and
-// describeClusterV2 checks and SES v2's getEmailIdentity and deleteEmailIdentity checks dead code, with
-// codes that no request could verify. #1009 removed both trims, so the five rows above are the proof
-// that each answers its service's published code, and MSK's getBootstrapBrokers and listNodes — which
-// were always reachable, because a literal segment follows the ARN — sit beside them unchanged.
+// `parseKafkaOperation` and `parseSESv2Operation` do not trim a trailing `/` (#1009), so a request
+// naming an empty path parameter reaches its operation rather than collapsing onto the collection route
+// — `GET /v1/clusters/` dispatches DescribeCluster with an empty ARN, not ListClusters. That is what
+// makes MSK's describeCluster, deleteCluster and describeClusterV2 checks and SES v2's getEmailIdentity
+// and deleteEmailIdentity checks reachable, and the rows above prove each answers its service's
+// published code. MSK's getBootstrapBrokers and listNodes are reachable either way, because a literal
+// segment follows the ARN.
 func TestMemberComplaintAnswersThePublishedCode(t *testing.T) {
 	for _, svc := range memberComplaintServices {
 		t.Run(svc.name, func(t *testing.T) {
@@ -1817,11 +1801,12 @@ func TestOpenSearchInvalidBodyIsNotAnAWSError(t *testing.T) {
 // TestInvalidBodyBelowAResourceLookup covers the four sites no table above can reach — #1007's three
 // and #1066's one.
 //
-// Each sits below a lookup of the resource its path names, so against an empty server the lookup answers
-// first — NotFoundException for API Gateway v2, the loader's own error for AppSync and Backup — and the
-// parse guard never runs. That is the lookup-first convention recorded under "Whether a body is parsed
-// before the resource is looked up" in docs/services.md, not a defect in this slice; #1007's scope is that
-// a discarded decode error is checked, which these three now satisfy.
+// Each sits below a lookup of the resource its path names, so against an empty server the lookup
+// answers first — NotFoundException for API Gateway v2, the loader's own error for AppSync and
+// Backup — and the parse guard never runs. That is the lookup-first convention recorded under
+// "Whether a body is parsed before the resource is looked up" in docs/reference/concepts/errors.md,
+// not a defect in this slice; #1007's scope is that a discarded decode error is checked, which
+// these three now satisfy.
 //
 // It does mean a table of refusals against a bare server cannot see them, and a site no test reaches is a
 // site whose code has stopped being checked. So the prerequisite is created first and the refusal asserted
@@ -1952,11 +1937,12 @@ func jsonMemberAnyDepth(t *testing.T, raw, key string) string {
 // TestInvalidBodyTailIsFullyCovered asserts the sixty sites #1007's third slice changed are all accounted
 // for: covered by a table, or listed as uncovered with a reason.
 //
-// This is arithmetic rather than behavior, and it is here because the tables cannot state it themselves.
-// A site quietly dropped from a table still leaves every other assertion green, so the count is the only
-// thing that catches it — the same reason the per-service counts above are pinned to docs/services.md.
+// This is arithmetic rather than behavior, and it is here because the tables cannot state it
+// themselves. A site quietly dropped from a table still leaves every other assertion green, so the
+// count is the only thing that catches it — the same reason the per-service counts above are pinned
+// to docs/reference/concepts/errors.md.
 func TestInvalidBodyTailIsFullyCovered(t *testing.T) {
-	// The slice's own numbers, from the inventory in docs/services.md.
+	// The slice's own numbers, from the inventory in docs/reference/concepts/errors.md.
 	const (
 		tailSites       = 60
 		inServiceTables = 49 // POST-routed, refused with an AWSError
@@ -1981,7 +1967,7 @@ func TestInvalidBodyTailIsFullyCovered(t *testing.T) {
 // concrete: sso, backup ×2, redshift-data and appsync each got a constructor from that sweep and each kept
 // a leaking guard beside the site it was written for.
 func TestInvalidBodyDecoderTextLeaksAreFullyCovered(t *testing.T) {
-	// #1066's own numbers, from the per-file count in docs/services.md.
+	// #1066's own numbers, from the per-file count in docs/reference/concepts/errors.md.
 	const (
 		leakSites = 35
 		// The four services that had no row in this file at all, one leaking guard per handler:

@@ -484,12 +484,11 @@ func (ts *TestServer) CredentialsFor(accountID string) (CredentialEntry, bool) {
 // ResetState wipes all server state. Call this between test cases that share
 // a single [TestServer] instance to avoid state leaking across cases.
 //
-// That covers what a plugin holds on itself as well as the [StateManager]'s
-// contents: minted-identifier counters (#886), S3's object payloads (#902), and the
-// Lambda event-source-mapping pollers, warm Lambda containers and RDS containers a
-// previous case started (#903). A server built by [StartTestServer] has nothing left
-// over afterwards; the only thing a reset does not clear is a filesystem an
-// in-process embedder injected into the S3 plugin, which substrate does not own.
+// That covers what a plugin holds on itself as well as the [StateManager]'s contents:
+// minted-identifier counters (#886), S3's object payloads (#902), and the set of Lambda
+// event-source mappings a previous case enabled (#903). A server built by [StartTestServer] has
+// nothing left over afterwards; the only thing a reset does not clear is a filesystem an in-process
+// embedder injected into the S3 plugin, which substrate does not own.
 //
 // It also rewinds the request IDs, and returns a clock pinned by [WithDeterministicRun] to
 // its epoch, so a case answers what it would on a fresh server (#1598).

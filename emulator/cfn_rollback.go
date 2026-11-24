@@ -145,14 +145,12 @@ func cfnFailedResources(resources []DeployedResource) []string {
 // cfnCreateExistsCodes is the set of error codes that mean "a resource of this name
 // already exists", as the plugins reachable from Deploy actually spell it.
 //
-// It exists because [StackDeployer.UpdateStack] re-creates a changed resource whose type
-// has no update path in substrate, and its plugin refuses the duplicate. Until #1427 an
-// update re-created *every* resource, so this was what kept an unchanged template from
-// rolling back; an unchanged resource is now kept without a call, and the set matters
-// only for a resource whose declaration is unchanged while its inputs are not, or one a
-// rollback re-applies (see [cfnResourcePlan.clearsRefusal]). Real CloudFormation issues
-// no create call in either case, so there is no real refusal being modeled here — the
-// refusal is an artifact of substrate's re-create.
+// It exists because [StackDeployer.UpdateStack] re-creates a changed resource whose type has no
+// update path in substrate, and its plugin refuses the duplicate. An unchanged resource is kept
+// without a call (#1427), so the set matters only for a resource whose declaration is unchanged
+// while its inputs are not, or one a rollback re-applies (see [cfnResourcePlan.clearsRefusal]).
+// Real CloudFormation issues no create call in either case, so there is no real refusal being
+// modeled here — the refusal is an artifact of substrate's re-create.
 //
 // Every entry was harvested by deploying a template twice against the default
 // registry and recording the code that came back, the same way
@@ -572,8 +570,8 @@ func (d *StackDeployer) setStackOutcome(
 }
 
 // setStackStatus overwrites a persisted stack's status and reason, leaving the rest
-// of the record as the deploy wrote it. A stack that cannot be read is logged and skipped, as
-// before #1192; a write that fails is returned.
+// of the record as the deploy wrote it. A stack that cannot be read is logged and skipped; a
+// write that fails is returned (#1192).
 func (d *StackDeployer) setStackStatus(ctx context.Context, stackName, status, reason string) error {
 	if d.state == nil {
 		return nil
@@ -582,7 +580,7 @@ func (d *StackDeployer) setStackStatus(ctx context.Context, stackName, status, r
 	if err != nil || stack == nil {
 		d.logger.Warn("cfn: cannot set stack status; stack not readable",
 			"stack", stackName, "status", status)
-		return nil //nolint:nilerr // an unreadable stack is logged and skipped, as it was before #1192.
+		return nil //nolint:nilerr // an unreadable stack is logged and skipped (#1192).
 	}
 	stack.Status = status
 	stack.StatusReason = reason

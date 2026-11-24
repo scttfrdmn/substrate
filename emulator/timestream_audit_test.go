@@ -286,7 +286,7 @@ func TestTimestreamAudit_ConflictAndNotFoundAnswer400(t *testing.T) {
 	}
 }
 
-// The two deletes answer `{}`; see docs/services.md for why (#1206).
+// The two deletes answer `{}`; see docs/reference/timestream.md for why (#1206).
 func TestTimestreamAudit_DeletesAnswerAnEmptyObject(t *testing.T) {
 	t.Parallel()
 	ts := newTimestreamQueryServer(t, emulator.NewMemoryStateManager())

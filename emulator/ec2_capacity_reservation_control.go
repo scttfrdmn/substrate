@@ -51,7 +51,7 @@ const ec2CRCtrlNamespace = "ec2-cr-ctrl"
 // Valid Values line with no prose description anywhere on the page. Substrate models
 // neither future-dated reservations nor Capacity Blocks, so seeding a state that only those
 // reach would publish an observation nothing else in the emulator is consistent with. The
-// eight are recorded as unmodelled in docs/services.md rather than silently absent.
+// eight are recorded as unmodelled in docs/reference/ec2.md rather than silently absent.
 var ec2CRSeedableStates = []string{"active", "pending", "failed", "expired", "cancelled"}
 
 // ec2CRSeedableErrors are the failure codes a seed may make CreateCapacityReservation

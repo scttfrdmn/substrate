@@ -413,7 +413,7 @@ func TestListPolicies_RefusesBadInput(t *testing.T) {
 // entirely-unused policy falls on, and in a fresh substrate every bundled policy is unused.
 // Guessing that unattached means "not a permissions policy" would drop all 52 from a
 // filtered listing — the same failure #497 reports, under a different parameter. So a valid
-// value is accepted and narrows nothing, and docs/services.md says so.
+// value is accepted and narrows nothing, and docs/reference/iam.md says so.
 func TestListPolicies_AcceptsAValidPolicyUsageFilter(t *testing.T) {
 	t.Parallel()
 	srv := newIAMTestServer(t)

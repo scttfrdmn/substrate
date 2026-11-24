@@ -3358,15 +3358,13 @@ func TestCFN_ELBListenerAndRule(t *testing.T) {
 //
 // Both name the zone with `Ref`, which is what AWS documents as returning a hosted zone's ID —
 // AWS::Route53::HostedZone documents only `Id` and `NameServers` as Fn::GetAtt attributes, and no
-// `Arn` at all. This asked for `!GetAtt MyZone.Arn` until #827, which resolved to the zone *name*
-// because the resolver answered any unrecognized attribute with the physical ID; the deploy passed
-// regardless, since nothing here reads the HostedZoneId back.
+// `Arn` at all (#827).
 //
-// #1123 made it assert each resource rather than only `require.NoError` and `assert.Len(…, 3)`, which a
-// resource that failed does not disturb. Until #1256 the record set was refused: `Ref` on the hosted
-// zone answered CreateHostedZone's `/hostedzone/Z…` path form where the CloudFormation page publishes
-// the bare ID, so the record set's own path carried the segment twice, and the group discarded its
-// child's identical refusal. Both now deploy cleanly, which is what AWS's own examples describe.
+// It asserts each resource rather than only `require.NoError` and `assert.Len(…, 3)`, which a
+// resource that failed does not disturb (#1123). `Ref` on the hosted zone answers the bare ID the
+// CloudFormation page publishes, not CreateHostedZone's `/hostedzone/Z…` path form, so the record
+// set's own path carries the segment once and both deploy cleanly, as AWS's own examples describe
+// (#1256).
 func TestCFN_Route53RecordSetGroup(t *testing.T) {
 	d := newV016FullDeployer(t)
 	tmpl := `{

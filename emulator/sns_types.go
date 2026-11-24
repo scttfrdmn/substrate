@@ -72,7 +72,7 @@ type SNSSubscription struct {
 	// Filtering is the subscription's runtime behavior rather than an API observation, which is the
 	// boundary CLAUDE.md draws and what #1125 deliberately stopped short of — storing recorded intent
 	// is in scope, acting on it is not. FilterPolicy is reachable only by a test writing the record
-	// directly, and the divergence is recorded in docs/services.md.
+	// directly, and the divergence is recorded in docs/reference/sns.md.
 	Attributes map[string]string `json:"Attributes,omitempty"`
 }
 

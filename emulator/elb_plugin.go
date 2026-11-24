@@ -243,9 +243,9 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 		}
 		matched = append(matched, lbToItem(lb))
 	}
-	// API_DescribeLoadBalancers publishes LoadBalancerNotFound at 400. Until #1413 a
-	// LoadBalancerArns or Names entry naming nothing matched nothing and the call answered
-	// 200 with a shorter or empty list, as the other describes did before #1370 and #1375.
+	// API_DescribeLoadBalancers publishes LoadBalancerNotFound at 400, so a LoadBalancerArns
+	// or Names entry naming nothing refuses the call rather than shortening the list (#1413),
+	// as the other describes do (#1370, #1375).
 	if err := elbRequireEveryARN(arns, held, elbKindLoadBalancer); err != nil {
 		return nil, err
 	}
@@ -452,14 +452,12 @@ func (p *ELBPlugin) deleteTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 
 // modifyTargetGroup answers `ModifyTargetGroup`, reporting the target group it modified.
 //
-// It reported an empty `TargetGroups` list on every call until #756: the record was found, modified
-// and written back, and then discarded. `API_ModifyTargetGroup` publishes `TargetGroups.member.N`,
-// "Information about the modified target group", and its sample response carries a full member, so a
-// consumer reading the modified group off the response got nothing.
+// `API_ModifyTargetGroup` publishes `TargetGroups.member.N`, "Information about the modified target
+// group", and its sample response carries a full member, so the group is reported as written back,
+// for a consumer reading the modified group off the response (#756).
 //
-// An ARN naming no target group is refused `TargetGroupNotFound`, which the page publishes. Until
-// #1313 it fell through to the empty list, so a modify of a deleted or mistyped group reported
-// success.
+// An ARN naming no target group is refused `TargetGroupNotFound`, which the page publishes, so a
+// modify of a deleted or mistyped group does not report success (#1313).
 func (p *ELBPlugin) modifyTargetGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	arn := req.Params["TargetGroupArn"]
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
@@ -809,7 +807,7 @@ func (p *ELBPlugin) modifyListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return queryOKResponse(reqCtx, "ModifyListener", elbXMLNS,
 			listenerResult{Listeners: []elbListenerItem{listenerToItem(l)}})
 	}
-	// API_ModifyListener publishes ListenerNotFound; until #1313 this fell through to an empty list.
+	// API_ModifyListener publishes ListenerNotFound (#1313).
 	return nil, elbPublishedNotFound(elbKindListener)
 }
 
@@ -860,7 +858,8 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	arn, ok := elbRuleARN(listenerARN, suffix)
 	if !ok {
 		// As in createListener: a rule's ARN is built from its listener's, so an unparseable
-		// ListenerArn — including one of the pre-#774 nested shape — cannot produce one.
+		// ListenerArn — including one of the nested shape older builds minted (#774) — cannot
+		// produce one.
 		return nil, &AWSError{
 			Code:       "ValidationError",
 			Message:    fmt.Sprintf("'%s' is not a valid listener ARN", listenerARN),
@@ -978,16 +977,15 @@ func (p *ELBPlugin) deleteRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 
 // setRulePriorities answers `SetRulePriorities`, reporting the rules it repriced.
 //
-// It reported an empty `Rules` list on every call until #756, the same defect
-// [ELBPlugin.modifyTargetGroup] carried: each rule was found, repriced and written back, and then
-// discarded. `API_SetRulePriorities` publishes `Rules.member.N`, "Information about the rules", and
-// its sample response carries the repriced rule with its new `Priority`.
+// `API_SetRulePriorities` publishes `Rules.member.N`, "Information about the rules", and its sample
+// response carries the repriced rule with its new `Priority`, so each rule is reported as written
+// back, as [ELBPlugin.modifyTargetGroup] reports its group (#756).
 //
 // The rules are reported in request order rather than priority order, which is the order AWS's own
 // sample shows for the one-member case and the only order this operation's input defines.
 //
-// A rule ARN naming nothing is refused with the published `RuleNotFound` (#1313); until then it was
-// skipped and the call reported success. Every pair is resolved before any is written, so a refused
+// A rule ARN naming nothing is refused with the published `RuleNotFound` (#1313) rather than
+// skipped. Every pair is resolved before any is written, so a refused
 // call reprices nothing rather than the rules that happened to precede the missing one.
 func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
@@ -1070,8 +1068,8 @@ func elbPublishedNotFound(kind string) *AWSError {
 // not hold, with that kind's published not-found code.
 //
 // DescribeTargetGroups, DescribeListeners and DescribeRules each publish TargetGroupNotFound,
-// ListenerNotFound and RuleNotFound respectively, and until #1370 an ARN naming nothing silently
-// matched nothing, so the call answered 200 with a shorter or empty list. None of the three pages
+// ListenerNotFound and RuleNotFound respectively, so an ARN naming nothing refuses the call rather
+// than shortening the list (#1370). None of the three pages
 // says whether one missing ARN among several refuses the whole call; the published sentence ("The
 // specified target group does not exist.") is about the request, so the whole call is refused.
 // held is every ARN of the kind in the caller's scope, regardless of the describe's other filters.
@@ -1088,8 +1086,8 @@ func elbRequireEveryARN(arns []string, held map[string]bool, kind string) error 
 // not hold, with that kind's published not-found code (#1375).
 //
 // DescribeTargetGroups and DescribeListeners publish LoadBalancerNotFound, and DescribeRules
-// ListenerNotFound; until #1375 a LoadBalancerArn or ListenerArn naming nothing matched nothing and
-// the call answered 200 with an empty list. An empty arn is no filter and passes. prefix is the
+// ListenerNotFound, so a LoadBalancerArn or ListenerArn naming nothing refuses the call rather than
+// answering an empty list. An empty arn is no filter and passes. prefix is the
 // state-key prefix records of kind are stored under; each record's ARN is read from its own
 // "LoadBalancerArn" or "ListenerArn" member, the json names ELBLoadBalancer and ELBListener declare.
 // A store read error is returned, never read as "not held".
@@ -1130,15 +1128,14 @@ func (p *ELBPlugin) elbRequireHeld(scope, prefix, arn, kind string) error {
 // elbXMLNS is the XML namespace ELBv2 (2015-12-01) responses carry.
 //
 // It is spelled `http://`, which is what AWS publishes in the `xmlns` attribute of every sample
-// response on every ELBv2 page — e.g. all four examples on `API_CreateLoadBalancer`. Substrate
-// spelled it `https://` until #1147, so every one of the ~30 routed ELBv2 operations answered a
-// namespace one character from the published one. Nothing dereferences a namespace URI, but an
-// XSD step, a prefix-bound XPath or a golden-file comparison against a recorded AWS response
-// compares it as a string and sees a mismatch on every response.
+// response on every ELBv2 page — e.g. all four examples on `API_CreateLoadBalancer` (#1147).
+// Nothing dereferences a namespace URI, but an XSD step, a prefix-bound XPath or a golden-file
+// comparison against a recorded AWS response compares it as a string, so one character off is a
+// mismatch on every response.
 //
 // Sibling constants that spell a document namespace `https://` are not all wrong: IAM, SNS, STS
-// and Route 53 publish `https://` in their own samples. RDS and ElastiCache publish `http://` and
-// substrate spells both `https://` — see #1238.
+// and Route 53 publish `https://` in their own samples. RDS and ElastiCache publish `http://`, and
+// substrate spells both that way (#1238).
 const elbXMLNS = "http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/"
 
 func (p *ELBPlugin) appendToList(scope, listName, id string) error {

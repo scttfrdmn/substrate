@@ -720,7 +720,7 @@ type elasticacheTagListMessage struct {
 // API_ListTagsForResource describes TagList.Tag.N only as "A list of tags as key-value pairs" and
 // publishes no cursor, so unlike Kinesis's ExclusiveStartTagKey there is nothing here implying an
 // order. Lexicographic by key is substrate's reading, resting on the replay promise — see
-// docs/services.md.
+// docs/reference/elasticache.md.
 func elasticacheTagListResult(tags map[string]string) elasticacheTagListMessage {
 	xmlTags := make([]elasticacheTagListXML, 0, len(tags))
 	for k, v := range tags {

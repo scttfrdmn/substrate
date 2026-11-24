@@ -30,7 +30,7 @@ package emulator
 // What *is* published supports refusing: `resourceArn` carries Pattern `[\w+=/:,.@-]*`, a character
 // class that contains no `*`, so the suffixed form violates the request model before any resource
 // is resolved. So the refusal is derivable from the model and only its code and message text come
-// from observation, which is the split docs/services.md labels and a release note reports under
+// from observation, which is the split docs/reference/logs.md labels and a release note reports under
 // Provenance.
 //
 // # The taggable set, and the type substrate cannot hold

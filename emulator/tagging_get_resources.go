@@ -24,7 +24,7 @@ import (
 // response to say the request served was not the request sent.
 //
 // **Substrate's reading where the page does not settle a question**, each recorded here and in
-// `docs/services.md` rather than left to be inferred from the code:
+// `docs/reference/tagging.md` rather than left to be inferred from the code:
 //
 //   - *A previously-tagged resource named in `ResourceARNList` is returned*, with the empty tag
 //     set #938 established. The page scopes that form to the no-`TagFilters` case and says nothing
@@ -168,8 +168,8 @@ type taggingComplianceDetails struct {
 // is meant: substrate does not report a member it does not model.
 //
 // It follows that `ExcludeCompliantResources` excludes nothing, since no resource is evaluated as
-// compliant. That is stated in `docs/services.md` rather than left for a caller to discover from an
-// unexpectedly full response.
+// compliant. That is stated in `docs/reference/tagging.md` rather than left for a caller to
+// discover from an unexpectedly full response.
 func taggingNoEffectiveTagPolicy() *taggingComplianceDetails {
 	return &taggingComplianceDetails{
 		KeysWithNoncompliantValues: []string{},

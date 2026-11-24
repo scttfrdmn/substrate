@@ -198,8 +198,8 @@ type PolicyDocument struct {
 // conventions say "If the element takes an array (marked with [ and ]) but only one value is
 // included, the brackets are optional" (IAM User Guide, "Grammar of the IAM JSON policy language").
 // AWS's own sample responses use the bare form — `GetGroupPolicy`'s shows
-// `"Statement":{"Effect":"Allow",...}`. Until #1477 substrate decoded only the array, so every policy
-// writer answered `MalformedPolicyDocument` for a document IAM accepts.
+// `"Statement":{"Effect":"Allow",...}`, so decoding only the array would have every policy writer
+// answer `MalformedPolicyDocument` for a document IAM accepts (#1477).
 //
 // Both forms decode to the same list, so evaluation, the STS trust gate and
 // [policyDocumentsEqual] see a one-element list for the bare object and cannot tell the forms apart.
@@ -330,10 +330,9 @@ type StringOrSlice []string
 //
 // Numbers and Booleans are read as their text. The IAM grammar says so of every value
 // in a policy — "Values are enclosed in quotation marks. Quotation marks are optional
-// for numeric and Boolean values" — and a document substrate refused for writing them
-// unquoted is one real IAM accepts: `{"Bool": {"aws:SecureTransport": false}}` and
-// `{"NumericLessThanEquals": {"s3:max-keys": 10}}` are both legal, and both answered
-// MalformedPolicyDocument here before #714.
+// for numeric and Boolean values" — so `{"Bool": {"aws:SecureTransport": false}}` and
+// `{"NumericLessThanEquals": {"s3:max-keys": 10}}` are both legal and both decode here,
+// rather than answering MalformedPolicyDocument for a document real IAM accepts (#714).
 //
 // A number keeps the spelling the document used, through [json.Number], rather than
 // being routed through a float: 10 must not become "1e+01" on its way to a comparison,
@@ -418,12 +417,8 @@ func iamPolicyARN(accountID, path, name string) string {
 
 // iamInstanceProfileARN returns the ARN for an IAM instance profile.
 //
-// It joins the other four late, because until #770 the only place an instance-profile ARN
-// was built was CreateInstanceProfile's own response, which interpolated the request's path
-// directly and so skipped [normalisePath]. That was nearly harmless there — the handler
-// defaults an absent Path to "/", and substrate does not validate the parameter, so only a
-// path AWS would itself have rejected reached the interpolation. It is not harmless in an
-// authorization resolver, which reads paths back out of records written by earlier versions:
+// Like the other four, it passes the path through [normalisePath] (#770). That matters most in
+// an authorization resolver, which reads paths back out of records written by earlier versions:
 // one missing slash is the difference between matching a statement scoped to
 // `instance-profile/*` and matching nothing.
 func iamInstanceProfileARN(accountID, path, name string) string {

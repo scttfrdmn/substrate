@@ -400,7 +400,7 @@ func ec2TagStateKey(region, account, resource string) (string, error) {
 	if id, ok := strings.CutPrefix(resource, "elastic-ip/"); ok && id != "" {
 		return "eip:" + account + "/" + region + "/" + id, nil
 	}
-	// The three types GetResources scans since #1523, each under the ARN the Service
+	// The three types GetResources scans (#1523), each under the ARN the Service
 	// Authorization Reference publishes for it.
 	for _, t := range taggingEC2ScannedTypes {
 		if id, ok := strings.CutPrefix(resource, t.arnType+"/"); ok && id != "" && !strings.Contains(id, "/") {
@@ -525,7 +525,7 @@ func ec2MergeTaggedRecord(
 	goCtx context.Context, state StateManager, key string, raw []byte,
 	addTags map[string]string, removeKeys []string,
 ) error {
-	// The namespace holds Elastic IPs as well as instances since #1191, and decoding one as
+	// The namespace holds Elastic IPs as well as instances (#1191), and decoding one as
 	// the other would rewrite it without its own members.
 	if strings.HasPrefix(key, "eip:") {
 		var eip EC2ElasticIP

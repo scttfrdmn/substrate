@@ -1704,7 +1704,7 @@ func SeedSNSSubscriptionAttributeForTest(
 // ParseLambdaOperationForTest wraps parseLambdaOperation for external tests.
 //
 // Exported because the parser decides more than routing: it is Lambda's entry in
-// [operationNameResolvers], so the name it returns is what authorization, metering and fault
+// [operationResolvers], so the name it returns is what authorization, metering and fault
 // injection see. Over the wire a request under an undocumented API version and one naming an
 // operation substrate does not route are the same 404, and only the resolved name distinguishes
 // them (#1142).

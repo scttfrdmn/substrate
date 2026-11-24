@@ -254,8 +254,8 @@ func generateKMSKeyID(m *IDMint) string {
 // STS secret access keys and session tokens are already derived for the same reason, and the
 // argument is the one ids.go's file comment makes — a test emulator's stub data key protects
 // nothing, and a caller who needs an unguessable key from a test double is asking the wrong tool.
-// EC2 key-pair material stays random because it needs a deterministic reader into a key generator
-// rather than a string; this needs only a string.
+// EC2 key-pair material is derived too (ec2_key_material.go), from mint bytes rather than a
+// string, because a key generator needs bytes; this needs only a string.
 func kmsStubDataKey(m *IDMint) string {
 	return m.Hex(16)
 }

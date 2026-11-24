@@ -27,12 +27,12 @@ import (
 //     hypothetical caller.
 //
 // Then the structural rules, added by #1073, which #996 deliberately left out: "{}" used to be
-// accepted here although AWS refuses it, and so did a StartAt naming no state and a Next pointing out
-// of its own Parallel branch. Each rule and the AWS sentence it comes from is in
-// stepfunctions_asl_structure.go, along with the boundary against validating semantics — what a rule
-// can assert is that the document is malformed regardless of any input, never how an execution would
-// go. docs/services.md lists what is still unchecked, so a consumer does not read a 200 here as full
-// ASL approval.
+// accepted here although AWS refuses it, and so did a StartAt naming no state and a Next pointing
+// out of its own Parallel branch. Each rule and the AWS sentence it comes from is in
+// stepfunctions_asl_structure.go, along with the boundary against validating semantics — what a
+// rule can assert is that the document is malformed regardless of any input, never how an execution
+// would go. docs/reference/states.md lists what is still unchecked, so a consumer does not read a
+// 200 here as full ASL approval.
 //
 // The parsed definition is returned because every caller needs it, and parsing it twice would let the
 // two copies disagree.

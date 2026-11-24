@@ -6,7 +6,8 @@ import (
 )
 
 // QuickSight's two seeded progressions (#1155, #1168): a dataset's SPICE ingestion, and a data
-// source's creation. docs/services.md, "How a progression is seeded", states the rules both share.
+// source's creation. docs/reference/concepts/seeds-and-replay.md, "How a progression is seeded",
+// states the rules both share.
 
 // quicksightIngestionCtrlNamespace and quicksightDataSourceCtrlNamespace hold each kind's seeds and
 // per-resource observation counters, one namespace per kind.

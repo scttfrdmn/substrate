@@ -337,8 +337,8 @@ func (p *CloudWatchPlugin) tagRecord(
 // ([mergeResourceTags]); the plugin's own caller holds [CloudWatchPlugin.mu].
 //
 // A write that adds and removes nothing is refused with the MissingParameter UntagResource answers
-// for an absent TagKeys. That is the answer the tagging API has given for an alarm named in a
-// TagResources with no tags, or an UntagResources with no keys, since #1618.
+// for an absent TagKeys. That is the answer the tagging API gives for an alarm named in a
+// TagResources with no tags, or an UntagResources with no keys (#1618).
 func cwMergeAlarmTags(
 	ctx context.Context, state StateManager, key string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {

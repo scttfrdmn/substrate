@@ -47,7 +47,7 @@ package emulator
 //     direction of throttling sooner, which is the safe direction for a consumer
 //     whose retry loop is what this models.
 //
-// The rule is documented for consumers in `docs/services.md` under S3, stated as
+// The rule is documented for consumers in `docs/reference/s3.md` under S3, stated as
 // substrate's reading there too.
 
 import (

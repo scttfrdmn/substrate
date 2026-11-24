@@ -223,7 +223,13 @@ jobs:
       - name: Check the CloudFormation schema table is in sync with its snapshot
         run: make cfn-schema-check
 
-  # Pure bash and awk, so no toolchain: the check is lexical by construction (see
+      # A doc link to a renamed or deleted identifier still compiles and still reads as
+      # authoritative (#1609). It needs the Go toolchain, so it runs here rather than in
+      # the wire-bookkeeping job with the other comment gate.
+      - name: Check every doc link in a Go comment names an identifier
+        run: make doc-links-check
+
+  # Bash, awk and Perl, so no Go toolchain: every check here is lexical by construction (see
   # scripts/check-wire-bookkeeping.sh for why it cannot be a reachability check).
   # It runs here rather than only in `make` because a baseline that nothing
   # executes is not a ratchet — it is a TODO list, and #756's whole complaint is
@@ -241,7 +247,10 @@ jobs:
     name: Wire Bookkeeping Drift
     runs-on: ubuntu-latest
     steps:
+      # Full history, so the comment-history step below can diff against the PR's base.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Check no bookkeeping field has gained wire-visible ground
         run: make wire-bookkeeping-check
@@ -265,6 +274,16 @@ jobs:
       # the script's allowlist (#1600).
       - name: Check no handler reads the wall clock or a random source
         run: make nondeterminism-check
+
+      # Lexical too, and it reads only the lines a PR adds, so the narrations already in
+      # the tree are trimmed in batches rather than failing every PR (#1609). It runs on
+      # pull requests only: main is PR-only, so every push to it is a squash of a PR this
+      # step already passed against the same base, and re-diffing HEAD~1 would add nothing.
+      - name: Check no added comment narrates issue history
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: make comment-history-check
 
   python:
     name: Python ${{ matrix.python-version }} (pytest-substrate)

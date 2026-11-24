@@ -13,16 +13,15 @@ import (
 
 // Derived identifiers, so a replay mints what its recording minted (#856).
 //
-// Substrate drew most of its identifiers straight from crypto/rand, so a recorded run and
-// its replay produced *different* ones. That is not a cosmetic difference: a replayed
-// CreateVolume returns a new `vol-…`, the recorded CreateSnapshot that names the old one
-// answers `InvalidVolume.NotFound`, and every describe after it reports an absent item. It
-// is why #1140's regression tests had to be built on an S3 seed — no stream containing a
-// create could be asserted to replay with zero differences — and it is why a `ValidateState`
-// replay reports a `state_hash_after` mismatch for every create, which is the right answer
-// and makes state validation useless. #833 meets the same wall from the other side: a
-// replayed Authorization header names an access key absent from replayed state, so
-// resolvePrincipal returns nil and CheckAccess *fails open*.
+// Identifiers drawn from a random source would make a recorded run and its replay produce
+// *different* ones. That is not a cosmetic difference: a replayed CreateVolume would return a
+// new `vol-…`, the recorded CreateSnapshot that names the old one would answer
+// `InvalidVolume.NotFound`, and every describe after it would report an absent item. No
+// stream containing a create could be asserted to replay with zero differences (#1140), and a
+// `ValidateState` replay would report a `state_hash_after` mismatch for every create, which
+// makes state validation useless. #833 meets the same wall from the other side: a replayed
+// Authorization header would name an access key absent from replayed state, so
+// resolvePrincipal would return nil and CheckAccess would *fail open*.
 //
 // # What an identifier is derived from
 //
@@ -32,8 +31,8 @@ import (
 // Reproducible across a replay, and across processes: [RequestContext.RequestID] during a
 // replay is the *recorded* one, because replayEvent dispatches with replayRequestID (#866),
 // so the same recorded request mints the same identifiers however many times and wherever it
-// is replayed. A per-plugin seeded PRNG — HealthOmics' run-ID source until #1166, the nearest
-// thing substrate had — cannot reach that: its seed was per process.
+// is replayed. A per-plugin seeded PRNG cannot reach that, because its seed is per process
+// (#1166).
 //
 // Two identical creates still differ. Two CreateAccessKey calls for one user must produce
 // two distinct keys, which is what rules out hashing the request: the requests are byte
@@ -62,17 +61,14 @@ import (
 // public IP from its instance id, a secret's ARN from its name, CloudFormation's stack UUIDs
 // from account and region.
 //
-// Two values that used to be on this list no longer are. A Lambda ESM poll's dispatches derive
+// Two values that might look random are derived too. A Lambda ESM poll's dispatches derive
 // their request ids from the request that triggered them (#1292). EC2 key-pair *material* is
 // constructed from mint-derived bytes (#1296; see ec2_key_material.go), because the Go
 // toolchain's key generators ignore a caller-supplied reader.
 //
 // No plugin draw site remains, and `make nondeterminism-check` keeps it that way: it refuses
 // a time.Now() or a math/rand or crypto/rand import in emulator code outside a reviewed
-// allowlist. The last sites it found were all #1600's — the S3 multipart UploadId from the
-// wall clock, every Organizations ID from the auto-seeded math/rand, Firehose RecordIds from
-// the clock's nanoseconds and the API Gateway proxy event's requestId — and each now mints
-// here. [IDMint.bytes]'s own seedless fallback is the only crypto/rand read left in the tree,
+// allowlist (#1600). [IDMint.bytes]'s own seedless fallback is the only crypto/rand read left in the tree,
 // and it stays: a nil or seedless mint is what a hand-built RequestContext has, which is how
 // every plugin unit test — substrate's and a consumer's — constructs one, and
 // generateRequestID draws through it for an unseeded server's request ids.
@@ -98,10 +94,10 @@ type IDMint struct {
 // NewIDMint returns a mint deriving identifiers from seed, which is the request id the
 // identifiers belong to.
 //
-// An empty seed is not an error: it yields a mint that draws from crypto/rand, which is what
-// every mint site did before #856. That is the behavior a mint site reached outside a request
-// keeps — the CloudFormation deployer's internal request contexts, for instance — rather than
-// minting a constant, which would collide two resources onto one id.
+// An empty seed is not an error: it yields a mint that draws from crypto/rand. That is the
+// behavior a mint site reached outside a request gets — the CloudFormation deployer's internal
+// request contexts, for instance — rather than minting a constant, which would collide two
+// resources onto one id.
 func NewIDMint(seed string) *IDMint {
 	return &IDMint{seed: seed}
 }
@@ -164,8 +160,8 @@ func (m *IDMint) Hex(n int) string {
 // For the identifiers AWS publishes in a restricted alphabet rather than in hex — an IAM
 // entity id is 21 characters of uppercase letters and digits. The mapping is a modulo of
 // one byte per character, which is very slightly biased toward the start of an alphabet
-// whose length does not divide 256; that is the bias generateIAMID always had, and an
-// identifier substrate mints has no uniformity requirement to lose.
+// whose length does not divide 256, and an identifier substrate mints has no uniformity
+// requirement to lose.
 func (m *IDMint) Chars(n int, alphabet string) string {
 	if n <= 0 || alphabet == "" {
 		return ""
@@ -218,20 +214,18 @@ func (m *IDMint) Base64URL(n int) string {
 // HexUUID returns sixteen bytes in UUID *shape* — 8-4-4-4-12 lowercase hex — without the RFC
 // 4122 version and variant bits [IDMint.UUID] sets.
 //
-// It exists because a dozen call sites across nine services published exactly this rendering
-// from crypto/rand, and #856 is about making an identifier reproducible across a replay rather
-// than about changing which bytes a caller sees: setting the two nibbles UUID sets would change
-// every one of them. A new mint site that wants a real version-4 shape should use UUID; this is
+// It exists because a dozen call sites across nine services publish exactly this rendering,
+// and #856 is about making an identifier reproducible across a replay rather than about
+// changing which bytes a caller sees: setting the two nibbles UUID sets would change every one
+// of them. A new mint site that wants a real version-4 shape should use UUID; this is
 // for the identifiers substrate already publishes in the looser form.
 //
 // The callers are Lambda revision and code ids, ECS task ids, Step Functions execution names,
 // SQS message ids, EventBridge event ids, CloudWatch Logs upload sequence tokens, Service Quotas
 // request ids, Batch job ids, CodeBuild build and CodeDeploy application and deployment-group
 // ids, SSM command ids, RAM resource-share ids and AWS Backup plan, version and selection ids.
-// (EMR Serverless job-run ids were one until #1204: their pages publish `[0-9a-z]+`, which a
-// dash violates.) Until this method existed the first seven of those reached a
-// helper declared in lambda_plugin.go, which is how a Batch job id came to be minted by a
-// function named for a Lambda revision.
+// EMR Serverless job-run ids are not: their pages publish `[0-9a-z]+`, which a dash violates
+// (#1204).
 func (m *IDMint) HexUUID() string {
 	h := m.Hex(16)
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]

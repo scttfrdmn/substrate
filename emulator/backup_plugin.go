@@ -184,8 +184,7 @@ func (p *BackupPlugin) deleteBackupVault(reqCtx *RequestContext, name string) (*
 
 // listBackupVaults handles ListBackupVaults.
 //
-// API_ListBackupVaults publishes four query parameters, and until #1199's audit none was read: the
-// list was one page with no NextToken, and both filters matched everything.
+// API_ListBackupVaults publishes four query parameters, and all four are read (#1199):
 //
 //   - maxResults (Valid Range 1–1000) bounds the page; outside the range is
 //     InvalidParameterValueException/400, which the page glosses "the value is out of range". With
@@ -405,8 +404,7 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 	// API_UpdateBackupPlan publishes AdvancedBackupSettings, BackupPlanArn, BackupPlanId,
 	// CreationDate, ScanSettings and VersionId. The record carries no advanced or scan settings, so
 	// those two are absent rather than empty. CreationDate is the plan's own, which an update does not
-	// move; until #1177 the handler answered an UpdatedAt that no AWS Backup page publishes, and
-	// dropped CreationDate.
+	// move, and no UpdatedAt is answered because no AWS Backup page publishes one (#1177).
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"BackupPlanArn": plan.BackupPlanArn,
 		"BackupPlanId":  plan.BackupPlanID,
@@ -418,8 +416,8 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 // deleteBackupPlan handles DeleteBackupPlan.
 //
 // API_DeleteBackupPlan publishes a body — BackupPlanArn, BackupPlanId, DeletionDate and VersionId —
-// and the handler answered `{}`, the shape of the Backup deletes whose pages publish an empty one
-// (#1206's survey; #1177). It now answers all four, from the record it deletes. DeletionDate is the
+// unlike the Backup deletes whose pages publish an empty one (#1206's survey; #1177), so the handler
+// answers all four, from the record it deletes. DeletionDate is the
 // simulated clock's now, as EpochSeconds, the Unix form every Backup date takes (#1324).
 func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (*AWSResponse, error) {
 	plan, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, planID)
@@ -451,9 +449,8 @@ func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (
 
 // listBackupPlans handles ListBackupPlans (#1184).
 //
-// API_ListBackupPlans publishes three query parameters, and none was read: the handler took no
-// request at all, so a page was never a page and an out-of-range value answered 200. It now follows
-// [BackupPlugin.listBackupVaults]' pattern, member for member.
+// API_ListBackupPlans publishes three query parameters, and all three are read, following
+// [BackupPlugin.listBackupVaults]' pattern member for member.
 //
 //   - maxResults (Valid Range 1–1000) bounds the page; outside the range, or not an integer, is
 //     InvalidParameterValueException/400, which the page glosses "Indicates that something is wrong
@@ -726,7 +723,7 @@ func (p *BackupPlugin) loadPlan(acct, region, planID string) (*BackupPlan, error
 // glosses BackupPlanArn with the example
 // arn:aws:backup:us-east-1:123456789012:plan:8F81F553-3A74-4A3F-B93D-B3360DC80C50, and
 // AWS::Backup::BackupPlan's BackupPlanArn attribute quotes the same: the resource segment is plan.
-// Until #1181 substrate spelled it backup-plan. A vault's segment really is backup-vault
+// A record from an older build may carry backup-plan instead. A vault's segment really is backup-vault
 // (API_CreateBackupVault's arn:aws:backup:us-east-1:123456789012:backup-vault:aBackupVault).
 func backupPlanARN(region, acct, planID string) string {
 	return fmt.Sprintf("arn:aws:backup:%s:%s:plan:%s", region, acct, planID)

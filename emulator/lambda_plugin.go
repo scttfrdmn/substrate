@@ -56,23 +56,23 @@ func (p *LambdaPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	return nil
 }
 
-// Shutdown stops all ESM pollers.
+// Shutdown empties the set of event-source mappings [LambdaPlugin.RunDue] polls.
 func (p *LambdaPlugin) Shutdown(_ context.Context) error {
 	p.stopAllPollers()
 	return nil
 }
 
-// ResetForRun stops every event-source-mapping poller, the one piece of state Lambda
-// keeps outside the [StateManager]. It implements [ResettablePlugin]; see
-// [ReplayEngine.resetState] for why a replay needs it, and #903 for the decision.
+// ResetForRun empties the set of event-source mappings [LambdaPlugin.RunDue] polls, the
+// one piece of state Lambda keeps outside the [StateManager]. It implements
+// [ResettablePlugin]; see [ReplayEngine.resetState] for why a replay needs it, and #903
+// for the decision.
 //
-// A poller has to stop because the reset has just deleted the mapping record that
-// owned it. DeleteEventSourceMapping is the only call that removes a mapping from the
-// polled set, and it answers ResourceNotFoundException once the record is gone, so the
-// poller becomes unreachable through the API. Both the queue URL it polls and the function
-// ARN it invokes are derived from names, so a later test case that reuses those
-// names would have its messages received and deleted, and its function invoked, by
-// a poller it never created.
+// Polling itself runs on the simulated clock: RunDue polls each mapping in the set whose
+// cursor (a state key the reset deletes) is due, so nothing runs between requests. The
+// set has to be emptied because the reset has just deleted the mapping records it names,
+// and DeleteEventSourceMapping, the only call that removes an entry, answers
+// ResourceNotFoundException once the record is gone. Emptying it leaves a reset plugin
+// polling exactly the mappings its state holds, as a fresh process would.
 func (p *LambdaPlugin) ResetForRun(_ context.Context) error {
 	p.stopAllPollers()
 	return nil
@@ -391,7 +391,7 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 		// changes when the function is pointed at a different image and not otherwise.
 		// Substrate never pulls the image, so this is not the digest real Lambda
 		// reports, for the same reason the S3 path reports an ETag — see
-		// docs/services.md.
+		// docs/reference/lambda.md.
 		fn.CodeSha256 = lambdaCodeSha256([]byte(body.ImageURI))
 	}
 
@@ -700,7 +700,7 @@ func lambdaPermissionConditions(sourceArn, sourceAccount, orgID, token, urlAuthT
 // consulting state. That is also the only order answering one code per class of caller error: a body
 // that will not parse and a body with no `StatementId` are both mistakes visible in the request
 // alone, and answering 404 for one and 400 for the other on the same request would be the
-// inconsistency #950 corrected elsewhere. This is Lambda's two sites only — `docs/services.md`
+// inconsistency #950 corrected elsewhere. This is Lambda's two sites only — `docs/reference/lambda.md`
 // records the convention split across the rest of the tree, which this does not settle.
 func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
 	var body struct {
@@ -1105,7 +1105,7 @@ func lambdaCodeSha256(pkg []byte) string {
 // from a hash of the package: for a single-part upload that ETag *is* the MD5 of the
 // body, which makes it change exactly when the package changes, which is the
 // question a caller comparing CodeSha256 across deploys is asking. It is not the
-// SHA256 real Lambda would report, and docs/services.md says so.
+// SHA256 real Lambda would report, and docs/reference/lambda.md says so.
 //
 // An absent object is not an error. Real Lambda would refuse the create, but
 // substrate's S3 and Lambda namespaces are independent and a template may

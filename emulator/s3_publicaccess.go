@@ -159,7 +159,7 @@ func s3GrantHeadersArePublic(headers map[string]string) bool {
 // of 'public'" → Bucket policies list.
 //
 // aws:userid is on the list only "outside the pattern AROLEID:*", which
-// [s3ConditionValuePinsAccess] handles as part of the wildcard rule: a value
+// [s3ConditionPinsAccess] handles as part of the wildcard rule: a value
 // ending in ":*" contains a wildcard and therefore does not pin anything.
 //
 // The guide's first bullet is "An AWS principal, user, role, or service principal

@@ -41,16 +41,15 @@ const kmsKeyManagerCustomer = "CUSTOMER"
 // neither ImportKeyMaterial nor any custom key store, so no request can produce a key with another
 // origin.
 //
-// Since #984 that is true **by construction rather than by omission**, which is a stronger statement and
-// the reason this constant is still a constant. CreateKey decodes Origin and refuses every published value
-// but this one, so a stored key with another origin is unreachable through substrate's own API — where
-// before it was merely unreachable because nothing read the member. [kmsResolveKeyOrigin] holds the
+// That is true **by construction rather than by omission** (#984), which is the reason this constant is
+// a constant. CreateKey decodes Origin and refuses every published value but this one, so a stored key
+// with another origin is unreachable through substrate's own API. [kmsResolveKeyOrigin] holds the
 // refusal and records why it is a refusal rather than a model.
 //
 // Three further members hang off that: ExpirationModel and ValidTo are published "only when Origin is
 // EXTERNAL", and XksKeyConfiguration only for an external key store, so all three are unreachable for the
-// same reason rather than three separate omissions — and now for the same construction, since the request
-// that would make them reachable is refused with a code API_CreateKey publishes.
+// same reason rather than three separate omissions — the request that would make them reachable is
+// refused with a code API_CreateKey publishes.
 const kmsKeyOriginAWSKMS = "AWS_KMS"
 
 // The four key usages AWS publishes, which select which algorithm list a key's metadata carries.
@@ -60,7 +59,7 @@ const kmsKeyOriginAWSKMS = "AWS_KMS"
 // because the condition is what makes the members mutually exclusive: a key has one usage, so it carries
 // exactly one algorithm list, and the four are not four independent branches.
 //
-// Since #977 no key can carry a value outside this set: CreateKey refuses one, and it refuses a spec and
+// No key can carry a value outside this set (#977): CreateKey refuses one, and it refuses a spec and
 // usage AWS would never pair, so every stored key has exactly one non-empty algorithm list.
 // [kmsKeyUsages] is the same four as an ordered slice, for the refusals that have to name them.
 const (
@@ -83,11 +82,11 @@ const (
 // SYMMETRIC_DEFAULT and the four HMAC specs are absent deliberately: neither signs. As with
 // [kmsEncryptionAlgorithmsByKeySpec], a missing entry and an empty one mean the same thing, so the
 // lookup needs no is-this-spec-known branch and a spec substrate has never heard of lands in the same
-// place — which since #977 no stored key can be, because CreateKey refuses an unpublished spec.
+// place — which no stored key can be, because CreateKey refuses an unpublished spec (#977).
 //
-// Absence carries a second meaning since #977, and it is why these four maps are now read for more than
-// rendering: a spec absent here does not admit SIGN_VERIFY at all. [kmsKeySpecAdmitsKeyUsage] derives
-// AWS's pairing rules from that, so the rules cannot drift from the algorithm lists that imply them.
+// Absence carries a second meaning, and it is why these four maps are read for more than rendering:
+// a spec absent here does not admit SIGN_VERIFY at all. [kmsKeySpecAdmitsKeyUsage] derives AWS's
+// pairing rules from that, so the rules cannot drift from the algorithm lists that imply them.
 var kmsSigningAlgorithmsByKeySpec = map[string][]string{
 	"RSA_2048": kmsRSASigningAlgorithms,
 	"RSA_3072": kmsRSASigningAlgorithms,
@@ -228,14 +227,13 @@ var kmsCustomerMasterKeySpecs = []string{
 // takes a context or can fail, which is what lets both callers use it unconditionally.
 func kmsKeyMetadata(key *KMSKey) map[string]interface{} {
 	// The eleven unconditional members. AWSAccountId, KeyManager and Origin are the three a consumer is
-	// most likely to branch on and the three that were most plainly withheld: each answers a decision a
-	// caller legitimately makes — which account a cross-account grant would name, whether the key is
-	// theirs to administer, and whether its material can expire or be re-imported — and all three were
-	// already determined by substrate's own model.
+	// most likely to branch on: each answers a decision a caller legitimately makes — which account a
+	// cross-account grant would name, whether the key is theirs to administer, and whether its material
+	// can expire or be re-imported — and all three are determined by substrate's own model.
 	//
-	// RotationEnabled is not among them, and #971 is why: API_KeyMetadata does not publish it. Adding
-	// sixteen members from the page is the moment that omission is most likely to be "fixed" by someone
-	// working from the struct rather than from the page, so it is named here as well as at its field.
+	// RotationEnabled is not among them, and #971 is why: API_KeyMetadata does not publish it. Someone
+	// working from the struct rather than from the page is likely to "fix" that omission, so it is named
+	// here as well as at its field.
 	metadata := map[string]interface{}{
 		"KeyId":        key.KeyID,
 		"Arn":          key.ARN,
@@ -257,25 +255,25 @@ func kmsKeyMetadata(key *KMSKey) map[string]interface{} {
 	// single lookup is what enforces mutual exclusivity: a key has exactly one usage, so reporting two
 	// lists would describe a key AWS cannot create.
 	//
-	// This was four switch arms until #977, which needed the same usage-to-spec correspondence to validate
-	// CreateKey's arguments; [kmsKeyUsageAlgorithms] records why the two now read one table. The behavior
-	// is unchanged, including for a usage the map does not carry — no member, rather than an invented one.
+	// CreateKey's validation reads the same usage-to-spec table (#977); [kmsKeyUsageAlgorithms] records
+	// why the two read one table. A usage the map does not carry gets no member, rather than an invented
+	// one.
 	//
-	// A list is emitted only when it is non-empty. That mattered before #977, when a key could carry a
-	// usage and a spec AWS would never pair — an ECC key with KeyUsage ENCRYPT_DECRYPT admits no encryption
-	// algorithm at all — and an empty array would have said "this key supports no encryption algorithms", a
-	// claim AWS never makes about a key it accepted. CreateKey now refuses that pair, so the branch is
-	// unreachable through substrate's own API and kept as a guard: it is what keeps a spec added to one
-	// algorithm map, without the pairing being thought through, from putting an empty array on the wire.
+	// A list is emitted only when it is non-empty. A key with a usage and a spec AWS would never
+	// pair — an ECC key with KeyUsage ENCRYPT_DECRYPT admits no encryption algorithm at all — would
+	// otherwise carry an empty array saying "this key supports no encryption algorithms", a claim
+	// AWS never makes about a key it accepted. CreateKey refuses that pair, so the branch is
+	// unreachable through substrate's own API and kept as a guard: it is what keeps a spec added to
+	// one algorithm map, without the pairing being thought through, from putting an empty array on
+	// the wire.
 	if algorithms, ok := kmsKeyUsageAlgorithms[key.KeyUsage]; ok {
 		kmsPutAlgorithms(metadata, algorithms.member, algorithms.byKeySpec[key.KeySpec])
 	}
 	// Emitted on the key state rather than on the field being non-zero, because that is the condition
 	// API_KeyMetadata publishes: "this value is present only when the KMS key is scheduled for deletion,
-	// that is, when its KeyState is PendingDeletion". Added by #963 — before it the deletion date
-	// ScheduleKeyDeletion computed reached the caller once and was never stored, so DescribeKey could not
-	// report when a pending key was due to go. It reaches CreateKey's response too now that the builder is
-	// shared, which changes nothing: a key is Enabled the instant it is created.
+	// that is, when its KeyState is PendingDeletion". ScheduleKeyDeletion stores the date, so DescribeKey
+	// reports when a pending key is due to go (#963). CreateKey's response shares the builder and never
+	// carries it: a key is Enabled the instant it is created.
 	//
 	// PendingDeletionWindowInDays, the adjacent member, is deliberately absent: the page confines it to
 	// KeyState PendingReplicaDeletion, which only a multi-Region primary that still has replicas reaches
@@ -331,12 +329,8 @@ func kmsPutKeyMaterialID(out map[string]interface{}, member string, key *KMSKey)
 // the same condition anyway, because both operations *require* a symmetric encryption key at AWS, so a
 // page with no condition and a page conditioned on the key type describe the same responses.
 //
-// **At those two sites the condition is now a guard rather than a path**, and the change is #988's. Until
-// it landed, substrate's own check tested the key usage rather than the spec, so an RSA key with KeyUsage
-// ENCRYPT_DECRYPT reached both responses and the unconditional reading would have put a 64-hex material ID
-// on a response AWS cannot produce — a value invented for a state that existed only because of that defect.
-// Omitting it was the honest-empty reading #827 established, and it was explicitly a workaround.
-// [kmsDataKeyKeySpecError] now refuses that request outright, so every key reaching either response
+// **At those two sites the condition is a guard rather than a path** (#988): [kmsDataKeyKeySpecError]
+// refuses an RSA key with KeyUsage ENCRYPT_DECRYPT outright, so every key reaching either response
 // satisfies this function and no observable behavior there depends on it. It is kept at those two sites
 // rather than removed for the reason this whole helper exists: five names for one value is the shape in
 // which a condition gets applied at four sites and forgotten at the fifth, and a key written directly into
@@ -350,10 +344,10 @@ func kmsReportsKeyMaterialID(key *KMSKey) bool {
 
 // kmsPutAlgorithms sets an algorithm-list member, or leaves it absent when the list is empty.
 //
-// A one-line helper, kept after #977 folded the four switch arms above into one lookup, because the
-// emptiness check is a rule about the wire rather than a detail of the branching: an empty array claims a
-// key admits no algorithm for its own usage, which is a claim AWS never makes about a key it accepted.
-// Omitting says nothing instead, the honest-empty reading #827 established.
+// A one-line helper because the emptiness check is a rule about the wire rather than a detail of
+// the branching: an empty array claims a key admits no algorithm for its own usage, which is a
+// claim AWS never makes about a key it accepted. Omitting says nothing instead, the honest-empty
+// reading #827 established.
 func kmsPutAlgorithms(metadata map[string]interface{}, member string, algorithms []string) {
 	if len(algorithms) == 0 {
 		return

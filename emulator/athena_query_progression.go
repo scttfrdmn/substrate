@@ -9,12 +9,12 @@ import (
 // A query execution's seeded progression (#1155).
 //
 // StartQueryExecution completes the query in the request that submits it, so an unseeded query is
-// SUCCEEDED on its first GetQueryExecution and a consumer's wait-for-terminal loop exits at once.
-// A seed written to POST /v1/athena/query-status makes the published transient states observable:
+// SUCCEEDED on its first GetQueryExecution and a consumer's wait-for-terminal loop exits at once. A
+// seed written to POST /v1/athena/query-status makes the published transient states observable:
 // GetQueryExecution reports the seed's transient state — QUEUED or RUNNING — for a seeded number of
 // observations, then its final one, with the StateChangeReason and AthenaError a failed query
-// reports. See [progression] for the rules every progressing resource shares, and docs/services.md
-// "How a progression is seeded".
+// reports. See [progression] for the rules every progressing resource shares, and
+// docs/reference/concepts/seeds-and-replay.md "How a progression is seeded".
 //
 // The seed governs what an observation reports; it never rewrites the query record. The one record
 // state that outranks it is CANCELLED, which only StopQueryExecution writes: a stop is the caller's

@@ -18,7 +18,7 @@ import (
 // that has already resolved the snapshots supply them directly.
 //
 // A read error reports the snapshot as absent rather than propagating, matching
-// [EC2Plugin.ec2CheckSecurityGroups] and [EC2Plugin.resourceTags]: substrate's state
+// [ec2ResourceTags]: substrate's state
 // backends fail only for reasons a caller cannot act on, and reporting "not found" for an
 // unreadable record is the same answer a caller gets for one that was never written.
 func (p *EC2Plugin) ec2SnapshotResolver(reqCtx *RequestContext) func(string) (EC2Snapshot, bool) {

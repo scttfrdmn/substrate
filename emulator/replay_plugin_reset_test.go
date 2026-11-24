@@ -22,8 +22,8 @@ package emulator_test
 // which is exactly the defect under test.
 //
 // The hook then turned out to owe more than a counter (#902, #903). A plugin also
-// holds state it *started* rather than minted — S3's object payloads and Lambda's
-// event-source-mapping pollers — and none of it was reachable from a reset either, so the tests from
+// holds state it *started* rather than minted — S3's object payloads and the set of Lambda
+// event-source mappings it polls — and none of it was reachable from a reset either, so the tests from
 // TestPluginReset_StateResetEmptiesS3ObjectPayloads on cover that second class.
 
 import (
@@ -527,7 +527,7 @@ func resetS3PluginOf(t *testing.T, ts *emulator.TestServer) *emulator.S3Plugin {
 }
 
 // resetLambdaPluginOf returns the Lambda plugin ts serves from, for the same reason:
-// a running poller has no representation in any response (#903).
+// the set of mappings it polls has no representation in any response (#903).
 func resetLambdaPluginOf(t *testing.T, ts *emulator.TestServer) *emulator.LambdaPlugin {
 	t.Helper()
 	p, ok := ts.Registry().Plugin("lambda")
@@ -655,25 +655,21 @@ func TestPluginReset_AnInjectedFilesystemIsNotEmptied(t *testing.T) {
 	assert.Equal(t, "payload", string(got))
 }
 
-// resetLambdaHost is the Lambda endpoint the poller recording uses.
+// resetLambdaHost is the Lambda endpoint the event-source-mapping test uses.
 const resetLambdaHost = "lambda.us-east-1.amazonaws.com"
 
 // TestPluginReset_StateResetStopsEventSourceMappingPollers is the behavioral test for
-// the first half of #903. CreateEventSourceMapping starts a goroutine that polls SQS
-// once a wall-clock second and invokes the mapping's function with whatever it
-// receives, and DeleteEventSourceMapping is the only call that closes its stop
-// channel.
+// the first half of #903. CreateEventSourceMapping adds an enabled SQS mapping to the
+// set [emulator.LambdaPlugin.RunDue] polls on the simulated clock, and
+// DeleteEventSourceMapping is the only call that removes it.
 //
 // A reset deletes the mapping record, so that call then answers 404 — asserted below —
-// and the goroutine becomes unreachable through the API while still running. Both the
-// queue URL and the function ARN are derived from names, so the next test case to use
-// the same names has its messages received and deleted, and its function invoked, by a
-// poller it never created: exactly the cross-case interference ResetState exists to
-// remove.
+// and only the reset itself can empty the set, leaving the plugin polling exactly the
+// mappings its state holds, as a fresh process would.
 //
-// The assertion is a poller count rather than an absence of polls because a poll
-// happens only on a one-second wall-clock tick, and no test here may depend on real
-// elapsed time.
+// The assertion is the set's size rather than an absence of polls, because a poll runs
+// only when a request finds a mapping's cursor due, so no poll is not evidence of an
+// empty set.
 func TestPluginReset_StateResetStopsEventSourceMappingPollers(t *testing.T) {
 	ts := startFrozenServer(t)
 	lambda := resetLambdaPluginOf(t, ts)

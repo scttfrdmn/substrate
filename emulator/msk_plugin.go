@@ -70,25 +70,25 @@ func (p *MSKPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 // parseKafkaOperation derives the MSK operation and optional cluster ARN from
 // the HTTP method and request path.
 //
-// The path is matched as it arrives. It used to be normalised by strings.TrimRight(path, "/"), which
-// folded an empty path parameter onto the collection route one case earlier in this switch:
-// GET /v1/clusters/ became GET /v1/clusters and answered ListClusters, so a caller who built the URL
-// from an empty variable read a full cluster list as success and three empty-ARN guards below could not
-// be reached by any request (#1009). AWS publishes nothing about a trailing slash for MSK — as #950
-// recorded, this is the weakest service in the tree to reason about from documentation, with no
-// common-errors page and no Errors sections — so routing an empty parameter to the single-cluster
-// operation is substrate's reading. It follows [parseEFSOperation], which never trimmed and whose nine
-// empty-parameter guards are all reachable, on the ground that a refusal a caller can act on beats a
-// different operation's success.
+// The path is matched as it arrives, not trimmed of a trailing "/": trimming would fold an empty
+// path parameter onto the collection route one case earlier in this switch, so GET /v1/clusters/
+// would answer ListClusters, a caller who built the URL from an empty variable would read a full
+// cluster list as success, and three empty-ARN guards below could not be reached (#1009). AWS
+// publishes nothing about a trailing slash for MSK — as #950 recorded, this is the weakest service
+// in the tree to reason about from documentation, with no common-errors page and no Errors sections
+// — so routing an empty parameter to the single-cluster operation is substrate's reading. It
+// follows [parseEFSOperation], which never trimmed and whose nine empty-parameter guards are all
+// reachable, on the ground that a refusal a caller can act on beats a different operation's
+// success.
 //
 // # Anchoring (#1205)
 //
 // A cluster ARN contains slashes (`…:cluster/{name}/{uuid}`), and the router hands this function
 // the decoded path, so the ARN cannot be taken as one slash-delimited segment. Each arm is anchored
 // at both ends instead: the published prefix, the ARN, then the published suffix if there is one.
-// The two sub-resource arms used to test only the suffix, so GET /anything/at/all/nodes was taken
-// for ListNodes and refused 400 for a malformed ARN, telling the caller its input was wrong rather
-// than that the path does not exist. MSK publishes /nodes and /bootstrap-brokers under /v1 only, so
+// Testing only the suffix would take GET /anything/at/all/nodes for ListNodes and refuse it 400
+// for a malformed ARN, telling the caller its input was wrong rather than that the path does not
+// exist. MSK publishes /nodes and /bootstrap-brokers under /v1 only, so
 // the same suffixes under /api/v2/clusters/ are refused as unrouted rather than read as part of a
 // DescribeClusterV2 ARN.
 func parseKafkaOperation(method, path string) (op, clusterARN string) {
@@ -344,9 +344,8 @@ func (in *mskProvisionedIn) apply(c *MSKCluster) {
 }
 
 // createCluster handles CreateCluster (POST /v1/clusters). Every member clusters.html marks Required:
-// True is checked before use and refused when absent, rather than defaulted (#1197): kafkaVersion
-// used to default to "3.5.1", numberOfBrokerNodes to 2, and an absent brokerNodeGroupInfo was
-// accepted, so a cluster was created from an empty body.
+// True is checked before use and refused when absent, rather than defaulted, so a cluster cannot be
+// created from an empty body (#1197).
 func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ClusterName string            `json:"ClusterName"`
@@ -424,8 +423,8 @@ func (p *MSKPlugin) storeNewCluster(reqCtx *RequestContext, cluster *MSKCluster)
 }
 
 func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
-	// Reachable since #1009: GET /v1/clusters/ routes here with an empty ARN rather than onto
-	// ListClusters.
+	// Reachable: GET /v1/clusters/ routes here with an empty ARN rather than onto ListClusters
+	// (#1009).
 	if clusterARN == "" {
 		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
@@ -458,8 +457,7 @@ func (p *MSKPlugin) getBootstrapBrokers(_ *RequestContext, _ *AWSRequest, cluste
 // mskBrokerHosts answers each broker's host name, in the form GetBootstrapBrokers' page shows:
 // b-{n}.{clusterName}.{id}.c2.kafka.{region}.amazonaws.com. The id is the first six hex digits of
 // the ARN's UUID, so it is stable for a cluster and distinct between a cluster and a later one that
-// reuses its name (#1204). Until #1199 the hosts were broker{n}.{name}.{region}.kafka.amazonaws.com,
-// a form no MSK page uses.
+// reuses its name (#1204, #1199).
 func mskBrokerHosts(c *MSKCluster) []string {
 	hosts := make([]string, 0, c.NumberOfBrokerNodes)
 	for i := 1; i <= c.NumberOfBrokerNodes; i++ {
@@ -640,15 +638,15 @@ func mskPage[T any](items []T, req *AWSRequest) ([]T, string, error) {
 // deleteCluster handles DeleteCluster.
 //
 // It reads the page's one query parameter, currentVersion, and refuses a version the cluster is not
-// at (see [mskCheckCurrentVersion]); until #1196 it was ignored. Unseeded, the record is removed at
-// once, as it always was, and the response's DELETING is the one observation of the deleting cluster
+// at (see [mskCheckCurrentVersion], #1196). Unseeded, the record is removed at once, and the
+// response's DELETING is the one observation of the deleting cluster
 // the call affords. Under a seed with pending observations the record is kept, marked DELETING, and
 // its countdown restarted: that many describes report DELETING, and the one after answers
 // NotFoundException. A second delete of a cluster already deleting answers DELETING again without
 // restarting its countdown.
 func (p *MSKPlugin) deleteCluster(_ *RequestContext, req *AWSRequest, clusterARN string) (*AWSResponse, error) {
-	// Reachable since #1009: DELETE /v1/clusters/ routes here rather than answering unknownRouteError,
-	// so a delete naming no cluster is refused for the reason it is wrong.
+	// Reachable: DELETE /v1/clusters/ routes here rather than answering unknownRouteError, so a
+	// delete naming no cluster is refused for the reason it is wrong (#1009).
 	if clusterARN == "" {
 		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
@@ -726,11 +724,11 @@ func (p *MSKPlugin) loadClusterByARN(clusterARN string) (*MSKCluster, error) {
 	if err := json.Unmarshal(data, &cluster); err != nil {
 		return nil, fmt.Errorf("msk loadClusterByARN unmarshal: %w", err)
 	}
-	// The record is found by name, and the ARN must then be the record's own, UUID included. The UUID
-	// is what distinguishes a cluster from a later one reusing its name, so an ARN naming a deleted
-	// cluster used to resolve to its replacement: a wrong-resource answer reported as success
-	// (#1204). MSK publishes no error codes, so NotFoundException/404 is substrate's reading (#671),
-	// the same answer a name that was never created gets.
+	// The record is found by name, and the ARN must then be the record's own, UUID included. The
+	// UUID is what distinguishes a cluster from a later one reusing its name, so an ARN naming a
+	// deleted cluster must not resolve to its replacement: that would be a wrong-resource answer
+	// reported as success (#1204). MSK publishes no error codes, so NotFoundException/404 is
+	// substrate's reading (#671), the same answer a name that was never created gets.
 	if cluster.ClusterARN != clusterARN {
 		return nil, notFound
 	}
@@ -749,8 +747,8 @@ func (p *MSKPlugin) loadClusterByARN(clusterARN string) (*MSKCluster, error) {
 // nothing is defaulted in their place. Inside serverless, vpcConfigs (each with subnetIds) and
 // clientAuthentication are Required: True.
 //
-// Until #1211 serverless was decoded by nothing: a serverless create stored a provisioned cluster
-// with no brokers, and DescribeClusterV2 reported clusterType PROVISIONED. The response is the
+// Serverless is decoded and stored as its own cluster type, so DescribeClusterV2 reports clusterType
+// SERVERLESS for it (#1211). The response is the
 // page's CreateClusterV2Response, which carries clusterType beside the three members v1's has.
 func (p *MSKPlugin) createClusterV2(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
@@ -818,8 +816,8 @@ func (p *MSKPlugin) createClusterV2(reqCtx *RequestContext, req *AWSRequest) (*A
 // describeClusterV2 returns cluster details in the V2 Cluster shape, under clusterInfo, as
 // v2-clusters-clusterarn.html publishes.
 func (p *MSKPlugin) describeClusterV2(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
-	// Reachable since #1009, as in describeCluster. getBootstrapBrokers and listNodes never had the
-	// problem, because a literal segment follows the ARN and the empty parameter is interior.
+	// Reachable, as in describeCluster (#1009). getBootstrapBrokers and listNodes need no such guard,
+	// because a literal segment follows the ARN and the empty parameter is interior.
 	if clusterARN == "" {
 		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
@@ -935,11 +933,9 @@ func (p *MSKPlugin) listNodes(_ *RequestContext, req *AWSRequest, clusterARN str
 // `…:cluster/{name}/{uuid}-{n}`, the form every ARN on MSK's pages takes (for example
 // `…/6357e0b2-0e6a-4b86-a0b4-70df934c2e31-5`). MSK publishes no pattern for it.
 //
-// It used to be built from the name's length and the clock's nanoseconds, padded with
-// `-0001-0001-0001-000000000001`, so on a frozen clock a deleted-then-recreated cluster reused its
-// predecessor's ARN, and resolution ignored the UUID anyway (#1204). Derived from the request id
-// now, as every minted identifier is (#856), so a replay mints the ARN its recording minted and two
-// creates of one name mint two ARNs.
+// It is derived from the request id, as every minted identifier is (#856), so a replay mints the
+// ARN its recording minted, and two creates of one name mint two ARNs even on a frozen clock
+// (#1204).
 func mskClusterUUID(m *IDMint) string {
 	return m.UUID() + "-" + m.Chars(1, "123456789")
 }

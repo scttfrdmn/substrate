@@ -31,7 +31,7 @@ const pricingCtrlNamespace = "pricing-ctrl"
 // substrate serves every region from one endpoint and so cannot reproduce a name
 // that does not resolve. Returning a legible API error is the closest available
 // signal, and is far better than pricing a request substrate was never asked to
-// price. See docs/services.md.
+// price. See docs/reference/pricing.md.
 //
 //nolint:gochecknoglobals // Immutable reference data, read-only after init.
 var pricingEndpointRegions = map[string]bool{

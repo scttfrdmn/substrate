@@ -370,7 +370,7 @@ func TestEC2_AcceleratedCatalog_SpotPriceIsAFixedRatePerGiB(t *testing.T) {
 // t4g.nano, m7i.xlarge and c6a.xlarge are all launched by fixtures in this repository and
 // none is in the catalog — so validating at launch would refuse types AWS plainly offers,
 // which is the failure the completeness invariant exists to prevent, moved to the operation
-// that creates state. The divergence is recorded in docs/services.md with that reason.
+// that creates state. The divergence is recorded in docs/reference/ec2.md with that reason.
 //
 // This test asserts the divergence rather than the fix, so closing it later is a deliberate
 // edit here and not a silent behavior change.

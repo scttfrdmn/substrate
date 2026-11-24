@@ -838,7 +838,7 @@ func ec2CREndDate(params map[string]string) (endDate, endDateType string, awsErr
 //
 // The code is substrate's reading. CreateCapacityReservation's Errors section is empty, and
 // `Unsupported` is the code in EC2's client-error table whose gloss covers this shape: "The
-// specified request is unsupported." docs/services.md records the refusal so it is discovered
+// specified request is unsupported." docs/reference/ec2.md records the refusal so it is discovered
 // there rather than at a call.
 func ec2CRRefuseFutureDated(params map[string]string) *AWSError {
 	for _, param := range []string{"StartDate", "CommitmentDuration"} {

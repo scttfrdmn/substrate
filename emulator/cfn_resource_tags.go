@@ -28,7 +28,7 @@ import (
 // including tags with the `aws:` prefix, varies by resource type. For example, tags aren't
 // propagated to Amazon EBS volumes that are created from block device mappings." So the rule
 // substrate follows is stated instead: a resource is stamped when substrate models tags for
-// its service, and skipped silently otherwise. `docs/services.md` names what is skipped.
+// its service, and skipped silently otherwise. `docs/reference/cloudformation.md` names what is skipped.
 
 // cfnStampTarget names the state record holding one resource's tags.
 type cfnStampTarget struct {

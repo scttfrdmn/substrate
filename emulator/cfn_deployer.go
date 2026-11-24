@@ -1306,10 +1306,9 @@ var typePriority = map[string]int{
 //
 // Two strings rather than a whole *RequestContext: a deployer that carried one
 // would carry a single request's ID and timestamp across every resource it
-// deploys, which is wrong — each dispatch generates its own. The separate
-// decision this comment used to defer — how a stack-deployed request is
-// authorized — is now [WithDeployerPrincipal], which is deliberately its own
-// option: identity says which partition a resource is written into, the principal
+// deploys, which is wrong — each dispatch generates its own. How a
+// stack-deployed request is authorized is a separate option,
+// [WithDeployerAttribution]: identity says which partition a resource is written into, the principal
 // says whose permissions creating it required, and a stack can change the second
 // per operation (a service role) without touching the first.
 type cfnIdentity struct {
@@ -1489,7 +1488,7 @@ func WithDeployerLenient(lenient bool) StackDeployerOption {
 //
 // The deployer deploys into substrate's default account and region unless
 // [WithDeployerIdentity] says otherwise, and dispatches unauthorized unless both
-// [WithDeployerPrincipal] and [WithDeployerAuth] say otherwise.
+// [WithDeployerAttribution] and [WithDeployerAuth] say otherwise.
 func NewStackDeployer(registry *PluginRegistry, store *EventStore, state StateManager, tc *TimeController, logger Logger, costs *CostController, opts ...StackDeployerOption) *StackDeployer {
 	d := &StackDeployer{
 		registry: registry,
@@ -3219,12 +3218,11 @@ func cfnStackResourceTags(stackName, stackID, logicalID string) []EC2Tag {
 // EC2 type, so the order cannot matter for a resource either could claim. It is stated because
 // the reverse order would matter if a future arm overlapped.
 //
-// A resource neither resolver claims is **skipped silently** — a stack creates far more
-// resources than the ~22 services substrate models tags for, so a warning per resource would
-// bury a real one, and `docs/services.md` names what is skipped instead. A physical ID that
-// merely *looks* like an EC2 ID (a bucket named "i-something") resolves to a state key holding
-// no record, which [ec2ApplyTagsToResource] treats as the no-op it treats every absent resource
-// as.
+// A resource neither resolver claims is **skipped silently** — a stack creates far more resources
+// than the services substrate models tags for, so a warning per resource would bury a real one, and
+// `docs/reference/cloudformation.md` names what is skipped instead. A physical ID that merely
+// *looks* like an EC2 ID (a bucket named "i-something") resolves to a state key holding no record,
+// which [ec2ApplyTagsToResource] treats as the no-op it treats every absent resource as.
 //
 // A failed resource is not stamped: there may be nothing to stamp, and a tag on a resource
 // CloudFormation reports as CREATE_FAILED would claim a resource exists.
@@ -4071,8 +4069,7 @@ func (d *StackDeployer) deployELBLoadBalancer(
 //
 // **`Ref` needs no arm in [cfnRefValue].** AWS publishes it as "the name of the load balancer"
 // (`aws-properties-ec2-elb.html`), which is the physical ID set below, so the default answer is
-// already the right one. `docs/services.md` recorded the opposite — the DNS name — and that entry
-// is deleted rather than implemented. The DNS name is `Fn::GetAtt DNSName`, which is the whole of
+// already the right one. The DNS name is `Fn::GetAtt DNSName`, which is the whole of
 // this operation's published Response Elements, and it is recorded in the resource's metadata where
 // step 2 of [cfnGetAttValue] finds it.
 //
@@ -4847,8 +4844,7 @@ func (d *StackDeployer) deploySSMParameter(
 // The association id is minted from the deployment's own mint rather than dispatched
 // for, because there is no request to dispatch: SSM's plugin models Run Command and
 // Parameter Store, not State Manager, so this resource has no service behind it and
-// the physical id is the whole of what a template can observe. It was the deployer's
-// last caller of the shared crypto/rand helper (#856).
+// the physical id is the whole of what a template can observe (#856).
 func (d *StackDeployer) deploySSMAssociation(
 	_ context.Context,
 	logicalID string,

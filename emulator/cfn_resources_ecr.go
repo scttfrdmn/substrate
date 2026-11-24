@@ -96,9 +96,9 @@ func (d *StackDeployer) deleteECRRepository(ctx context.Context, name, streamID 
 // putECRLifecyclePolicy applies a repository's LifecyclePolicy property — "Creates or updates a
 // lifecycle policy" — through PutLifecyclePolicy.
 //
-// This used to be the deploy helper of an AWS::ECR::LifecyclePolicy type, which CloudFormation
-// does not have: the resource specification lists no such type, so a template declaring one is
-// refused as unrecognized (#1605). The policy is the repository's own property, and only
+// It is not the deploy helper of an AWS::ECR::LifecyclePolicy type, which CloudFormation does not
+// have: the resource specification lists no such type, so a template declaring one is refused as
+// unrecognized (#1605). The policy is the repository's own property, and only
 // LifecyclePolicyText is applied; RegistryId names the account, which is the stack's.
 func (d *StackDeployer) putECRLifecyclePolicy(
 	ctx context.Context, repoName string, lp map[string]interface{}, streamID string, cctx *cfnContext,

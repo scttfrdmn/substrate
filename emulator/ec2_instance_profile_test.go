@@ -2,15 +2,13 @@ package emulator_test
 
 // An instance's iamInstanceProfile id is resolved, not drawn per read (#1291).
 //
-// The bug these tests pin was invisible to every existing assertion because the value was
-// well-formed on every call: `ec2InstanceItemFor` minted `"AIPA" + randomHex(8)` each time it
-// rendered an instance, so a DescribeInstances answered 200 with a plausible id that was
-// different from the one the previous DescribeInstances answered with. Nothing in a single
-// response is wrong, which is why the assertion has to be made **twice** — that is the shape of
-// the whole file: call, call again, compare.
+// A value drawn per render would be well-formed on every call: each DescribeInstances would
+// answer 200 with a plausible id, different from the one the previous DescribeInstances
+// answered with. Nothing in a single response would be wrong, which is why the assertion has
+// to be made **twice** — that is the shape of the whole file: call, call again, compare.
 //
-// These run against the full test server rather than the EC2-only rig, because the fix is a
-// cross-service resolution: IAM has to be reachable for a profile to be created through it.
+// These run against the full test server rather than the EC2-only rig, because the
+// resolution is cross-service: IAM has to be reachable for a profile to be created through it.
 
 import (
 	"context"

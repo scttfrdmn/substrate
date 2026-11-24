@@ -19,7 +19,8 @@ var sagemakerTrainingJobTransientStatuses = []string{"InProgress", "Stopping"}
 
 // sagemakerTrainingJobSeed is the body of POST /v1/sagemaker/training-job-status: how many
 // observations of a training job report a transient status before it settles, and what it settles
-// to. docs/services.md, "How a progression is seeded", states the rules every progression shares.
+// to. docs/reference/concepts/seeds-and-replay.md, "How a progression is seeded", states the rules
+// every progression shares.
 //
 // The pre-#1155 body — trainingJobName, status, failureReason — still means what it meant: with no
 // pendingObservations the job reports status from its first observation.

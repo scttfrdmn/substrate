@@ -584,8 +584,7 @@ type ec2AcceleratedFamily struct {
 	// Architecture is the one value the family's types report as
 	// processorInfo.supportedArchitectures, as [ec2InstanceTypeFamily.Architecture] is.
 	// Every accelerated family is x86_64 except g5g, the AWS Graviton2 family with NVIDIA
-	// T4g GPUs (#1509); until it was added the table had no Graviton row and
-	// [buildEC2InstanceTypeCatalog] applied x86_64 as a constant.
+	// T4g GPUs (#1509).
 	Architecture string
 	// Reports is the response member DescribeInstanceTypes reports this family's
 	// accelerator count through. See [ec2AcceleratedFamilies] for the five members AWS
@@ -599,22 +598,17 @@ type ec2AcceleratedFamily struct {
 // catalog. [buildEC2InstanceTypeCatalog] flattens it into the same catalog and index as
 // [ec2InstanceTypeFamilies].
 //
-// #234 seeded three of these as a single size each — p3.2xlarge, g4dn.xlarge, inf1.xlarge —
-// with the recorded reason that "the accelerated families are large, their specs vary
-// widely across sizes, and no consumer has asked for more of them". The first two clauses
-// are still true and the third stopped being true: #891, #892 and #894 all arrive from a
-// consumer probing g6.xlarge, and each was refused with InvalidInstanceType before any of
-// its own logic ran. So the exception is retired rather than restated (#896) — every family
-// here is complete, which is the invariant [ec2InstanceTypeFamilies] documents and the one
-// that makes [ec2CheckInstanceTypesExist]'s refusal honest. p3.8xlarge is a type that
-// plainly exists and used to be refused.
+// Every family here is complete, which is the invariant [ec2InstanceTypeFamilies] documents
+// and the one that makes [ec2CheckInstanceTypesExist]'s refusal honest: a consumer probing
+// g6.xlarge or p3.8xlarge reaches the operation's own logic rather than InvalidInstanceType
+// (#891, #892, #894, #896).
 //
 // vCPU, memory and accelerator counts come from the AWS accelerated-computing instance-type
 // guide (https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html), except p3's, which
 // AWS publishes on the previous-generation page
 // (https://docs.aws.amazon.com/ec2/latest/instancetypes/pg.html) — p3 is the one family
-// here AWS lists as previous generation, which as of #1028 is also where its
-// currentGeneration value comes from; see [ec2PreviousGenerationFamilies].
+// here AWS lists as previous generation, which is also where its currentGeneration value
+// comes from (#1028); see [ec2PreviousGenerationFamilies].
 //
 // Bare metal is excluded as it is everywhere else in the catalog, which costs this table one
 // size: g4dn.metal. The families deliberately absent are the ones whose specs could not be
@@ -634,9 +628,8 @@ type ec2AcceleratedFamily struct {
 // The split between the two Inferentia-capable members is decided by AWS's own note on
 // API_InferenceAcceleratorInfo — "Amazon Elastic Inference is no longer available" — which
 // is what that member describes, leaving neuronInfo as the live member for a device the
-// Neuron SDK drives. That supersedes #234's reading, which was that "real EC2 does not
-// report [Inferentia] through gpuInfo" and therefore substrate reports the count nowhere;
-// the first half stands and the second no longer follows.
+// Neuron SDK drives. Real EC2 does not report Inferentia through gpuInfo (#234), and the
+// count is reported through neuronInfo.
 //
 // Of NeuronDeviceInfo's four members only `count` is reported. `name`, `coreInfo` and
 // `memoryInfo`, and NeuronInfo's own `totalNeuronDeviceMemoryInMiB`, are omitted because
@@ -789,13 +782,12 @@ func ec2FamilyIsCurrentGeneration(family string) bool {
 // flattened [ec2AcceleratedFamilies], in family and then size order.
 // ec2InstanceTypeIndex is the same data keyed by type name.
 //
-// Both are built by one function so a type can never be in one and not the other — the
-// eight-type catalog and its parallel spot-price map had exactly that hazard, and a type
-// missing from the price map was silently dropped from DescribeSpotPriceHistory. The same
-// reasoning is why the two family tables are flattened by one function rather than
-// concatenated by their readers: DescribeInstanceTypes, DescribeInstanceTypeOfferings and
-// DescribeSpotPriceHistory each walk the catalog once and cannot disagree about what is in
-// it.
+// Both are built by one function so a type can never be in one and not the other: a catalog with a
+// parallel spot-price map would silently drop a type missing from the map from
+// DescribeSpotPriceHistory. The same reasoning is why the two family tables are flattened by one
+// function rather than concatenated by their readers: DescribeInstanceTypes,
+// DescribeInstanceTypeOfferings and DescribeSpotPriceHistory each walk the catalog once and cannot
+// disagree about what is in it.
 var ec2InstanceTypeCatalog, ec2InstanceTypeIndex = buildEC2InstanceTypeCatalog()
 
 // buildEC2InstanceTypeCatalog flattens both family tables into the catalog slice and its
@@ -804,10 +796,9 @@ var ec2InstanceTypeCatalog, ec2InstanceTypeIndex = buildEC2InstanceTypeCatalog()
 // Every catalog entry supports both on-demand and spot. That is true of every family listed,
 // so it is applied here rather than repeated per row.
 //
-// The architecture is the family's ([ec2InstanceTypeFamily.Architecture]) since #1497 added
-// the Graviton families; before that every entry was x86_64 and this function applied it as a
-// constant. The accelerated families carry the field too since #1509 added g5g, the first
-// Graviton row in that table ([ec2AcceleratedFamily.Architecture]).
+// The architecture is the family's ([ec2InstanceTypeFamily.Architecture]), because the
+// Graviton families report arm64 (#1497). The accelerated families carry the field too, for
+// g5g, the Graviton row in that table ([ec2AcceleratedFamily.Architecture], #1509).
 //
 // CurrentGeneration is not applied that way, because it is the one property on which the
 // families disagree: it is derived per family through [ec2FamilyIsCurrentGeneration], which
@@ -950,12 +941,9 @@ func ec2InvalidLocationTypeError(value string) *AWSError {
 // two would silently mis-read. The message names substrate so the divergence is not mistaken
 // for AWS behavior.
 //
-// availability-zone-id was refused alongside it until #893, on the reasoning that substrate
-// reported AZ IDs from DescribeAvailabilityZones but did not key offerings by them. That
-// reasoning was sound, so the fix was to make its first clause false rather than to relax the
-// refusal: [ec2SeededZones] already produced a zone's name and ID from one entry, and the
-// offerings handler now takes the ID from there. Nothing about the Outpost half changed —
-// there is no seeded Outpost to key by.
+// availability-zone-id is modeled because [ec2SeededZones] produces a zone's name and ID from
+// one entry, and the offerings handler takes the ID from there (#893). There is no seeded
+// Outpost to key by, so outpost stays refused.
 func ec2UnmodelledLocationTypeError(value string) *AWSError {
 	return &AWSError{
 		Code: "InvalidParameterValue",
@@ -967,7 +955,7 @@ func ec2UnmodelledLocationTypeError(value string) *AWSError {
 
 // ec2FilterValueMatches reports whether value satisfies one EC2 filter value.
 //
-// Since #697 this is the comparison behind *every* EC2 describe filter, so the rules below
+// This is the comparison behind *every* EC2 describe filter (#697), so the rules below
 // are the whole family's, not one operation's. EC2's resource-filtering documentation gives
 // them for API filters: "An asterisk (*) matches zero or more characters, and a question mark
 // (?) matches zero or one character", "Your search can include the literal values of the
@@ -1041,13 +1029,10 @@ func ec2globMatch(pattern, value []rune) bool {
 // joins with OR.
 //
 // A filter carrying no values at all matches nothing, so an empty list drops every
-// result. This function used to treat such a filter as absent, on the argument that
-// dropping everything turns a malformed request into a silently empty answer — but the
-// unfiltered answer that argument produces is silent in the same way and wrong in the
-// more dangerous direction, since a caller cannot tell it from a genuine match on every
-// resource. #686 had already settled the shape for `tag:<key>`, and nine of substrate's
-// eleven matchers reached the same answer by calling [containsStr] with no guard, so this
-// is the majority rule rather than a new one (#696).
+// result. Treating such a filter as absent would be silent in the same way and wrong in the
+// more dangerous direction, since a caller cannot tell an unfiltered answer from a genuine
+// match on every resource. It is the rule `tag:<key>` follows (#686) and the one the
+// [containsStr] matchers reach with no guard (#696).
 //
 // A caller must therefore not pass a bare map index: an *absent* filter constrains nothing
 // and an empty value list matches nothing, and `filters[name]` yields the same nil slice for

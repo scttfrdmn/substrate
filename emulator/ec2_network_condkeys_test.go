@@ -14,7 +14,7 @@ import (
 // (#692).
 //
 // #673 made a launch that omits SubnetId authorized against the default VPC's subnet
-// ARN, and docs/services.md labeled that substrate's reading rather than AWS parity —
+// ARN, and docs/reference/ec2.md labeled that substrate's reading rather than AWS parity —
 // pointing instead at the mechanism AWS itself documents for fencing a launch into one
 // subnet, a condition key on the network-interface resource. Substrate had neither key,
 // so the policy AWS tells a consumer to write was worse than inert: an Allow gated on

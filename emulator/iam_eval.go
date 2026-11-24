@@ -522,11 +522,10 @@ func splitConditionOperator(operator string) (qualifier, base string) {
 // qualifier, where the request's own values are what is quantified over.
 //
 // An operator carrying an *unrecognized* qualifier does not match, which preserves
-// the deny-by-default [evaluateConditionKey] applies to an unknown operator. That is
-// the rule this function used to reach for ForAllValues and ForAnyValue themselves:
-// the whole operator name was unknown, so every statement using one was discarded
-// before its key was looked at, making an Allow a false deny and a Deny silently
-// inert (#690).
+// the deny-by-default [conditionKeyMatches] applies to an unknown operator. A
+// recognized qualifier is split off first, so ForAllValues and ForAnyValue never reach
+// that rule as part of an unknown operator name, which would discard the statement
+// before its key is looked at and make an Allow a false deny and a Deny inert (#690).
 func conditionMatches(
 	conditions map[string]map[string]StringOrSlice,
 	ctx map[string]string,
@@ -666,7 +665,7 @@ func condKeyPresent(condKey string, ctx map[string]string, multiCtx map[string][
 // case-sensitive. For example, including the aws:SourceIP context key is equivalent
 // to testing for AWS:SourceIp. Case-sensitivity of context key *values* depends on
 // the condition operator that you use." Only the name folds here; every operator in
-// [evaluateConditionKey] still compares values exactly as its own definition says,
+// [conditionKeyMatches] still compares values exactly as its own definition says,
 // which is why the fold lives in the lookup and not in the operator arms.
 //
 // The **whole** name folds, tag suffix included, on AWS's own statement about the
@@ -675,7 +674,7 @@ func condKeyPresent(condKey string, ctx map[string]string, multiCtx map[string][
 // the condition matches a resource tag key named either TagKey1 or tagkey1, but not
 // both." That is the opposite of what #704 assumed. The case-sensitive rule #704
 // remembers governs a tag key used as a condition *value* — aws:TagKeys, and the tag
-// rules in [ec2_tags.go] — which is a different thing from a key name.
+// rules in `ec2_tags.go` — which is a different thing from a key name.
 //
 // "But not both" leaves unstated which of the two wins, and AWS names the resulting
 // hazard rather than resolving it: "you might tag an Amazon EC2 instance with

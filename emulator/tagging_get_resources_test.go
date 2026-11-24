@@ -631,7 +631,7 @@ func TestTaggingGetResources_ExcludeCompliantResourcesNeedsIncludeComplianceDeta
 		"the message names the parameter that has to accompany it")
 
 	// With the companion set it is accepted — and excludes nothing, since no resource is evaluated as
-	// compliant. Recorded in docs/services.md rather than left to be discovered.
+	// compliant. Recorded in docs/reference/tagging.md rather than left to be discovered.
 	assert.Len(t, taggingARNsOf(t, taggingGetResources(t, ts, map[string]any{
 		"ExcludeCompliantResources": true,
 		"IncludeComplianceDetails":  true,

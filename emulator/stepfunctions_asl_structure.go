@@ -22,7 +22,7 @@ import (
 // comparison can ever be true, whether a Task's Resource ARN exists, whether a
 // JSONPath resolves — all of those depend on the execution, which is the
 // workload-internal side of CLAUDE.md's boundary. They stay unvalidated and
-// docs/services.md lists them.
+// docs/reference/states.md lists them.
 //
 // **Only what AWS itself publishes.** The issue quoted three "MUST" sentences from
 // states-language.net, which AWS links but does not host; none of the six

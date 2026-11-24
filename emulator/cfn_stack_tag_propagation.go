@@ -24,10 +24,11 @@ import (
 // needs no new bookkeeping and cannot delete a key the stack never propagated.
 //
 // The one case it cannot distinguish is a caller who set a resource tag to the *same* value the
-// stack propagates: removing the stack tag then removes theirs too. `docs/services.md` records
-// that rather than papering over it, because the alternative — recording which keys the stamp
-// wrote, per resource — is real bookkeeping in the event stream for an ambiguity AWS itself
-// does not resolve (it publishes no per-resource provenance for a propagated tag either).
+// stack propagates: removing the stack tag then removes theirs too.
+// `docs/reference/cloudformation.md` records that rather than papering over it, because the
+// alternative — recording which keys the stamp wrote, per resource — is real bookkeeping in the
+// event stream for an ambiguity AWS itself does not resolve (it publishes no per-resource
+// provenance for a propagated tag either).
 //
 // # Propagation does not enforce the target's own tag quota (#1077)
 //
@@ -114,14 +115,13 @@ func cfnStackTagChanges(existing, prev, next map[string]string) (map[string]stri
 // cfnPropagateStackTags reconciles one resource's tags with the stack's, reporting whether the
 // resource's tags could be reached at all.
 //
-// The four families are the four tag stores, exactly as in [cfnStampResourceTags]: ELBv2's
-// ordered `[]ELBTag` found by ARN, AWS Config's ARN-keyed side-car whose whole document is the
-// tag map, the services keyed by [cfnResolveStampTarget], and EC2's own prefix-keyed resolver for
-// everything else. The CFN resource type decides which,
-// rather than the physical ID: a type the type-keyed resolver claims is never also an EC2 one,
-// and asking the ID first would let a bucket named `i-orders` be reconciled as an instance —
-// which the stamp does do, and which is recorded in `docs/services.md` as a limit rather than
-// reproduced here for symmetry's sake.
+// The four families are the four tag stores, exactly as in [cfnStampResourceTags]: ELBv2's ordered
+// `[]ELBTag` found by ARN, AWS Config's ARN-keyed side-car whose whole document is the tag map, the
+// services keyed by [cfnResolveStampTarget], and EC2's own prefix-keyed resolver for everything
+// else. The CFN resource type decides which, rather than the physical ID: a type the type-keyed
+// resolver claims is never also an EC2 one, and asking the ID first would let a bucket named
+// `i-orders` be reconciled as an instance — which the stamp does do, and which is recorded in
+// `docs/reference/cloudformation.md` as a limit rather than reproduced here for symmetry's sake.
 //
 // A resource nothing can reach reports false and is skipped in silence, as the stamp is: the
 // services that model no tags at all are the majority of what a stack creates.

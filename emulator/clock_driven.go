@@ -12,12 +12,11 @@ import (
 // for it, and how that work stays deterministic and replayable (#1292).
 //
 // An event-source mapping is the case that needs it. A real mapping consumes its queue on
-// its own; nothing the caller sends names the poll. Substrate used to model that with a
-// goroutine on a one-second wall-clock ticker, which made an ESM's effect on state depend
-// on how long a test happened to run, ignored a frozen or scaled clock, and recorded
-// nothing, so a replay could not reproduce it.
+// its own; nothing the caller sends names the poll. Driving that from a wall-clock timer
+// would make an ESM's effect on state depend on how long a test happened to run, ignore a
+// frozen or scaled clock, and record nothing a replay could reproduce.
 //
-// The model now is evaluation at observation. Before every top-level request reaches its
+// The model is evaluation at observation. Before every top-level request reaches its
 // plugin — on the live path in [Server.handleAWSRequest] and on replay in
 // [ReplayEngine.replayEvent], at the same step of the same pipeline — each
 // [ClockDrivenPlugin] runs whatever is due at the simulated clock's current reading. A

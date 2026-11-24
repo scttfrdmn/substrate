@@ -33,7 +33,7 @@ import (
 //     record; only the two operations a caller sends to end a job do.
 //
 // How many observations a default progression spends in each state is unpublished: substrate's
-// choice is none, recorded here and in docs/services.md.
+// choice is none, recorded here and in docs/reference/batch.md.
 
 // batchJobTransientStates are the five non-terminal values of API_ListJobs' jobStatus, in the order
 // the Job states page draws them.

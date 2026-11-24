@@ -22,7 +22,7 @@ import (
 // Members the published input declares and the record does not model are not read: for a route,
 // authorizationScopes, apiKeyRequired, requestParameters, requestModels, modelSelectionExpression,
 // operationName and routeResponseSelectionExpression; for a stage, clientCertificateId and
-// routeSettings. docs/services.md names them.
+// routeSettings. docs/reference/apigatewayv2.md names them.
 
 // apigwv2RouteUpdate is UpdateRouteInput's members the route record models.
 type apigwv2RouteUpdate struct {

@@ -856,7 +856,7 @@ func openSearchStatusOK(status int, body interface{}) (*AWSResponse, error) {
 // `illegal_argument_exception` at scroll — and `json_parse_exception` at 400 is
 // what OpenSearch reports for a body it cannot parse. That provenance is the
 // engine's behavior rather than a published AWS API model, and is recorded as such
-// in docs/services.md.
+// in docs/reference/opensearch.md.
 func openSearchInvalidBody() *openSearchRefusal {
 	return openSearchError(http.StatusBadRequest, "json_parse_exception", "request body is not valid JSON")
 }

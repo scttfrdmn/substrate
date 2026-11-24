@@ -18,7 +18,7 @@ import (
 // The split into two lists is what keeps the refusal from exceeding AWS's. Refusing every
 // name substrate does not *evaluate* would deny filters real EC2 accepts —
 // ipv6-cidr-block-association.state is a filter, not a typo — so a documented name
-// substrate cannot answer is accepted and left inert, and docs/services.md lists those
+// substrate cannot answer is accepted and left inert, and docs/reference/ec2.md lists those
 // names per operation so the gap is visible rather than discovered. Only a name outside
 // AWS's documented set is refused.
 //

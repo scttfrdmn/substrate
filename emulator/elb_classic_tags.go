@@ -21,7 +21,7 @@ import (
 //   - **`AddTags` and `RemoveTags` take one load balancer.** "You can specify one load balancer only"
 //     and "You can specify a maximum of one load balancer name" respectively. ELBv2's take a list
 //     with no published bound. `DescribeTags` takes 1–20 names in both generations.
-//   - **`RemoveTags` names the keys as `Tags.member.N` of [TagKeyOnly], not `TagKeys.member.N`.** A
+//   - **`RemoveTags` names the keys as `Tags.member.N` of `TagKeyOnly`, not `TagKeys.member.N`.** A
 //     caller sending ELBv2's spelling to the classic API removes nothing, which is why
 //     elb_classic_tags_test.go asserts both spellings against each other rather than only the right
 //     one.
@@ -37,7 +37,7 @@ import (
 // indexed plural form, so the singular is a typo on one page rather than a second accepted spelling.
 // The indexed form is what every SDK serializes, so it is the one read here — which is the same
 // resolution [elbMaxTagKeyLength] records for the Tag-length contradiction. A caller who copies
-// AWS's own sample curl is refused `ValidationError`, and docs/services.md says so.
+// AWS's own sample curl is refused `ValidationError`, and docs/reference/elasticloadbalancing.md says so.
 //
 // # What is shared rather than duplicated
 //
@@ -101,7 +101,7 @@ func elbClassicTagNames(req *AWSRequest, maxNames int) ([]string, *AWSError) {
 	return names, nil
 }
 
-// elbClassicTagKeysOnly reads the `Tags.member.N` list of [TagKeyOnly] objects classic `RemoveTags`
+// elbClassicTagKeysOnly reads the `Tags.member.N` list of `TagKeyOnly` objects classic `RemoveTags`
 // takes, returning the keys.
 //
 // The walk ends on an absent or empty `Key`, which is how the query protocol terminates an indexed

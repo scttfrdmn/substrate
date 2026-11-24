@@ -71,7 +71,7 @@ var ec2NatGatewayStates = []string{"pending", "failed", "available", "deleting",
 
 // ec2NatFailureMessages maps each failureCode API_NatGateway publishes to the failureMessage it
 // publishes for it, verbatim, with the placeholder identifiers {alloc}, {vpc} and {subnet} that
-// [ec2NatGatewayProgression.failureMessage] fills in. InternalError's network interface is one
+// [ec2NatGatewayProgression.observation] fills in. InternalError's network interface is one
 // substrate does not model, so its placeholder is left as the page prints it.
 var ec2NatFailureMessages = map[string]string{
 	"InsufficientFreeAddressesInSubnet": "Subnet has insufficient free addresses to create this NAT gateway",
