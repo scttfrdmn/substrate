@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EC2: security group rules get derived `sgr-` IDs; `DescribeSecurityGroupRules`, `ModifySecurityGroupRules`, revoke by `SecurityGroupRuleId.N`, rule descriptions and tags (#1490).
 - EC2: burstable credit options; `DescribeInstanceCreditSpecifications`, `ModifyInstanceCreditSpecification`, `Get`/`ModifyDefaultCreditSpecification`, `burstablePerformanceSupported`, and the `t2` family in the instance-type catalog (#1614).
 - EC2: `use1-az3` offers no Graviton type; subnets report `availabilityZoneId`, filter on it, and `CreateSubnet` accepts `AvailabilityZoneId` (#1621).
+- Cloud Map: new plugin with Route 53 zones for DNS namespaces, operation status seeded at `/v1/servicediscovery/operation-status`, and five `AWS::ServiceDiscovery::*` CloudFormation types (#1614).
 
 ### Fixed
 

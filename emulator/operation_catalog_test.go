@@ -29,11 +29,11 @@ const (
 	// place. Updating this figure is the deliberate half of adding or removing an
 	// operation; `make operation-catalog` regenerates the catalog and this test then says
 	// by how much the total moved.
-	routedOperationTotal = 1268
+	routedOperationTotal = 1294
 
 	// routedPluginTotal is the number of plugins RegisterDefaultPlugins registers. The
 	// coverage matrix in docs/services.md reports the same figure from the same source.
-	routedPluginTotal = 69
+	routedPluginTotal = 70
 )
 
 // registeredPluginNames boots the default registry and returns the names it files plugins

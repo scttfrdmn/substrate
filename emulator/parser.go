@@ -420,6 +420,12 @@ var targetServiceAliases = map[string]string{
 	// OrganizationsPlugin above: every call would fall through to "service not
 	// emulated: starlingdoveservice" (#580).
 	"starlingdoveservice": "config",
+	// "Route53AutoNaming_v20170314" → strip version → "Route53AutoNaming" → lowercase →
+	// "route53autonaming" → "servicediscovery". Route 53 Auto Naming is Cloud Map's original name.
+	"route53autonaming": "servicediscovery",
+	// DiscoverInstances' model gives it the endpoint hostPrefix "data-", so its host is
+	// "data-servicediscovery.{region}.amazonaws.com", whose first label is not the plugin name.
+	"data-servicediscovery": "servicediscovery",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

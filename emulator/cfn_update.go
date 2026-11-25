@@ -103,6 +103,12 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	// The identity providers (#1613); their Url and Name are Replacement.
 	"AWS::IAM::OIDCProvider": (*StackDeployer).updateIAMOIDCProvider,
 	"AWS::IAM::SAMLProvider": (*StackDeployer).updateIAMSAMLProvider,
+	// Cloud Map (#1614): Description and a DNS namespace's Properties, and a service's Description,
+	// DnsConfig and HealthCheckConfig, are No interruption on their pages.
+	"AWS::ServiceDiscovery::HttpNamespace":       cfnUpdateServiceDiscoveryNamespace("AWS::ServiceDiscovery::HttpNamespace"),
+	"AWS::ServiceDiscovery::PrivateDnsNamespace": cfnUpdateServiceDiscoveryNamespace("AWS::ServiceDiscovery::PrivateDnsNamespace"),
+	"AWS::ServiceDiscovery::PublicDnsNamespace":  cfnUpdateServiceDiscoveryNamespace("AWS::ServiceDiscovery::PublicDnsNamespace"),
+	"AWS::ServiceDiscovery::Service":             (*StackDeployer).updateServiceDiscoveryService,
 }
 
 // cfnUpdateUnmodelled maps a type to why a change to one of its updatable properties cannot be
@@ -390,7 +396,20 @@ func (p cfnResourcePlan) replacedBy(dr DeployedResource) bool {
 	if p.prior.Type != dr.Type {
 		return true
 	}
+	for _, key := range cfnIdentityMetadata[dr.Type] {
+		if cfnRefMetadata(dr, key) != cfnRefMetadata(p.prior, key) {
+			return true
+		}
+	}
 	return dr.PhysicalID != "" && p.prior.PhysicalID != "" && dr.PhysicalID != p.prior.PhysicalID
+}
+
+// cfnIdentityMetadata names, for the types whose physical ID does not identify the resource alone,
+// the recorded metadata that does with it. A Cloud Map instance's physical ID is its InstanceId,
+// which is unique only within its service, so a ServiceId change keeps the physical ID and is still
+// a different instance (#1614).
+var cfnIdentityMetadata = map[string][]string{ //nolint:gochecknoglobals // immutable lookup table
+	"AWS::ServiceDiscovery::Instance": {"ServiceId"},
 }
 
 // cfnHasRealDelete reports whether a sweep deletes resType through a request, rather than by

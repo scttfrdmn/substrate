@@ -61,9 +61,15 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::Lambda::Permission":               cfnLambdaPermissionDeleter,
 	"AWS::Lambda::Version":                  cfnLambdaVersionDeleter,
 	"AWS::Lambda::Alias":                    cfnLambdaAliasDeleter,
-	"AWS::DynamoDB::Table":                  jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
-	"AWS::Kinesis::Stream":                  cfnKinesisStreamDeleter,
-	"AWS::Kinesis::StreamConsumer":          jsonBodyDeleter("kinesis", "DeregisterStreamConsumer", "ConsumerARN"),
+	// Cloud Map (#1614).
+	"AWS::ServiceDiscovery::HttpNamespace":       cfnServiceDiscoveryNamespaceDeleter,
+	"AWS::ServiceDiscovery::PrivateDnsNamespace": cfnServiceDiscoveryNamespaceDeleter,
+	"AWS::ServiceDiscovery::PublicDnsNamespace":  cfnServiceDiscoveryNamespaceDeleter,
+	"AWS::ServiceDiscovery::Service":             jsonBodyDeleter("servicediscovery", "DeleteService", "Id"),
+	"AWS::ServiceDiscovery::Instance":            cfnServiceDiscoveryInstanceDeleter,
+	"AWS::DynamoDB::Table":                       jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
+	"AWS::Kinesis::Stream":                       cfnKinesisStreamDeleter,
+	"AWS::Kinesis::StreamConsumer":               jsonBodyDeleter("kinesis", "DeregisterStreamConsumer", "ConsumerARN"),
 	"AWS::KinesisFirehose::DeliveryStream": jsonBodyDeleter("firehose", "DeleteDeliveryStream",
 		"DeliveryStreamName"),
 	"AWS::EFS::FileSystem":  pathDeleter("efs", "/2015-02-01/file-systems/"),
@@ -1089,6 +1095,9 @@ var cfnDeleteAbsentCodes = map[string]bool{
 	"NoSuchHostedZone":                     true,
 	"NotFound":                             true, // SNS DeleteTopic.
 	"NotFoundException":                    true,
+	"NamespaceNotFound":                    true, // Cloud Map.
+	"ServiceNotFound":                      true, // Cloud Map.
+	"InstanceNotFound":                     true, // Cloud Map.
 	"ParameterNotFound":                    true,
 	"QueueDoesNotExist":                    true,
 	"ReplicationGroupNotFoundFault":        true,

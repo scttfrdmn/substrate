@@ -24,6 +24,11 @@ var cfnSequencedDeleters = map[string]func(context.Context, *StackDeployer, Depl
 	"AWS::IAM::ManagedPolicy": cfnDeleteIAMManagedPolicy,
 	// One SetQueueAttributes per queue the policy was applied to (cfnDeleteQueuePolicy).
 	"AWS::SQS::QueuePolicy": cfnDeleteQueuePolicy,
+	// Cloud Map's asynchronous deletes wait on their operation (cfnDeleteServiceDiscoveryAsync).
+	"AWS::ServiceDiscovery::HttpNamespace":       cfnDeleteServiceDiscoveryNamespace,
+	"AWS::ServiceDiscovery::PrivateDnsNamespace": cfnDeleteServiceDiscoveryNamespace,
+	"AWS::ServiceDiscovery::PublicDnsNamespace":  cfnDeleteServiceDiscoveryNamespace,
+	"AWS::ServiceDiscovery::Instance":            cfnDeleteServiceDiscoveryInstance,
 }
 
 // cfnDeleteCloudFrontDistribution deletes a distribution the way CloudFormation does and

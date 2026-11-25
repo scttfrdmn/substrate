@@ -186,6 +186,12 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	// The identity providers a role's trust policy names (#1613).
 	"AWS::IAM::OIDCProvider": (*StackDeployer).deployIAMOIDCProvider,
 	"AWS::IAM::SAMLProvider": (*StackDeployer).deployIAMSAMLProvider,
+	// v0.135.0 — Cloud Map (#1614).
+	"AWS::ServiceDiscovery::HttpNamespace":       cfnDeployServiceDiscoveryNamespace("AWS::ServiceDiscovery::HttpNamespace"),
+	"AWS::ServiceDiscovery::PrivateDnsNamespace": cfnDeployServiceDiscoveryNamespace("AWS::ServiceDiscovery::PrivateDnsNamespace"),
+	"AWS::ServiceDiscovery::PublicDnsNamespace":  cfnDeployServiceDiscoveryNamespace("AWS::ServiceDiscovery::PublicDnsNamespace"),
+	"AWS::ServiceDiscovery::Service":             (*StackDeployer).deployServiceDiscoveryService,
+	"AWS::ServiceDiscovery::Instance":            (*StackDeployer).deployServiceDiscoveryInstance,
 }
 
 // cfnEmulatedType reports whether substrate's CloudFormation emulates a resource type.

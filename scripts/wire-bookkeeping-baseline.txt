@@ -351,6 +351,8 @@ emulator/scheduler_plugin.go	SchedulerRecord	Region	region
 emulator/secretsmanager_types.go	SecretState	AccountID	AccountID
 emulator/secretsmanager_types.go	SecretState	EverTagged	ever_tagged,omitempty
 emulator/secretsmanager_types.go	SecretState	Region	Region
+emulator/servicediscovery_types.go	sdNamespace	EverTagged	ever_tagged,omitempty
+emulator/servicediscovery_types.go	sdService	EverTagged	ever_tagged,omitempty
 emulator/ses_verification.go	sesVerificationSeedBody	AccountID	accountId
 emulator/ses_verification.go	sesVerificationSeedBody	Region	region
 emulator/sesv2_types.go	SESv2CapturedEmail	AccountID	AccountId

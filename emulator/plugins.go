@@ -255,6 +255,8 @@ func RegisterDefaultPlugins(
 		{&TimestreamPlugin{}, "timestream", nil},
 		{&AutoScalingPlugin{}, "autoscaling", autoscalingOpts},
 		{&SESPlugin{}, "ses", sesOpts},
+		// Cloud Map creates and deletes a DNS namespace's Route 53 hosted zone through the registry.
+		{&ServiceDiscoveryPlugin{}, "servicediscovery", registryOpt},
 	}
 	for _, r := range registrations {
 		if err := w.register(ctx, r.plugin, r.name, r.extra); err != nil {
