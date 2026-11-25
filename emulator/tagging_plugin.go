@@ -432,6 +432,7 @@ func (p *TaggingPlugin) resourceDescriptors() []resourceDescriptor {
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindRule)},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindClassicLB)},
 		{typePrefix: "servicediscovery", scan: p.taggingStateScan(sdListTaggedResources)},
+		{typePrefix: "application-autoscaling", scan: p.taggingStateScan(aasListTaggedTargets)},
 	}
 }
 

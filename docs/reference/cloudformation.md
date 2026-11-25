@@ -125,14 +125,14 @@ of:
 
 **What ordinary CDK apps emit.** Synthesized with CDK 2.1149.0 and the flags `cdk init` sets, a
 default `ec2.Vpc`, a Lambda function with an SQS event source, a `LambdaRestApi`, an SNS-to-SQS
-subscription and an ECS Fargate service deploy and delete in strict mode;
+subscription, an ECS Fargate service and a provisioned DynamoDB table with read and write
+autoscaling deploy and delete in strict mode;
 `emulator/testdata/cfn/cdk` holds the templates and `TestCFN_OrdinaryCDKAppsDeployInStrictMode`
 pins them. Strict mode refuses these common constructs, because substrate cannot deploy what they
 emit:
 
 | Type | Emitted by |
 |------|------------|
-| `AWS::ApplicationAutoScaling::ScalableTarget`, `::ScalingPolicy` | `autoScaleReadCapacity` / `autoScaleWriteCapacity` on a DynamoDB table, ECS service autoscaling — substrate has no Application Auto Scaling plugin |
 | `AWS::Lambda::Url` | `addFunctionUrl` — the Lambda plugin routes no function-URL operations |
 | `AWS::ApiGateway::Account` | a `RestApi` with `cloudWatchRole` on, the default without the `@aws-cdk/aws-apigateway:disableCloudWatchRole` flag — the API Gateway plugin routes no account settings |
 | `Custom::S3AutoDeleteObjects` | `autoDeleteObjects: true` on a bucket |

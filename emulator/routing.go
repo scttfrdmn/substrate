@@ -90,6 +90,14 @@ var pluginRouting = map[string]PluginRouting{
 			"sends.",
 		Source: "botocore apigatewayv2 service-2.json",
 	},
+	"application-autoscaling": {
+		Display:      "Application Auto Scaling",
+		Protocol:     "JSON",
+		TargetPrefix: "AnyScaleFrontendService",
+		Hosts:        []string{"application-autoscaling.us-east-1.amazonaws.com"},
+		SigningNames: []string{"application-autoscaling"},
+		Source:       "botocore application-autoscaling service-2.json",
+	},
 	"appsync": {
 		Display:      "AppSync",
 		Protocol:     "REST/JSON",

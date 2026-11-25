@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 70 plugins, 1294 routed operations.
+// 71 plugins, 1307 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -111,6 +111,21 @@ var routedOperations = map[string][]string{
 		"UpdateApiMapping",
 		"UpdateRoute",
 		"UpdateStage",
+	},
+	"application-autoscaling": {
+		"DeleteScalingPolicy",
+		"DeleteScheduledAction",
+		"DeregisterScalableTarget",
+		"DescribeScalableTargets",
+		"DescribeScalingActivities",
+		"DescribeScalingPolicies",
+		"DescribeScheduledActions",
+		"ListTagsForResource",
+		"PutScalingPolicy",
+		"PutScheduledAction",
+		"RegisterScalableTarget",
+		"TagResource",
+		"UntagResource",
 	},
 	"appsync": {
 		"CreateApiKey",

@@ -20,6 +20,7 @@ var pluginModels = []pluginModel{
 	{plugin: "acm", models: []string{"acm"}},
 	{plugin: "apigateway", models: []string{"apigateway"}},
 	{plugin: "apigatewayv2", models: []string{"apigatewayv2"}},
+	{plugin: "application-autoscaling", models: []string{"application-autoscaling"}},
 	{plugin: "appsync", models: []string{"appsync"}},
 	{plugin: "athena", models: []string{"athena"}},
 	{plugin: "autoscaling", models: []string{"autoscaling"}},
