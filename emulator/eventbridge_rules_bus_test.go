@@ -199,6 +199,14 @@ func TestEBRules_TheRuleQuotaIsPerBus(t *testing.T) {
 	ebRefused(t, ts, "PutRule", map[string]any{"Name": "one-too-many", "EventPattern": `{"source":["x"]}`}, "LimitExceededException")
 	ebPutRule(t, ts, ebTarget, map[string]any{"Name": "r000", "EventPattern": `{"source":["y"]}`}) // an update is not a new rule
 	ebPutRule(t, ts, ebTarget, map[string]any{"Name": "r000", "EventBusName": "orders", "EventPattern": `{"source":["x"]}`})
+
+	// The quotas page gives two Regions 100.
+	capeTown := signedRequestTarget{host: "events.af-south-1.amazonaws.com", target: "AWSEvents", signingName: "events"}
+	for i := range 100 {
+		ebPutRule(t, ts, capeTown, map[string]any{"Name": fmt.Sprintf("r%03d", i), "EventPattern": `{"source":["x"]}`})
+	}
+	_, raw, code := ebCall(t, ts, capeTown, "PutRule", map[string]any{"Name": "one-too-many", "EventPattern": `{"source":["x"]}`})
+	assert.Equal(t, "LimitExceededException", code, raw)
 }
 
 // TestEBRules_APreV0134RecordIsTheDefaultBusRule loads state as a release before rules were keyed

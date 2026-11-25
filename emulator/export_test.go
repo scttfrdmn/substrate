@@ -783,6 +783,15 @@ func (d *StackDeployer) DispatchForTest(
 	return resp, err
 }
 
+// MoveEventsRuleForTest runs the last steps of a CloudFormation rule move with live as the old
+// rule's targets, so a test can make a step fail — by naming a target list that does not match the
+// old rule, or a bus that holds no rule — and observe that the move is undone. No request can drive
+// it there, because the updater lists the old rule's targets itself.
+func (d *StackDeployer) MoveEventsRuleForTest(rule, oldBus, newBus string, live []EBTarget, declaredNow []string) error {
+	var cost float64
+	return d.moveEventsRule(context.Background(), rule, oldBus, newBus, live, declaredNow, declaredNow, "probe", &cost)
+}
+
 // DeleteStackResourcesForTest sweeps a persisted stack's resources and returns the
 // per-resource outcome, without touching the stack record.
 //

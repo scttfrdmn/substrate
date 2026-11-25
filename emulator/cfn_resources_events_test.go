@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -186,4 +187,75 @@ func TestCFN_EventsRuleMoveRollsBack(t *testing.T) {
 	cfnEventsRemoveOutOfBand(t, d, "orders")
 	require.NoError(t, d.DeleteStack(ctx, "events-rollback"))
 	cfnEventsAssertNothingLeft(t, d)
+}
+
+// TestCFN_EventsRuleMoveIsUndoneWhenAStepFails drives the last steps of a move with a failing step,
+// and checks that the copy on the new bus is deleted and the old rule is as it was.
+func TestCFN_EventsRuleMoveIsUndoneWhenAStepFails(t *testing.T) {
+	setup := func(t *testing.T) *emulator.StackDeployer {
+		t.Helper()
+		d, _, _, _ := newSweepDeployer(t)
+		for _, bus := range []string{"orders", "audit"} {
+			cfnStubDispatch(t, d, "eventbridge", "CreateEventBus", map[string]any{"Name": bus})
+			cfnStubDispatch(t, d, "eventbridge", "PutRule", map[string]any{"Name": "on-orders", "EventBusName": bus, "ScheduleExpression": "rate(1 hour)"})
+		}
+		cfnStubDispatch(t, d, "eventbridge", "PutTargets", map[string]any{"Rule": "on-orders", "EventBusName": "orders",
+			"Targets": []map[string]string{{"Id": "a", "Arn": cfnEventsQueue("a")}, {"Id": "b", "Arn": cfnEventsQueue("b")}}})
+		return d
+	}
+	t.Run("the old rule cannot be deleted", func(t *testing.T) {
+		d := setup(t)
+		// Only a is named as live, so b is left on the old rule and DeleteRule refuses it.
+		err := d.MoveEventsRuleForTest("on-orders", "orders", "audit", []emulator.EBTarget{{Id: "a", ARN: cfnEventsQueue("a")}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "move rule on-orders from bus orders to audit")
+		assert.False(t, cfnEventsRuleOn(t, d, "audit"), "the copy is deleted")
+		assert.Equal(t, []string{"a", "b"}, cfnEventsTargetsOn(t, d, "orders"), "the old rule's removed target is restored")
+	})
+	t.Run("the old rule is gone", func(t *testing.T) {
+		d := setup(t)
+		err := d.MoveEventsRuleForTest("on-orders", "absent", "audit", []emulator.EBTarget{{Id: "a", ARN: cfnEventsQueue("a")}}, nil)
+		require.Error(t, err)
+		assert.False(t, cfnEventsRuleOn(t, d, "audit"), "the copy is deleted")
+		assert.Equal(t, []string{"a", "b"}, cfnEventsTargetsOn(t, d, "orders"))
+	})
+}
+
+// TestCFN_EventsRefusalsFailTheResource checks that a refusal from EventBridge while a stack
+// creates or updates a bus or rule fails that resource and rolls the stack back.
+func TestCFN_EventsRefusalsFailTheResource(t *testing.T) {
+	ctx := context.Background()
+	t.Run("a bus policy that is not an object", func(t *testing.T) {
+		d, _, _, _ := newSweepDeployer(t)
+		result, err := d.Deploy(ctx, `{"Resources":{"Bus":{"Type":"AWS::Events::EventBus","Properties":{"Name":"orders","Policy":"[]"}}}}`, "bad-policy", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "ROLLBACK_COMPLETE", result.Status, result.StatusReason)
+	})
+	update := func(t *testing.T, bad string) *emulator.DeployResult {
+		t.Helper()
+		d, _, _, _ := newSweepDeployer(t)
+		_, err := d.Deploy(ctx, `{"Resources":{"Bus":{"Type":"AWS::Events::EventBus","Properties":{"Name":"orders"}}}}`, "bad-update", nil)
+		require.NoError(t, err)
+		result, err := d.UpdateStack(ctx, `{"Resources":{"Bus":{"Type":"AWS::Events::EventBus","Properties":{"Name":"orders",`+bad+`}}}}`,
+			"bad-update", nil, emulator.CFNDeployOptions{})
+		require.NoError(t, err)
+		return result
+	}
+	for name, bad := range map[string]string{
+		"an unknown log level": `"LogConfig":{"Level":"LOUD"}`,
+		"a bad policy":         `"Policy":"[]"`,
+		"a long tag key":       `"Tags":[{"Key":"` + strings.Repeat("k", 129) + `","Value":"v"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := update(t, bad)
+			assert.Equal(t, "UPDATE_ROLLBACK_COMPLETE", result.Status, result.StatusReason)
+		})
+	}
+	t.Run("a rule target on a rule PutRule refused", func(t *testing.T) {
+		d, _, _, _ := newSweepDeployer(t)
+		result, err := d.Deploy(ctx, `{"Resources":{"Rule":{"Type":"AWS::Events::Rule","Properties":{"Name":"r","EventBusName":"absent",
+			"ScheduleExpression":"rate(1 hour)","Targets":[{"Id":"q","Arn":"`+cfnEventsQueue("q")+`"}]}}}}`, "bad-rule", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "ROLLBACK_COMPLETE", result.Status, result.StatusReason)
+	})
 }
