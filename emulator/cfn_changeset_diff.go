@@ -97,6 +97,13 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::Lambda::Version": {"CodeSha256": "Always", "Description": "Always", "FunctionName": "Always",
 		"ProvisionedConcurrencyConfig": "Always", "RuntimePolicy": "Always"},
 	"AWS::Lambda::Alias": {"FunctionName": "Always", "Name": "Always"},
+	// Cloud Map (#1614), each from its own page.
+	"AWS::ServiceDiscovery::HttpNamespace":       {"Name": "Always"},
+	"AWS::ServiceDiscovery::PrivateDnsNamespace": {"Name": "Always", "Vpc": "Always"},
+	"AWS::ServiceDiscovery::PublicDnsNamespace":  {"Name": "Always"},
+	"AWS::ServiceDiscovery::Service": {"HealthCheckCustomConfig": "Always", "Name": "Always", "NamespaceId": "Always",
+		"Type": "Always"},
+	"AWS::ServiceDiscovery::Instance": {"InstanceId": "Always", "ServiceId": "Always"},
 	// The IAM types v0.129.0 gives an update path (#1545, #1560), each from its own page.
 	"AWS::IAM::User":          {"UserName": "Always"},
 	"AWS::IAM::Group":         {"GroupName": "Always"},

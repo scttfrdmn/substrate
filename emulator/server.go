@@ -575,6 +575,10 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Delete("/v1/kinesis/stream-status", s.handleKinesisClearStreamStatus)
 		cp.Post("/v1/kinesis/consumer-status", s.handleKinesisSeedConsumerStatus)
 		cp.Delete("/v1/kinesis/consumer-status", s.handleKinesisClearConsumerStatus)
+
+		// Cloud Map operation-status progression (#1614).
+		cp.Post("/v1/servicediscovery/operation-status", s.handleServiceDiscoverySeedOperationStatus)
+		cp.Delete("/v1/servicediscovery/operation-status", s.handleServiceDiscoveryClearOperationStatus)
 		cp.Post("/v1/lambda/role-propagation", s.handleLambdaSeedRolePropagation)
 		cp.Delete("/v1/lambda/role-propagation", s.handleLambdaClearRolePropagation)
 		cp.Post("/v1/ec2/nat-gateway-state", s.handleEC2SeedNatGatewayState)

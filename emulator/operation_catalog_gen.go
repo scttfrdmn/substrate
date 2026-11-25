@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 69 plugins, 1268 routed operations.
+// 70 plugins, 1294 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -1241,6 +1241,34 @@ var routedOperations = map[string][]string{
 		"UntagResource",
 		"UpdateSecret",
 		"ValidateResourcePolicy",
+	},
+	"servicediscovery": {
+		"CreateHttpNamespace",
+		"CreatePrivateDnsNamespace",
+		"CreatePublicDnsNamespace",
+		"CreateService",
+		"DeleteNamespace",
+		"DeleteService",
+		"DeregisterInstance",
+		"DiscoverInstances",
+		"GetInstance",
+		"GetInstancesHealthStatus",
+		"GetNamespace",
+		"GetOperation",
+		"GetService",
+		"ListInstances",
+		"ListNamespaces",
+		"ListOperations",
+		"ListServices",
+		"ListTagsForResource",
+		"RegisterInstance",
+		"TagResource",
+		"UntagResource",
+		"UpdateHttpNamespace",
+		"UpdateInstanceCustomHealthStatus",
+		"UpdatePrivateDnsNamespace",
+		"UpdatePublicDnsNamespace",
+		"UpdateService",
 	},
 	"servicequotas": {
 		"GetAWSDefaultServiceQuota",

@@ -173,11 +173,11 @@ func TestTaggingProviders_ThePilotsImplementBothInterfaces(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
 	listers, taggers := emulator.TaggingProvidersForTest(ts.Registry())
-	pilots := []string{"ec2", "eventbridge", "monitoring", "s3"}
+	pilots := []string{"ec2", "eventbridge", "monitoring", "s3", "servicediscovery"}
 	assert.Equal(t, pilots, listers)
 	// IAM writes its own records' tags, under the lock a user rename holds, and leaves listing to
 	// the tagging API's direct read.
-	assert.Equal(t, []string{"ec2", "eventbridge", "iam", "monitoring", "s3"}, taggers)
+	assert.Equal(t, []string{"ec2", "eventbridge", "iam", "monitoring", "s3", "servicediscovery"}, taggers)
 }
 
 func TestTaggingProviders_EachPilotAnswersItsScanOnceAndNoDirectReadRuns(t *testing.T) {

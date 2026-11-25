@@ -71,6 +71,10 @@
       "link": "/reference/budgets"
     },
     {
+      "text": "Cloud Map",
+      "link": "/reference/servicediscovery"
+    },
+    {
       "text": "CloudFormation",
       "link": "/reference/cloudformation"
     },

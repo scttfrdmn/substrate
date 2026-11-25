@@ -197,6 +197,10 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	"transfer":   errProtoJSONRPC,
 	"wafv2":      errProtoJSONRPC,
 
+	// Cloud Map: "protocols": ["smithy-rpc-v2-cbor", "json"], jsonVersion 1.1, target prefix
+	// Route53AutoNaming_v20170314. The plugin speaks the json protocol (#1733).
+	"servicediscovery": errProtoJSONRPC,
+
 	// REST-JSON.
 	"account":         errProtoRESTJSON,
 	"apigateway":      errProtoRESTJSON,

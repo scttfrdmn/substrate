@@ -531,6 +531,17 @@ var pluginRouting = map[string]PluginRouting{
 		SigningNames: []string{"ses"},
 		Source:       "botocore ses service-2.json",
 	},
+	"servicediscovery": {
+		Display:      "Cloud Map",
+		Protocol:     "JSON",
+		TargetPrefix: "Route53AutoNaming_v20170314",
+		Hosts:        []string{"servicediscovery.us-east-1.amazonaws.com", "data-servicediscovery.us-east-1.amazonaws.com"},
+		SigningNames: []string{"servicediscovery"},
+		Why: "The model declares protocols ['smithy-rpc-v2-cbor', 'json']; botocore prefers json and the " +
+			"plugin speaks only json, so aws-sdk-go-v2 servicediscovery v1.50+, which prefers CBOR, is not " +
+			"served yet (#1733). DiscoverInstances carries the endpoint hostPrefix \"data-\".",
+		Source: "botocore servicediscovery service-2.json",
+	},
 	"sesv2": {
 		Display:      "SES v2",
 		Protocol:     "REST/JSON",

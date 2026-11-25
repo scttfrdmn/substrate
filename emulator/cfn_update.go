@@ -103,6 +103,12 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	// The identity providers (#1613); their Url and Name are Replacement.
 	"AWS::IAM::OIDCProvider": (*StackDeployer).updateIAMOIDCProvider,
 	"AWS::IAM::SAMLProvider": (*StackDeployer).updateIAMSAMLProvider,
+	// Cloud Map (#1614): Description and a DNS namespace's Properties, and a service's Description,
+	// DnsConfig and HealthCheckConfig, are No interruption on their pages.
+	"AWS::ServiceDiscovery::HttpNamespace":       cfnUpdateServiceDiscoveryNamespace("AWS::ServiceDiscovery::HttpNamespace"),
+	"AWS::ServiceDiscovery::PrivateDnsNamespace": cfnUpdateServiceDiscoveryNamespace("AWS::ServiceDiscovery::PrivateDnsNamespace"),
+	"AWS::ServiceDiscovery::PublicDnsNamespace":  cfnUpdateServiceDiscoveryNamespace("AWS::ServiceDiscovery::PublicDnsNamespace"),
+	"AWS::ServiceDiscovery::Service":             (*StackDeployer).updateServiceDiscoveryService,
 }
 
 // cfnUpdateUnmodelled maps a type to why a change to one of its updatable properties cannot be

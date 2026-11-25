@@ -237,6 +237,10 @@
       "apiVersion": "2019-06-24",
       "operations": 8
     },
+    "servicediscovery": {
+      "apiVersion": "2017-03-14",
+      "operations": 26
+    },
     "ses": {
       "apiVersion": "2010-12-01",
       "operations": 21
