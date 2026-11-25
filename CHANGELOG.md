@@ -55,15 +55,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EventBridge: a missing rule answers `Rule X does not exist on EventBus Y.`, a missing bus `Event bus X does not exist.`, a taken name `Event bus X already exists.` and a bus with rules `EventBus can't be deleted since it has rules.`, AWS's observed wording; the other bus and permission messages are substrate's own (#1613).
 - IAM: `GetAccountAuthorizationDetails` accepts `Filter=SAMLProviderList`, which selects none of the four populations (#1613).
 
-### Compatibility
-
-- Routing: an unsigned request with no other routing signal and `Action=AssumeRoleWithWebIdentity` or `AssumeRoleWithSAML` reaches STS instead of answering `ServiceNotAvailable` (#1613).
-- IAM: a trust-policy `"AWS"` principal never matches an OIDC or SAML provider; only a `Federated` entry does (#1613).
-- Authorization: a presigned URL or S3 POST-policy upload is authorized as its signer, whose key is read from `X-Amz-Credential`; it was unenforced (#1613).
-- STS: `AssumeRole` with `Policy` or `PolicyArns` now mints a narrowed session where it ignored them; an unknown customer managed `PolicyArns` entry is `MalformedPolicyDocument`, and an AWS managed one substrate does not bundle is accepted as a policy that allows nothing (#1613).
-- STS: `AssumeRole` refuses a `DurationSeconds` above the role's `MaxSessionDuration` (3600 unless set), and needs `sts:TagSession`/`sts:SetSourceIdentity` in an enforced trust policy when tags or a source identity are passed (#1706).
-- STS/IAM: the federation and provider limit, validation, SAML `NoSuchEntity`, malformed-token, missing-`sub`/`exp`, not-yet-valid, SAML-expiry, session-tag, session-policy and seeded `IDPRejectedClaim`/`IDPCommunicationError` messages are substrate's own (#1613).
-
 ### Fixed
 
 - Kinesis: `DescribeStream` and `DescribeStreamSummary` report `EncryptionType` `NONE`, so Terraform's `aws_kinesis_stream` plans no change on refresh (#1613).
@@ -77,6 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 
+- Routing: an unsigned request with no other routing signal and `Action=AssumeRoleWithWebIdentity` or `AssumeRoleWithSAML` reaches STS instead of answering `ServiceNotAvailable` (#1613).
+- IAM: a trust-policy `"AWS"` principal never matches an OIDC or SAML provider; only a `Federated` entry does (#1613).
+- Authorization: a presigned URL or S3 POST-policy upload is authorized as its signer, whose key is read from `X-Amz-Credential`; it was unenforced (#1613).
+- STS: `AssumeRole` with `Policy` or `PolicyArns` now mints a narrowed session where it ignored them; an unknown customer managed `PolicyArns` entry is `MalformedPolicyDocument`, and an AWS managed one substrate does not bundle is accepted as a policy that allows nothing (#1613).
+- STS: `AssumeRole` refuses a `DurationSeconds` above the role's `MaxSessionDuration` (3600 unless set), and needs `sts:TagSession`/`sts:SetSourceIdentity` in an enforced trust policy when tags or a source identity are passed (#1706).
+- STS/IAM: the federation and provider limit, validation, SAML `NoSuchEntity`, malformed-token, missing-`sub`/`exp`, not-yet-valid, SAML-expiry, session-tag, session-policy and seeded `IDPRejectedClaim`/`IDPCommunicationError` messages are substrate's own (#1613).
 - EventBridge: a rule on a custom bus has the ARN `rule/{bus}/{name}`, and `PutRule` refuses a bus that does not exist; create it with `CreateEventBus` first. Rules from earlier state are default-bus rules (#1613).
 - EventBridge: tagging an event-bus ARN now tags the bus instead of answering `ResourceNotFoundException`, and `GetResources` reports tagged buses (#1640).
 - EventBridge: a rule name outside `[.\-_A-Za-z0-9]{1,64}` is refused `ValidationError`. A default-bus rule an earlier build stored under such a name is no longer listed or addressable; reset state to clear it (#1613).
