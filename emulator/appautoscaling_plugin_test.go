@@ -152,12 +152,16 @@ func TestApplicationAutoScaling_TerraformDynamoDBJourney(t *testing.T) {
 	out = aasOK(t, ts, "PutScalingPolicy", pol)
 	policyARN, _ := out["PolicyARN"].(string)
 	assert.Regexp(t, `^arn:aws:autoscaling:us-east-1:\d{12}:scalingPolicy:[0-9a-f-]{36}:resource/dynamodb/table/orders:policyName/read-tracking$`, policyARN)
+	// A DynamoDB target tracking policy creates four alarms, as the DynamoDB developer guide states.
 	alarms, _ := out["Alarms"].([]any)
-	require.Len(t, alarms, 2)
-	high := alarms[0].(map[string]any)["AlarmName"].(string)
-	assert.True(t, strings.HasPrefix(high, "TargetTracking-table/orders-AlarmHigh-"), high)
-	assert.True(t, strings.HasPrefix(alarms[1].(map[string]any)["AlarmName"].(string), "TargetTracking-table/orders-AlarmLow-"))
-	assert.ElementsMatch(t, []string{high, alarms[1].(map[string]any)["AlarmName"].(string)}, aasAlarmNames(t, ts))
+	require.Len(t, alarms, 4)
+	var names []string
+	for i, kind := range []string{"AlarmHigh", "AlarmLow", "ProvisionedCapacityHigh", "ProvisionedCapacityLow"} {
+		name := alarms[i].(map[string]any)["AlarmName"].(string)
+		assert.True(t, strings.HasPrefix(name, "TargetTracking-table/orders-"+kind+"-"), name)
+		names = append(names, name)
+	}
+	assert.ElementsMatch(t, names, aasAlarmNames(t, ts))
 
 	// A re-put keeps the ARN and the alarm names.
 	pol["TargetTrackingScalingPolicyConfiguration"] = map[string]any{
@@ -254,7 +258,7 @@ func TestApplicationAutoScaling_DeregisterDeletesPoliciesAndAlarms(t *testing.T)
 		pol[k] = v
 	}
 	aasOK(t, ts, "PutScalingPolicy", pol)
-	require.Len(t, aasAlarmNames(t, ts), 2)
+	require.Len(t, aasAlarmNames(t, ts), 4)
 	sched := map[string]any{"ScheduledActionName": "s", "Schedule": "rate(1 hour)"}
 	for k, v := range target {
 		sched[k] = v

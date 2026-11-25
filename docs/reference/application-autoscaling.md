@@ -34,16 +34,21 @@ A policy's configuration is stored as it was sent (compacted) and answered back 
 
 ## A target tracking policy creates its CloudWatch alarms
 
-AWS creates two CloudWatch alarms for a target tracking policy and names them in the response:
-`TargetTracking-{ResourceId}-AlarmHigh-{uuid}` and `TargetTracking-{ResourceId}-AlarmLow-{uuid}`.
-Substrate creates both through the CloudWatch plugin with `PutMetricAlarm`, so `DescribeAlarms`
-lists exactly the alarms the policy's `Alarms` member names, and deleting the policy or
-deregistering its target deletes them. A re-put of the policy keeps the names and redefines the
-alarms; changing the policy to another type deletes them.
+AWS creates CloudWatch alarms for a target tracking policy and names them in the response:
+`TargetTracking-{ResourceId}-AlarmHigh-{uuid}` and `TargetTracking-{ResourceId}-AlarmLow-{uuid}`,
+and for a DynamoDB target also `-ProvisionedCapacityHigh-` and `-ProvisionedCapacityLow-` ("four
+CloudWatch alarms are created for each read and write auto-scaling event", the DynamoDB developer
+guide). Substrate creates them through the CloudWatch plugin with `PutMetricAlarm`, so
+`DescribeAlarms` lists exactly the alarms the policy's `Alarms` member names, and deleting the
+policy or deregistering its target deletes them once the record no longer names them. A re-put of
+the policy keeps the names and redefines the alarms; changing the policy to another type deletes
+them. A `PutScalingPolicy` that fails after creating alarms deletes the ones it created.
 
 The alarms' definitions are substrate's approximation, because AWS publishes their names and not
 their metric, threshold or evaluation settings. The high alarm breaches above `TargetValue` over 3
-one-minute periods and the low alarm below 90% of it over 15; both act on the policy ARN. A
+one-minute periods and the low alarm below 90% of it over 15; a DynamoDB target's provisioned-capacity
+alarms watch `ProvisionedReadCapacityUnits` or `ProvisionedWriteCapacityUnits` above `MaxCapacity`
+and below `MinCapacity`. All act on the policy ARN. A
 `CustomizedMetricSpecification` with a `MetricName` supplies the metric. The predefined metric types
 `DynamoDBReadCapacityUtilization`, `DynamoDBWriteCapacityUtilization`,
 `ECSServiceAverageCPUUtilization` and `ECSServiceAverageMemoryUtilization` map to their `AWS/DynamoDB`
@@ -87,20 +92,24 @@ The Resource Groups Tagging API's `GetResources`, `TagResources` and `UntagResou
 targets, under the lock the plugin's own tag operations hold, so a tag written through either API is
 read back by the other. A target whose tags were all removed is still reported, as a previously
 tagged resource. Scaling policies and scheduled actions carry no tags, as the `TagResource` page
-states.
+states. An ARN naming another account's or Region's target is reported failed and changes nothing.
 
 ## CloudFormation resource types
 
-`AWS::ApplicationAutoScaling::ScalableTarget` registers the target and puts its `ScheduledActions`,
-deleting any scheduled action the declaration no longer names. `Ref` returns the ID CloudFormation
-generates, `{ResourceId}|{ScalableDimension}|{ServiceNamespace}`.
+`AWS::ApplicationAutoScaling::ScalableTarget` registers the target and puts its `ScheduledActions`.
+An update deletes the scheduled actions the previous declaration named and this one does not; an
+action made outside the stack is left alone. A create whose scheduled actions fail deregisters the
+target, so the rollback leaves nothing behind. `Ref` returns the ID CloudFormation generates,
+`{ResourceId}|{ScalableDimension}|{ServiceNamespace}`.
 
 `AWS::ApplicationAutoScaling::ScalingPolicy` names its target either by `ScalingTargetId` or by
 `ResourceId`, `ScalableDimension` and `ServiceNamespace`, never both. `Ref` and `Fn::GetAtt Arn`
 return the policy ARN.
 
-Both underlying operations create or update, so a change to a No interruption property updates the
-target or policy in place under the same physical ID, and a change to a Replacement property
+Both underlying operations create or update. A stack's create refuses a target or policy that
+already exists rather than adopting it, so deleting the stack cannot deregister another owner's
+target (the reason is substrate's own). A change to a No interruption property updates the target or
+policy in place under the same physical ID, and a change to a Replacement property
 (`ResourceId`, `ScalableDimension`, `ServiceNamespace`, and a policy's `PolicyName` or
 `ScalingTargetId`) replaces it. Deleting a stack deregisters the target, which deletes its policies.
 The CDK's DynamoDB `autoScaleReadCapacity`/`autoScaleWriteCapacity` output deploys in strict mode.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -146,23 +147,27 @@ func (p *ApplicationAutoScalingPlugin) putScalingPolicy(ctx *RequestContext, req
 			ctx.Region, ctx.AccountID, ctx.IDs.UUID(), t.ServiceNamespace, t.ResourceID, pol.PolicyName)
 	}
 
+	// Alarms this request creates are undone if a later step fails; alarms the policy stops owning
+	// are deleted only once the record no longer names them.
+	var created, retired []aasAlarm
 	if pol.PolicyType == "TargetTrackingScaling" {
 		if len(pol.Alarms) == 0 {
 			prefix := "TargetTracking-" + t.ResourceID
-			for _, suffix := range []string{"AlarmHigh", "AlarmLow"} {
+			for _, suffix := range aasAlarmSuffixes(t.ServiceNamespace) {
 				name := prefix + "-" + suffix + "-" + ctx.IDs.UUID()
 				pol.Alarms = append(pol.Alarms, aasAlarm{
 					AlarmName: name,
 					AlarmARN:  "arn:aws:cloudwatch:" + ctx.Region + ":" + ctx.AccountID + ":alarm:" + name,
 				})
 			}
+			created = pol.Alarms
 		}
-		if awsErr := p.putTrackingAlarms(ctx, t, pol); awsErr != nil {
-			return nil, awsErr
+		if err := p.putTrackingAlarms(ctx, t, pol); err != nil {
+			p.deleteAlarms(ctx, created)
+			return nil, err
 		}
 	} else if len(pol.Alarms) > 0 {
-		p.deleteAlarms(ctx, pol.Alarms)
-		pol.Alarms = nil
+		retired, pol.Alarms = pol.Alarms, nil
 	}
 
 	if idx >= 0 {
@@ -171,8 +176,10 @@ func (p *ApplicationAutoScalingPlugin) putScalingPolicy(ctx *RequestContext, req
 		t.Policies = append(t.Policies, pol)
 	}
 	if err := p.storeTarget(key, t); err != nil {
+		p.deleteAlarms(ctx, created)
 		return nil, err
 	}
+	p.deleteAlarms(ctx, retired)
 	out := struct {
 		PolicyARN string     `json:"PolicyARN"`
 		Alarms    []aasAlarm `json:"Alarms,omitempty"`
@@ -231,15 +238,30 @@ var aasPredefinedMetrics = map[string]struct{ namespace, metric, statistic strin
 	"ECSServiceAverageMemoryUtilization": {"AWS/ECS", "MemoryUtilization", "Average"},
 }
 
+// aasAlarmSuffixes names the alarms a target tracking policy creates, in the order Alarms lists
+// them: AlarmHigh and AlarmLow for every namespace, and for DynamoDB also ProvisionedCapacityHigh and
+// ProvisionedCapacityLow — "four CloudWatch alarms are created for each read and write auto-scaling
+// event: ProvisionedCapacity alarms: ProvisionedCapacityLow, ProvisionedCapacityHigh and
+// ConsumedCapacity alarms: AlarmHigh, AlarmLow" (the DynamoDB developer guide, "Managing throughput
+// capacity automatically with DynamoDB auto scaling").
+func aasAlarmSuffixes(namespace string) []string {
+	if namespace == "dynamodb" {
+		return []string{"AlarmHigh", "AlarmLow", "ProvisionedCapacityHigh", "ProvisionedCapacityLow"}
+	}
+	return []string{"AlarmHigh", "AlarmLow"}
+}
+
 // aasPlaceholderMetricNamespace is the namespace of an alarm whose metric substrate does not map.
 // It is deliberately not an AWS/ namespace, so no reader mistakes it for AWS's choice.
 const aasPlaceholderMetricNamespace = "Substrate/ApplicationAutoScaling"
 
-// putTrackingAlarms defines pol's two alarms in CloudWatch with PutMetricAlarm, which creates an
-// alarm or redefines one of the same name. The high alarm breaches above the target value and the
-// low alarm below 90% of it; both act on the policy's ARN. Without a registry, or without a
-// CloudWatch plugin, the alarms are named and not created.
-func (p *ApplicationAutoScalingPlugin) putTrackingAlarms(ctx *RequestContext, t *aasTarget, pol aasPolicy) *AWSError {
+// putTrackingAlarms defines pol's alarms in CloudWatch with PutMetricAlarm, which creates an alarm
+// or redefines one of the same name. AlarmHigh breaches above the target value and AlarmLow below
+// 90% of it, on the tracked metric; a DynamoDB target's ProvisionedCapacityHigh and
+// ProvisionedCapacityLow breach when the provisioned capacity leaves the target's range. All act on
+// the policy's ARN. Without a registry, or without a CloudWatch plugin, the alarms are named and not
+// created. A CloudWatch refusal is FailedResourceAccessException; any other error is returned as is.
+func (p *ApplicationAutoScalingPlugin) putTrackingAlarms(ctx *RequestContext, t *aasTarget, pol aasPolicy) error {
 	if p.registry == nil {
 		return nil
 	}
@@ -270,41 +292,65 @@ func (p *ApplicationAutoScalingPlugin) putTrackingAlarms(ctx *RequestContext, t 
 			metric = cfg.PredefinedMetricSpecification.PredefinedMetricType
 		}
 	}
-	thresholds := []struct {
-		op        string
-		threshold float64
-		periods   string
-	}{
-		{"GreaterThanThreshold", *cfg.TargetValue, "3"},
-		{"LessThanThreshold", *cfg.TargetValue * 0.9, "15"},
+	provisioned := "ProvisionedWriteCapacityUnits"
+	if strings.HasSuffix(t.ScalableDimension, ":ReadCapacityUnits") {
+		provisioned = "ProvisionedReadCapacityUnits"
 	}
-	for i, alarm := range pol.Alarms {
-		if i >= len(thresholds) {
-			break
+	type alarmSpec struct {
+		namespace, metric, statistic, op, periods string
+		threshold                                 float64
+		dims                                      [][2]string
+	}
+	specs := map[string]alarmSpec{
+		"AlarmHigh": {namespace, metric, statistic, "GreaterThanThreshold", "3", *cfg.TargetValue, dims},
+		"AlarmLow":  {namespace, metric, statistic, "LessThanThreshold", "15", *cfg.TargetValue * 0.9, dims},
+		"ProvisionedCapacityHigh": {"AWS/DynamoDB", provisioned, "Average", "GreaterThanThreshold", "3",
+			float64(t.MaxCapacity), aasTargetDimensions(t)},
+		"ProvisionedCapacityLow": {"AWS/DynamoDB", provisioned, "Average", "LessThanThreshold", "3",
+			float64(t.MinCapacity), aasTargetDimensions(t)},
+	}
+	for _, alarm := range pol.Alarms {
+		spec, ok := specs[aasAlarmKind(alarm.AlarmName)]
+		if !ok {
+			continue
 		}
 		params := map[string]string{
 			"Action": "PutMetricAlarm", "AlarmName": alarm.AlarmName,
-			"Namespace": namespace, "MetricName": metric, "Statistic": statistic,
-			"Period": "60", "EvaluationPeriods": thresholds[i].periods,
-			"Threshold":             strconv.FormatFloat(thresholds[i].threshold, 'f', -1, 64),
-			"ComparisonOperator":    thresholds[i].op,
+			"Namespace": spec.namespace, "MetricName": spec.metric, "Statistic": spec.statistic,
+			"Period": "60", "EvaluationPeriods": spec.periods,
+			"Threshold":             strconv.FormatFloat(spec.threshold, 'f', -1, 64),
+			"ComparisonOperator":    spec.op,
 			"AlarmActions.member.1": pol.PolicyARN,
 		}
-		for j, d := range dims {
+		for j, d := range spec.dims {
 			base := "Dimensions.member." + strconv.Itoa(j+1) + "."
 			params[base+"Name"], params[base+"Value"] = d[0], d[1]
 		}
 		_, err := p.registry.RouteRequest(ctx, &AWSRequest{
 			Service: monitoringNamespace, Operation: "PutMetricAlarm", Headers: map[string]string{}, Params: params,
 		})
-		if err != nil {
+		var awsErr *AWSError
+		if errors.As(err, &awsErr) {
 			// FailedResourceAccessException is the code the page gives for a failure reaching the
 			// policy's alarms; the message is substrate's own.
 			return &AWSError{Code: "FailedResourceAccessException",
-				Message: "Failed to create the alarms for the target tracking policy: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+				Message: "Failed to create the alarms for the target tracking policy: " + awsErr.Error(), HTTPStatus: http.StatusBadRequest}
+		}
+		if err != nil {
+			return fmt.Errorf("application-autoscaling put alarm %s: %w", alarm.AlarmName, err)
 		}
 	}
 	return nil
+}
+
+// aasAlarmKind returns which of [aasAlarmSuffixes] an alarm name carries.
+func aasAlarmKind(name string) string {
+	for _, kind := range []string{"ProvisionedCapacityHigh", "ProvisionedCapacityLow", "AlarmHigh", "AlarmLow"} {
+		if strings.Contains(name, "-"+kind+"-") {
+			return kind
+		}
+	}
+	return ""
 }
 
 // aasTargetDimensions returns the CloudWatch dimensions that identify t's resource for the metrics
@@ -383,11 +429,12 @@ func (p *ApplicationAutoScalingPlugin) deleteScalingPolicy(ctx *RequestContext, 
 			"No scaling policy found for service namespace: %s, resource ID: %s, scalable dimension: %s, policy name: %s",
 			in.ServiceNamespace, in.ResourceID, in.ScalableDimension, in.PolicyName))
 	}
-	p.deleteAlarms(ctx, t.Policies[idx].Alarms)
+	alarms := t.Policies[idx].Alarms
 	t.Policies = slices.Delete(t.Policies, idx, idx+1)
 	if err := p.storeTarget(key, t); err != nil {
 		return nil, err
 	}
+	p.deleteAlarms(ctx, alarms)
 	return aasJSON(struct{}{})
 }
 

@@ -3,8 +3,10 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -249,8 +251,8 @@ func (p *ApplicationAutoScalingPlugin) registerScalableTarget(ctx *RequestContex
 		if role == "" {
 			return nil, aasValidation("RoleARN is required for service namespace " + in.ServiceNamespace + ".")
 		}
-		if awsErr := p.checkResourceExists(ctx, in.ServiceNamespace, in.ResourceID); awsErr != nil {
-			return nil, awsErr
+		if err := p.checkResourceExists(ctx, in.ServiceNamespace, in.ResourceID); err != nil {
+			return nil, err
 		}
 		t = &aasTarget{
 			ServiceNamespace:  in.ServiceNamespace,
@@ -306,20 +308,34 @@ func (p *ApplicationAutoScalingPlugin) registerScalableTarget(ctx *RequestContex
 // Terraform AWS provider retries on (internal/service/appautoscaling/target.go,
 // registerScalableTarget). The other namespaces' resources are not emulated, or not checked, so
 // their targets register whatever they name. Without a registry nothing is checked.
-func (p *ApplicationAutoScalingPlugin) checkResourceExists(ctx *RequestContext, namespace, resourceID string) *AWSError {
+//
+// Only an answer that the resource is absent becomes the ValidationException; any other failure
+// of the owning plugin is returned as it is.
+func (p *ApplicationAutoScalingPlugin) checkResourceExists(ctx *RequestContext, namespace, resourceID string) error {
 	if p.registry == nil {
 		return nil
 	}
 	switch namespace {
 	case "dynamodb":
 		parts := strings.Split(strings.TrimPrefix(resourceID, "table/"), "/index/")
-		if !p.dynamoDBResourceExists(ctx, parts) {
+		exists, err := p.dynamoDBResourceExists(ctx, parts)
+		if err != nil {
+			return err
+		}
+		if !exists {
 			// The message is substrate's own.
 			return aasValidation(fmt.Sprintf("DynamoDB resource doesn't exist: %s", resourceID))
 		}
 	case "ecs":
 		parts := strings.SplitN(strings.TrimPrefix(resourceID, "service/"), "/", 2)
-		if len(parts) != 2 || !p.ecsServiceExists(ctx, parts[0], parts[1]) {
+		exists := false
+		if len(parts) == 2 {
+			var err error
+			if exists, err = p.ecsServiceExists(ctx, parts[0], parts[1]); err != nil {
+				return err
+			}
+		}
+		if !exists {
 			// "ECS service doesn't exist" is the substring the Terraform AWS provider matches on AWS's
 			// answer; the rest of the message is substrate's own.
 			return aasValidation(fmt.Sprintf("ECS service doesn't exist: %s", resourceID))
@@ -328,22 +344,43 @@ func (p *ApplicationAutoScalingPlugin) checkResourceExists(ctx *RequestContext, 
 	return nil
 }
 
-// dynamoDBResourceExists reports whether the table parts[0] exists and, when parts names an index,
-// whether the table has that global secondary index.
-func (p *ApplicationAutoScalingPlugin) dynamoDBResourceExists(ctx *RequestContext, parts []string) bool {
-	body, err := json.Marshal(map[string]string{"TableName": parts[0]})
+// aasRouteJSON sends a JSON request to another plugin. An AWS refusal whose code is in absent is
+// reported as found false; any other failure is returned.
+func (p *ApplicationAutoScalingPlugin) aasRouteJSON(ctx *RequestContext, service, op, contentType string, body any,
+	absent ...string,
+) ([]byte, bool, error) {
+	raw, err := json.Marshal(body)
 	if err != nil {
-		return false
+		return nil, false, fmt.Errorf("application-autoscaling marshal %s: %w", op, err)
 	}
-	resp, routeErr := p.registry.RouteRequest(ctx, &AWSRequest{
-		Service: "dynamodb", Operation: "DescribeTable", Body: body,
-		Headers: map[string]string{"Content-Type": "application/x-amz-json-1.0"}, Params: map[string]string{},
+	resp, err := p.registry.RouteRequest(ctx, &AWSRequest{
+		Service: service, Operation: op, Body: raw,
+		Headers: map[string]string{"Content-Type": contentType}, Params: map[string]string{},
 	})
-	if routeErr != nil || resp == nil || resp.StatusCode >= 400 {
-		return false
+	var awsErr *AWSError
+	if errors.As(err, &awsErr) && slices.Contains(absent, awsErr.Code) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("application-autoscaling %s %s: %w", service, op, err)
+	}
+	if resp == nil {
+		return nil, false, fmt.Errorf("application-autoscaling %s %s: no response", service, op)
+	}
+	return resp.Body, true, nil
+}
+
+// dynamoDBResourceExists reports whether the table parts[0] exists and, when parts names an index,
+// whether the table has that global secondary index. DescribeTable's ResourceNotFoundException is
+// the table's absence.
+func (p *ApplicationAutoScalingPlugin) dynamoDBResourceExists(ctx *RequestContext, parts []string) (bool, error) {
+	body, found, err := p.aasRouteJSON(ctx, "dynamodb", "DescribeTable", "application/x-amz-json-1.0",
+		map[string]string{"TableName": parts[0]}, "ResourceNotFoundException")
+	if err != nil || !found {
+		return false, err
 	}
 	if len(parts) < 2 {
-		return true
+		return true, nil
 	}
 	var out struct {
 		Table struct {
@@ -352,39 +389,35 @@ func (p *ApplicationAutoScalingPlugin) dynamoDBResourceExists(ctx *RequestContex
 			} `json:"GlobalSecondaryIndexes"`
 		} `json:"Table"`
 	}
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return false
+	if err := json.Unmarshal(body, &out); err != nil {
+		return false, fmt.Errorf("application-autoscaling decode DescribeTable: %w", err)
 	}
 	for _, gsi := range out.Table.GlobalSecondaryIndexes {
 		if gsi.IndexName == parts[1] {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
-// ecsServiceExists reports whether ECS knows an active service named svc in cluster.
-func (p *ApplicationAutoScalingPlugin) ecsServiceExists(ctx *RequestContext, cluster, svc string) bool {
-	body, err := json.Marshal(map[string]any{"cluster": cluster, "services": []string{svc}})
-	if err != nil {
-		return false
-	}
-	resp, routeErr := p.registry.RouteRequest(ctx, &AWSRequest{
-		Service: "ecs", Operation: "DescribeServices", Body: body,
-		Headers: map[string]string{"Content-Type": "application/x-amz-json-1.1"}, Params: map[string]string{},
-	})
-	if routeErr != nil || resp == nil || resp.StatusCode >= 400 {
-		return false
+// ecsServiceExists reports whether ECS knows an active service named svc in cluster. A missing
+// cluster (ClusterNotFoundException), a service DescribeServices reports as a failure, and an
+// INACTIVE service are absences.
+func (p *ApplicationAutoScalingPlugin) ecsServiceExists(ctx *RequestContext, cluster, svc string) (bool, error) {
+	body, found, err := p.aasRouteJSON(ctx, "ecs", "DescribeServices", "application/x-amz-json-1.1",
+		map[string]any{"cluster": cluster, "services": []string{svc}}, "ClusterNotFoundException")
+	if err != nil || !found {
+		return false, err
 	}
 	var out struct {
 		Services []struct {
 			Status string `json:"status"`
 		} `json:"services"`
 	}
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return false
+	if err := json.Unmarshal(body, &out); err != nil {
+		return false, fmt.Errorf("application-autoscaling decode DescribeServices: %w", err)
 	}
-	return len(out.Services) == 1 && out.Services[0].Status != "INACTIVE"
+	return len(out.Services) == 1 && out.Services[0].Status != "INACTIVE", nil
 }
 
 // aasDescribeTargetsInput is DescribeScalableTargets' input.
@@ -494,11 +527,11 @@ func (p *ApplicationAutoScalingPlugin) deregisterScalableTarget(ctx *RequestCont
 	if !found {
 		return nil, aasTargetNotFound(in.ServiceNamespace, in.ResourceID, in.ScalableDimension)
 	}
-	for _, pol := range t.Policies {
-		p.deleteAlarms(ctx, pol.Alarms)
-	}
 	if err := p.state.Delete(context.Background(), appAutoScalingNamespace, key); err != nil {
 		return nil, fmt.Errorf("application-autoscaling deregister: %w", err)
+	}
+	for _, pol := range t.Policies {
+		p.deleteAlarms(ctx, pol.Alarms)
 	}
 	return aasJSON(struct{}{})
 }

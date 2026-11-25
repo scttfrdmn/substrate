@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
 // CloudFormation's two Application Auto Scaling types (#1661). Both operations they dispatch to are
-// create-or-update, so a re-deploy of a changed declaration updates the target or the policy in
-// place under the same physical ID; a change to a property whose "Update requires" is Replacement
-// is a replacement (see cfnRecreationProperties).
+// create-or-update: a create refuses a target or policy that already exists rather than adopting it,
+// and an update applies a changed No interruption property in place under the same physical ID; a
+// change to a property whose "Update requires" is Replacement is a replacement (see
+// cfnRecreationProperties).
 
 // ----- AWS::ApplicationAutoScaling::ScalableTarget ------------------------------------------------
 
@@ -43,22 +45,10 @@ func cfnAASRequest(operation string, body map[string]interface{}) (*AWSRequest, 
 	return cfnJSONRequest(appAutoScalingNamespace, operation, body)
 }
 
-// deployApplicationAutoScalingScalableTarget registers the target with RegisterScalableTarget and
-// puts each declared ScheduledActions entry with PutScheduledAction. A scheduled action the target
-// holds and the declaration does not is deleted, so a re-deploy leaves exactly the declared set.
-func (d *StackDeployer) deployApplicationAutoScalingScalableTarget(
-	ctx context.Context, logicalID string, props map[string]interface{}, streamID string, cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	namespace := resolveStringProp(props, "ServiceNamespace", "", cctx)
-	dimension := resolveStringProp(props, "ScalableDimension", "", cctx)
-	resourceID := resolveStringProp(props, "ResourceId", "", cctx)
-	dr := DeployedResource{
-		LogicalID: logicalID, Type: "AWS::ApplicationAutoScaling::ScalableTarget",
-		PhysicalID: cfnScalableTargetID(resourceID, dimension, namespace),
-		Metadata: map[string]interface{}{
-			"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
-		},
-	}
+// cfnAASTargetBody renders the RegisterScalableTarget body a declaration describes. Tags are sent
+// only on a create, because RegisterScalableTarget ignores them on an update ("To tag an existing
+// scalable target, use the TagResource operation").
+func cfnAASTargetBody(props map[string]interface{}, cctx *cfnContext, namespace, dimension, resourceID string, withTags bool) map[string]interface{} {
 	body := map[string]interface{}{
 		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
 	}
@@ -73,42 +63,139 @@ func (d *StackDeployer) deployApplicationAutoScalingScalableTarget(
 	if s, ok := cfnResolveStructured(props["SuspendedState"], cctx).(map[string]interface{}); ok {
 		body["SuspendedState"] = cfnAASCoerce(s)
 	}
-	if tags := cfnTagMap(cfnResolveStructured(props["Tags"], cctx), cctx); len(tags) > 0 {
+	if tags := cfnTagMap(cfnResolveStructured(props["Tags"], cctx), cctx); withTags && len(tags) > 0 {
 		body["Tags"] = tags
 	}
-	req, err := cfnAASRequest("RegisterScalableTarget", body)
+	return body
+}
+
+// cfnAASCall dispatches an Application Auto Scaling request and decodes its answer into out, which
+// may be nil.
+func (d *StackDeployer) cfnAASCall(ctx context.Context, operation string, body map[string]interface{}, out any, streamID string) (float64, error) {
+	req, err := cfnAASRequest(operation, body)
 	if err != nil {
-		return DeployedResource{}, 0, err
+		return 0, err
 	}
 	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
 	if routeErr != nil {
-		dr.Error = routeErr.Error()
+		return cost, routeErr
+	}
+	if out != nil && resp != nil {
+		if err := json.Unmarshal(resp.Body, out); err != nil {
+			return cost, fmt.Errorf("cfn application-autoscaling %s decode: %w", operation, err)
+		}
+	}
+	return cost, nil
+}
+
+// cfnAASListed reports whether a Describe operation lists anything under member for body.
+func (d *StackDeployer) cfnAASListed(ctx context.Context, operation, member string, body map[string]interface{}, streamID string) (bool, float64, error) {
+	var out map[string][]json.RawMessage
+	cost, err := d.cfnAASCall(ctx, operation, body, &out, streamID)
+	return len(out[member]) > 0, cost, err
+}
+
+// deployApplicationAutoScalingScalableTarget registers the target with RegisterScalableTarget and
+// puts each declared ScheduledActions entry with PutScheduledAction.
+//
+// RegisterScalableTarget creates or updates, so a create would otherwise adopt a target that already
+// exists — one another stack or caller registered — and the stack's delete would then deregister it,
+// with its policies and alarms. A create of a target that already exists is refused instead (the
+// message is substrate's own). A create whose scheduled actions fail deregisters the target it
+// registered, so the failed resource leaves nothing behind for a rollback to miss.
+func (d *StackDeployer) deployApplicationAutoScalingScalableTarget(
+	ctx context.Context, logicalID string, props map[string]interface{}, streamID string, cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	namespace := resolveStringProp(props, "ServiceNamespace", "", cctx)
+	dimension := resolveStringProp(props, "ScalableDimension", "", cctx)
+	resourceID := resolveStringProp(props, "ResourceId", "", cctx)
+	dr := DeployedResource{
+		LogicalID: logicalID, Type: "AWS::ApplicationAutoScaling::ScalableTarget",
+		PhysicalID: cfnScalableTargetID(resourceID, dimension, namespace),
+		Metadata: map[string]interface{}{
+			"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
+		},
+	}
+	exists, cost, err := d.cfnAASListed(ctx, "DescribeScalableTargets", "ScalableTargets", map[string]interface{}{
+		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceIds": []string{resourceID},
+	}, streamID)
+	if err != nil {
+		dr.Error = err.Error()
 		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+	}
+	if exists {
+		dr.Error = fmt.Sprintf("scalable target %s already exists", dr.PhysicalID)
+		return dr, cost, nil
 	}
 	var out struct {
 		ScalableTargetARN string `json:"ScalableTargetARN"`
 	}
-	if resp != nil {
-		if err := json.Unmarshal(resp.Body, &out); err != nil {
-			return DeployedResource{}, cost, fmt.Errorf("cfn deployScalableTarget decode: %w", err)
-		}
+	c, err := d.cfnAASCall(ctx, "RegisterScalableTarget", cfnAASTargetBody(props, cctx, namespace, dimension, resourceID, true), &out, streamID)
+	cost += c
+	if err != nil {
+		dr.Error = err.Error()
+		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
 	}
 	dr.ARN = out.ScalableTargetARN
-
-	actionCost, actionErr := d.syncScheduledActions(ctx, props, namespace, dimension, resourceID, streamID, cctx)
-	cost += actionCost
-	if actionErr != nil {
-		dr.Error = actionErr.Error()
+	names, c, err := d.syncScheduledActions(ctx, props, namespace, dimension, resourceID, nil, streamID, cctx)
+	cost += c
+	if err != nil {
+		dr.Error = err.Error()
+		if req := cfnScalableTargetDeleter(d, dr, props, cctx); req != nil {
+			_, c, undoErr := d.dispatch(ctx, req, streamID)
+			cost += c
+			if undoErr != nil {
+				dr.Error += "; deregistering the target also failed: " + undoErr.Error()
+			}
+		}
+		return dr, cost, nil
 	}
+	dr.Metadata["ScheduledActionNames"] = names
 	return dr, cost, nil
 }
 
-// syncScheduledActions puts each ScheduledActions entry on the target and deletes the target's
-// actions the declaration does not name.
+// updateApplicationAutoScalingScalableTarget applies a changed No interruption property —
+// MinCapacity, MaxCapacity, RoleARN, SuspendedState, ScheduledActions — through
+// RegisterScalableTarget's update and the scheduled-action sync. A failure is reported on the
+// resource, and the update's rollback applies the previous declaration the same way.
+func (d *StackDeployer) updateApplicationAutoScalingScalableTarget(
+	ctx context.Context, logicalID string, prior DeployedResource,
+	props map[string]interface{}, _ []string, streamID string, cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	dr := prior
+	dr.LogicalID = logicalID
+	dr.Error = ""
+	dr.Metadata = make(map[string]interface{}, len(prior.Metadata))
+	for k, v := range prior.Metadata {
+		dr.Metadata[k] = v
+	}
+	namespace, dimension, resourceID := cfnRefMetadata(prior, "ServiceNamespace"), cfnRefMetadata(prior, "ScalableDimension"),
+		cfnRefMetadata(prior, "ResourceId")
+	cost, err := d.cfnAASCall(ctx, "RegisterScalableTarget", cfnAASTargetBody(props, cctx, namespace, dimension, resourceID, false), nil, streamID)
+	if err != nil {
+		dr.Error = err.Error()
+		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+	}
+	previous, _ := cfnMetadataList(prior, "ScheduledActionNames")
+	names, c, err := d.syncScheduledActions(ctx, props, namespace, dimension, resourceID, previous, streamID, cctx)
+	cost += c
+	if err != nil {
+		dr.Error = err.Error()
+		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+	}
+	dr.Metadata["ScheduledActionNames"] = names
+	return dr, cost, nil
+}
+
+// syncScheduledActions puts each ScheduledActions entry on the target, and deletes the actions the
+// previous declaration named and this one does not. An action the stack never declared — one made
+// outside it — is left alone. It returns the names this declaration holds.
 func (d *StackDeployer) syncScheduledActions(
-	ctx context.Context, props map[string]interface{}, namespace, dimension, resourceID, streamID string, cctx *cfnContext,
-) (float64, error) {
+	ctx context.Context, props map[string]interface{}, namespace, dimension, resourceID string, previous []string,
+	streamID string, cctx *cfnContext,
+) ([]string, float64, error) {
 	var cost float64
+	var names []string
 	declared := map[string]bool{}
 	entries, _ := cfnResolveStructured(props["ScheduledActions"], cctx).([]interface{})
 	for _, e := range entries {
@@ -127,53 +214,28 @@ func (d *StackDeployer) syncScheduledActions(
 		}
 		name, _ := body["ScheduledActionName"].(string)
 		declared[name] = true
-		req, err := cfnAASRequest("PutScheduledAction", body)
-		if err != nil {
-			return cost, err
-		}
-		_, c, routeErr := d.dispatch(ctx, req, streamID)
+		names = append(names, name)
+		c, err := d.cfnAASCall(ctx, "PutScheduledAction", body, nil, streamID)
 		cost += c
-		if routeErr != nil {
-			return cost, routeErr
+		if err != nil {
+			return names, cost, err
 		}
 	}
-	req, err := cfnAASRequest("DescribeScheduledActions", map[string]interface{}{
-		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
-	})
-	if err != nil {
-		return cost, err
-	}
-	resp, c, routeErr := d.dispatch(ctx, req, streamID)
-	cost += c
-	if routeErr != nil || resp == nil {
-		return cost, routeErr
-	}
-	var out struct {
-		ScheduledActions []struct {
-			ScheduledActionName string `json:"ScheduledActionName"`
-		} `json:"ScheduledActions"`
-	}
-	if err := json.Unmarshal(resp.Body, &out); err != nil {
-		return cost, fmt.Errorf("cfn syncScheduledActions decode: %w", err)
-	}
-	for _, a := range out.ScheduledActions {
-		if declared[a.ScheduledActionName] {
+	for _, name := range previous {
+		if declared[name] {
 			continue
 		}
-		del, err := cfnAASRequest("DeleteScheduledAction", map[string]interface{}{
+		c, err := d.cfnAASCall(ctx, "DeleteScheduledAction", map[string]interface{}{
 			"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
-			"ScheduledActionName": a.ScheduledActionName,
-		})
-		if err != nil {
-			return cost, err
-		}
-		_, c, routeErr := d.dispatch(ctx, del, streamID)
+			"ScheduledActionName": name,
+		}, nil, streamID)
 		cost += c
-		if routeErr != nil {
-			return cost, routeErr
+		if err != nil && !cfnDeleteIsAbsent(err) {
+			return names, cost, err
 		}
 	}
-	return cost, nil
+	sort.Strings(names)
+	return names, cost, nil
 }
 
 // cfnScalableTargetDeleter deregisters the target, which deletes its policies and scheduled
@@ -219,9 +281,26 @@ func cfnScalingPolicyTarget(props map[string]interface{}, cctx *cfnContext) (res
 	return resourceID, dimension, namespace, nil
 }
 
+// cfnAASPolicyBody renders the PutScalingPolicy body a declaration describes.
+func cfnAASPolicyBody(props map[string]interface{}, cctx *cfnContext, name, namespace, dimension, resourceID string) map[string]interface{} {
+	body := map[string]interface{}{
+		"PolicyName": name, "PolicyType": resolveStringProp(props, "PolicyType", "", cctx),
+		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
+	}
+	for _, k := range []string{
+		"StepScalingPolicyConfiguration", "TargetTrackingScalingPolicyConfiguration", "PredictiveScalingPolicyConfiguration",
+	} {
+		if m, ok := cfnResolveStructured(props[k], cctx).(map[string]interface{}); ok {
+			body[k] = cfnAASCoerce(m)
+		}
+	}
+	return body
+}
+
 // deployApplicationAutoScalingScalingPolicy puts the policy with PutScalingPolicy. "Ref returns the
 // Application Auto Scaling scaling policy Amazon Resource Name (ARN)", which is the physical ID and
-// Fn::GetAtt Arn.
+// Fn::GetAtt Arn. PutScalingPolicy creates or updates, so a create of a policy the target already
+// holds under the name is refused rather than adopted (the message is substrate's own).
 func (d *StackDeployer) deployApplicationAutoScalingScalingPolicy(
 	ctx context.Context, logicalID string, props map[string]interface{}, streamID string, cctx *cfnContext,
 ) (DeployedResource, float64, error) {
@@ -235,36 +314,46 @@ func (d *StackDeployer) deployApplicationAutoScalingScalingPolicy(
 	dr.Metadata = map[string]interface{}{
 		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID, "PolicyName": name,
 	}
-	body := map[string]interface{}{
-		"PolicyName": name, "PolicyType": resolveStringProp(props, "PolicyType", "", cctx),
-		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
-	}
-	for _, k := range []string{
-		"StepScalingPolicyConfiguration", "TargetTrackingScalingPolicyConfiguration", "PredictiveScalingPolicyConfiguration",
-	} {
-		if m, ok := cfnResolveStructured(props[k], cctx).(map[string]interface{}); ok {
-			body[k] = cfnAASCoerce(m)
-		}
-	}
-	req, err := cfnAASRequest("PutScalingPolicy", body)
+	exists, cost, err := d.cfnAASListed(ctx, "DescribeScalingPolicies", "ScalingPolicies", map[string]interface{}{
+		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID, "PolicyNames": []string{name},
+	}, streamID)
 	if err != nil {
-		return DeployedResource{}, 0, err
-	}
-	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
-	if routeErr != nil {
-		dr.Error = routeErr.Error()
+		dr.Error = err.Error()
 		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+	}
+	if exists {
+		dr.Error = fmt.Sprintf("scaling policy %s already exists on %s", name, cfnScalableTargetID(resourceID, dimension, namespace))
+		return dr, cost, nil
 	}
 	var out struct {
 		PolicyARN string `json:"PolicyARN"`
 	}
-	if resp != nil {
-		if err := json.Unmarshal(resp.Body, &out); err != nil {
-			return DeployedResource{}, cost, fmt.Errorf("cfn deployScalingPolicy decode: %w", err)
-		}
+	c, err := d.cfnAASCall(ctx, "PutScalingPolicy", cfnAASPolicyBody(props, cctx, name, namespace, dimension, resourceID), &out, streamID)
+	cost += c
+	if err != nil {
+		dr.Error = err.Error()
+		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
 	}
 	dr.PhysicalID, dr.ARN = out.PolicyARN, out.PolicyARN
 	dr.Metadata["Arn"] = out.PolicyARN
+	return dr, cost, nil
+}
+
+// updateApplicationAutoScalingScalingPolicy applies a changed PolicyType or configuration — the No
+// interruption properties — through PutScalingPolicy's update, which keeps the policy's ARN.
+func (d *StackDeployer) updateApplicationAutoScalingScalingPolicy(
+	ctx context.Context, logicalID string, prior DeployedResource,
+	props map[string]interface{}, _ []string, streamID string, cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	dr := prior
+	dr.LogicalID = logicalID
+	dr.Error = ""
+	body := cfnAASPolicyBody(props, cctx, cfnRefMetadata(prior, "PolicyName"), cfnRefMetadata(prior, "ServiceNamespace"),
+		cfnRefMetadata(prior, "ScalableDimension"), cfnRefMetadata(prior, "ResourceId"))
+	cost, err := d.cfnAASCall(ctx, "PutScalingPolicy", body, nil, streamID)
+	if err != nil {
+		dr.Error = err.Error()
+	}
 	return dr, cost, nil
 }
 

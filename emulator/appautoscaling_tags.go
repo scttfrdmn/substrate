@@ -256,14 +256,23 @@ func (p *ApplicationAutoScalingPlugin) listTaggedResources(ctx context.Context, 
 	return aasListTaggedTargets(ctx, p.state, reqCtx)
 }
 
-// tagResourceByARN implements [resourceTagger]. An ARN that is not a scalable target, or names none,
-// is the ARN's failure.
+// tagResourceByARN implements [resourceTagger]. An ARN that is not a scalable target is the ARN's
+// failure, and so is one naming another account's or Region's target: Application Auto Scaling is
+// regional and substrate models no cross-account access. The ARN is resolved to its record under
+// [ApplicationAutoScalingPlugin.mu], the lock a deregistration holds, so the record written is the
+// one the ARN named.
 func (p *ApplicationAutoScalingPlugin) tagResourceByARN(
-	_ *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
+	reqCtx *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
-	if _, _, ok := aasParseTargetARN(arn); !ok {
+	region, account, ok := aasParseTargetARN(arn)
+	if !ok {
 		return taggingResolveFailed(unsupportedTagResource("Application Auto Scaling %q is not a scalable target ARN", arn))
 	}
+	if region != reqCtx.Region || account != reqCtx.AccountID {
+		return taggingResolveFailed(fmt.Errorf("%w: %s is outside the caller's account and Region", errTagResourceNotFound, arn))
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	key, err := aasTargetKeyForARN(context.Background(), p.state, arn)
 	if err != nil {
 		return err
@@ -271,7 +280,7 @@ func (p *ApplicationAutoScalingPlugin) tagResourceByARN(
 	if key == "" {
 		return fmt.Errorf("%w: %s", errTagResourceNotFound, arn)
 	}
-	return p.tagRecord(context.Background(), key, add, remove, quota)
+	return aasMergeTags(context.Background(), p.state, key, add, remove, quota)
 }
 
 // tagRecord implements [resourceTagger], under the lock the plugin's own tag operations hold.
