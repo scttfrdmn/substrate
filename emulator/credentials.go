@@ -1,12 +1,16 @@
 package emulator
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"sort"
@@ -110,6 +114,85 @@ func extractAccessKeyFromAuth(authHeader string) string {
 	cred := authHeader[idx+len(credPrefix):]
 	if end := strings.IndexAny(cred, "/, "); end > 0 {
 		return cred[:end]
+	}
+	return ""
+}
+
+// requestAccessKey returns the access key ID a request is signed with, wherever the signing puts it:
+// a SigV4 `Authorization` header; a SigV2 `Authorization: AWS <key>:<signature>` header; the
+// `X-Amz-Credential` (SigV4) or `AWSAccessKeyId` (SigV2) query parameter of a presigned URL; or the
+// same field of an S3 browser-upload (POST policy) form. It returns "" for an unsigned request, which
+// then resolves no principal and is not enforced, as before.
+//
+// trustUnverified says whether a credential [VerifySigV4] does not verify may name the caller.
+// VerifySigV4 verifies a SigV4 Authorization header and nothing else, so with signature verification
+// on (`trustUnverified` false) only that header is read: a presigned URL, a POST policy or a SigV2
+// header could otherwise name any key ID it liked and act as that key's principal in that key's
+// account. With verification off, nothing is verified anyway, and reading every form is what makes a
+// presigned request authorized as the principal that signed it rather than not at all.
+func requestAccessKey(r *http.Request, body []byte, trustUnverified bool) string {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "AWS4-HMAC-SHA256 ") {
+		return extractAccessKeyFromAuth(auth)
+	}
+	if !trustUnverified {
+		return ""
+	}
+	if key, ok := strings.CutPrefix(auth, "AWS "); ok {
+		if colon := strings.IndexByte(key, ':'); colon > 0 {
+			return key[:colon]
+		}
+	}
+	if key := extractAccessKeyFromAuth(auth); key != "" {
+		return key
+	}
+	query := r.URL.Query()
+	if key := accessKeyFromCredential(query.Get("X-Amz-Credential")); key != "" {
+		return key
+	}
+	if key := query.Get("AWSAccessKeyId"); key != "" {
+		return key
+	}
+	return formAccessKey(r, body)
+}
+
+// formAccessKey reads the signer's access key from an S3 POST-policy form: `X-Amz-Credential`
+// (SigV4) or `AWSAccessKeyId` (SigV2), matched without regard to case as S3's form fields are.
+func formAccessKey(r *http.Request, body []byte) string {
+	if r.Method != http.MethodPost || len(body) == 0 {
+		return ""
+	}
+	mediaType, ctParams, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/form-data" || ctParams["boundary"] == "" {
+		return ""
+	}
+	mr := multipart.NewReader(bytes.NewReader(body), ctParams["boundary"])
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			return ""
+		}
+		name := part.FormName()
+		if !strings.EqualFold(name, "X-Amz-Credential") && !strings.EqualFold(name, "AWSAccessKeyId") {
+			continue
+		}
+		value, readErr := io.ReadAll(io.LimitReader(part, 512))
+		if readErr != nil {
+			return ""
+		}
+		v := strings.TrimSpace(string(value))
+		if strings.EqualFold(name, "X-Amz-Credential") {
+			return accessKeyFromCredential(v)
+		}
+		return v
+	}
+}
+
+// accessKeyFromCredential returns the access key ID of a SigV4 credential string,
+// `<key>/<date>/<region>/<service>/aws4_request`, or "" when it has none.
+func accessKeyFromCredential(credential string) string {
+	if slash := strings.IndexByte(credential, '/'); slash > 0 {
+		return credential[:slash]
 	}
 	return ""
 }
@@ -226,8 +309,12 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 				// minted because neither is recoverable from PrincipalARN (#771).
 				UserID: sess.PrincipalID,
 				// The role's own tags for an assumed role, the user's for a session
-				// token. Session tags are not modeled; see [Principal.Tags].
-				Tags: iamPrincipalTags(ctx, state, sess.PrincipalARN),
+				// token, with a federated session's tags over them; see [Principal.Tags].
+				Tags:              stsMergeSessionTags(iamPrincipalTags(ctx, state, sess.PrincipalARN), sess.SessionTags),
+				SessionPolicies:   sess.SessionPolicies,
+				SourceIdentity:    sess.SourceIdentity,
+				SessionTags:       sess.SessionTags,
+				TransitiveTagKeys: sess.TransitiveTagKeys,
 			}, sess.AccountID
 		}
 	}

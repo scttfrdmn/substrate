@@ -155,7 +155,7 @@
     },
     "iam": {
       "apiVersion": "2010-05-08",
-      "operations": 79
+      "operations": 97
     },
     "kafka": {
       "apiVersion": "2018-11-14",
@@ -263,7 +263,7 @@
     },
     "sts": {
       "apiVersion": "2011-06-15",
-      "operations": 3
+      "operations": 5
     },
     "timestream-query": {
       "apiVersion": "2018-11-01",

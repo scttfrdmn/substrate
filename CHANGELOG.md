@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lambda: `GetFunctionConfiguration`, with `Qualifier` (#1660).
 - Lambda: `GetFunction`, `Invoke`, the permission operations and `DeleteFunction` resolve a version or alias from `Qualifier` or a qualified `FunctionName` (#1613).
 - CloudFormation: `AWS::Lambda::Version` and `AWS::Lambda::Alias`, the alias updated in place. A Version of an unchanged function fails with CloudFormation's observed "A version for this Lambda function exists" wording (#1613).
+- IAM: OpenID Connect providers: create, get, list, delete, thumbprint and client-ID updates, and tags; `POST`/`DELETE /v1/iam/oidc-provider-outcome` seeds `OpenIdIdpCommunicationError` (#1613).
+- IAM: SAML providers: create, get, list, update (metadata, encryption mode, private-key IDs) and delete, and tags (#1613).
+- STS: `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` check the token's claims against a registered provider and the simulated clock, then the trust policy's `Federated` principal and provider condition keys (#1613).
+- STS: `POST`/`DELETE /v1/sts/federation-outcome` seeds `InvalidIdentityToken`, `IDPRejectedClaim` or `IDPCommunicationError` per provider, optionally for a count of assumes (#1613).
+- STS: the federated assumes honour `MaxSessionDuration`, `nbf`/`NotBefore`, a SAML assertion's issuer (the metadata's `entityID`) and audience, and pass session tags and `SourceIdentity` under `sts:TagSession`/`sts:SetSourceIdentity` (#1613).
+- STS: `Policy` and `PolicyArns` session policies on `AssumeRole`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` narrow every request the session signs, including on replay and a stack's later operations (#1613).
+- STS: `AssumeRole` honors `Tags`, `TransitiveTagKeys`, `SourceIdentity` and `MaxSessionDuration`, and role chaining carries transitive tags and the source identity (#1706).
+- CloudFormation: `AWS::IAM::OIDCProvider` and `AWS::IAM::SAMLProvider` deploy, update in place and delete (#1613).
 
 ### Changed
 
@@ -45,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependencies: `golang.org/x/text` 0.44.0 with `test/e2e` and `test/iac` tidied, the CDK example on TypeScript 7.0.2, and CI typechecks the CDK app; `@types/node` stays on Node 24's major (#1678, #1663, #1662).
 - EventBridge: rules are keyed per bus, so two buses can each hold a rule of one name, and every rule operation honors `EventBusName` (#1613).
 - EventBridge: a missing rule answers `Rule X does not exist on EventBus Y.`, a missing bus `Event bus X does not exist.`, a taken name `Event bus X already exists.` and a bus with rules `EventBus can't be deleted since it has rules.`, AWS's observed wording; the other bus and permission messages are substrate's own (#1613).
+- IAM: `GetAccountAuthorizationDetails` accepts `Filter=SAMLProviderList`, which selects none of the four populations (#1613).
 
 ### Fixed
 
@@ -59,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 
+- Routing: an unsigned request with no other routing signal and `Action=AssumeRoleWithWebIdentity` or `AssumeRoleWithSAML` reaches STS instead of answering `ServiceNotAvailable` (#1613).
+- IAM: a trust-policy `"AWS"` principal never matches an OIDC or SAML provider; only a `Federated` entry does (#1613).
+- Authorization: a presigned URL, S3 POST-policy upload or SigV2-signed request is authorized as its signer, whose key is read from `X-Amz-Credential`, `AWSAccessKeyId` or the SigV2 `Authorization` header; it was unenforced (#1613). This applies only with signature verification off. Substrate verifies only a SigV4 `Authorization` header, so with verification on, an unverified credential never names the caller: those requests resolve no principal, as before (verifying them is #1713).
+- STS: a `TransitiveTagKeys` entry matches its session tag regardless of case, as tag keys are case-insensitive, both in `AssumeRole` chaining and in the web-identity and SAML claims (#1613, #1706).
+- STS: `AssumeRole` with `Policy` or `PolicyArns` now mints a narrowed session where it ignored them; an unknown customer managed `PolicyArns` entry is `MalformedPolicyDocument`, and an AWS managed one substrate does not bundle is accepted as a policy that allows nothing (#1613).
+- STS: `AssumeRole` refuses a `DurationSeconds` above the role's `MaxSessionDuration` (3600 unless set), and needs `sts:TagSession`/`sts:SetSourceIdentity` in an enforced trust policy when tags or a source identity are passed (#1706).
+- STS/IAM: the federation and provider limit, validation, SAML `NoSuchEntity`, malformed-token, missing-`sub`/`exp`, not-yet-valid, SAML-expiry, session-tag, session-policy and seeded `IDPRejectedClaim`/`IDPCommunicationError` messages are substrate's own (#1613).
 - EventBridge: a rule on a custom bus has the ARN `rule/{bus}/{name}`, and `PutRule` refuses a bus that does not exist; create it with `CreateEventBus` first. Rules from earlier state are default-bus rules (#1613).
 - EventBridge: tagging an event-bus ARN now tags the bus instead of answering `ResourceNotFoundException`, and `GetResources` reports tagged buses (#1640).
 - EventBridge: a rule name outside `[.\-_A-Za-z0-9]{1,64}` is refused `ValidationError`. A default-bus rule an earlier build stored under such a name is no longer listed or addressable; reset state to clear it (#1613).

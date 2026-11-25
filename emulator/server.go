@@ -503,6 +503,10 @@ func (s *Server) buildRouter() *chi.Mux {
 		// IAM control-plane endpoints (#747).
 		cp.Post("/v1/iam/slr-deletion-status", s.handleIAMSeedSLRDeletionStatus)
 		cp.Delete("/v1/iam/slr-deletion-status", s.handleIAMClearSLRDeletionStatus)
+		cp.Post("/v1/iam/oidc-provider-outcome", s.handleIAMSeedOIDCProviderOutcome)
+		cp.Delete("/v1/iam/oidc-provider-outcome", s.handleIAMClearOIDCProviderOutcome)
+		cp.Post("/v1/sts/federation-outcome", s.handleSTSSeedFederationOutcome)
+		cp.Delete("/v1/sts/federation-outcome", s.handleSTSClearFederationOutcome)
 
 		// Organizations control-plane endpoints (#578).
 		cp.Post("/v1/organizations/feature-set", s.handleOrganizationsSeedFeatureSet)
@@ -1026,7 +1030,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// from the registry. The *principal* comes from state, because only IAM's own
 	// records map an access key to the entity holding it. See [resolvePrincipal]
 	// and #411.
-	if accessKey := extractAccessKeyFromAuth(r.Header.Get("Authorization")); accessKey != "" {
+	if accessKey := requestAccessKey(r, rawBody, !s.opts.VerifySignatures); accessKey != "" {
 		registryHit := false
 		if s.opts.Credentials != nil {
 			if entry, ok := s.opts.Credentials.Lookup(accessKey); ok {

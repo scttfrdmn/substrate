@@ -81,6 +81,8 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// physical ID of the inline policy the type embeds, which has no identifier of its own for the
 	// stack to record (#1562). Every property is No interruption, so it is never replaced.
 	"AWS::IAM::Policy": {maxLen: 128, nameProp: "PolicyName"},
+	// CreateSAMLProvider's Name: "[\w._-]+", 1 to 128 characters.
+	"AWS::IAM::SAMLProvider": {maxLen: 128, nameProp: "Name"},
 
 	// A bucket name is globally unique, lowercase, and 3–63 characters
 	// (validateBucketName enforces the same range).

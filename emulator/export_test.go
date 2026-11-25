@@ -1375,6 +1375,16 @@ func IAMAuthzAccountResourceARNForTest(accountID string) string {
 	return iamAuthzAccountResourceARN(accountID)
 }
 
+// IAMOIDCProviderARNForTest wraps iamOIDCProviderARN for external tests.
+func IAMOIDCProviderARNForTest(accountID, hostPath string) string {
+	return iamOIDCProviderARN(accountID, hostPath)
+}
+
+// IAMSAMLProviderARNForTest wraps iamSAMLProviderARN for external tests.
+func IAMSAMLProviderARNForTest(accountID, name string) string {
+	return iamSAMLProviderARN(accountID, name)
+}
+
 // IAMInstanceProfileARNForTest wraps iamInstanceProfileARN, which joined the other four
 // minters with #770.
 func IAMInstanceProfileARNForTest(accountID, path, name string) string {
@@ -2046,4 +2056,28 @@ func CFNRoute53ChangeForTest(action string, rrset Route53ResourceRecordSet) stri
 // gone".
 func R53OnlyNotFoundForTest(err error) bool {
 	return r53OnlyNotFound(err)
+}
+
+// CFNStackCreatorRoundTripForTest records creator on a stack as a deployment does, round-trips the
+// stack record through JSON as state does, and returns the creator a later operation resolves.
+func CFNStackCreatorRoundTripForTest(creator *Principal) (*Principal, error) {
+	var s CFNStackState
+	s.setAttribution(cfnAttribution{creator: creator})
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	var back CFNStackState
+	if err := json.Unmarshal(raw, &back); err != nil {
+		return nil, err
+	}
+	return back.attribution(context.Background(), nil).creator, nil
+}
+
+// CFNStackCreatorWithStateForTest is CFNStackCreatorRoundTripForTest resolving the creator against
+// state, as a later stack operation does.
+func CFNStackCreatorWithStateForTest(state StateManager, creator *Principal) (*Principal, error) {
+	var s CFNStackState
+	s.setAttribution(cfnAttribution{creator: creator})
+	return s.attribution(context.Background(), state).creator, nil
 }

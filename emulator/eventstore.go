@@ -185,6 +185,12 @@ type Event struct {
 	// Principal is the ARN of the caller.
 	Principal string `json:"principal,omitempty"`
 
+	// PrincipalSession is what the caller's session carried beyond its ARN — session policies,
+	// session tags, transitive tag keys and source identity — or nil for a caller with none. A
+	// replay rebuilds the caller from it, so a request a session policy refused live is refused
+	// on replay too.
+	PrincipalSession *EventPrincipalSession `json:"principal_session,omitempty"`
+
 	// Service is the AWS service name.
 	Service string `json:"service"`
 
@@ -508,6 +514,7 @@ func (e *EventStore) RecordRequest(
 
 	if reqCtx.Principal != nil {
 		event.Principal = reqCtx.Principal.ARN
+		event.PrincipalSession = eventPrincipalSession(reqCtx.Principal)
 	}
 	if parent, ok := reqCtx.Metadata[parentRequestIDKey].(string); ok {
 		event.ParentRequestID = parent
@@ -1116,4 +1123,45 @@ func (e *EventStore) serializeState(ctx context.Context, state StateManager) ([]
 		return ss.Snapshot(ctx)
 	}
 	return []byte("{}"), nil
+}
+
+// EventPrincipalSession is the part of a recorded caller that only its session holds: what
+// narrows it ([Principal.SessionPolicies]) and what it publishes beyond its entity's own record.
+type EventPrincipalSession struct {
+	// SessionPolicies are the session's policies.
+	SessionPolicies []PolicyDocument `json:"session_policies,omitempty"`
+
+	// SessionTags are the session's own tags, merged over the entity's tags on replay.
+	SessionTags map[string]string `json:"session_tags,omitempty"`
+
+	// TransitiveTagKeys are the session tag keys a role-chained AssumeRole carries forward.
+	TransitiveTagKeys []string `json:"transitive_tag_keys,omitempty"`
+
+	// SourceIdentity is the session's source identity.
+	SourceIdentity string `json:"source_identity,omitempty"`
+}
+
+// eventPrincipalSession captures what p's session carries, or nil when it carries nothing.
+func eventPrincipalSession(p *Principal) *EventPrincipalSession {
+	if len(p.SessionPolicies) == 0 && len(p.SessionTags) == 0 && len(p.TransitiveTagKeys) == 0 && p.SourceIdentity == "" {
+		return nil
+	}
+	return &EventPrincipalSession{
+		SessionPolicies:   p.SessionPolicies,
+		SessionTags:       p.SessionTags,
+		TransitiveTagKeys: p.TransitiveTagKeys,
+		SourceIdentity:    p.SourceIdentity,
+	}
+}
+
+// apply sets what s records on p. A nil s leaves p as it is.
+func (s *EventPrincipalSession) apply(p *Principal) {
+	if s == nil {
+		return
+	}
+	p.SessionPolicies = s.SessionPolicies
+	p.SessionTags = s.SessionTags
+	p.TransitiveTagKeys = s.TransitiveTagKeys
+	p.SourceIdentity = s.SourceIdentity
+	p.Tags = stsMergeSessionTags(p.Tags, s.SessionTags)
 }

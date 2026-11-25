@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,10 @@ type STSPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// seedMu serializes the read and count-down of a federation seed, so two concurrent assumes
+	// cannot both consume a seed's last use.
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "sts".
@@ -54,6 +59,10 @@ func (p *STSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.assumeRole(ctx, req)
 	case "GetSessionToken":
 		return p.getSessionToken(ctx, req)
+	case "AssumeRoleWithWebIdentity":
+		return p.assumeRoleWithWebIdentity(ctx, req)
+	case "AssumeRoleWithSAML":
+		return p.assumeRoleWithSAML(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), req.Operation)
 	}
@@ -263,45 +272,49 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("unmarshal role: %w", err)
 	}
 
+	session, refusal := stsAssumeRoleSessionParams(ctx.Principal, req.Params)
+	if refusal != nil {
+		return nil, refusal
+	}
+
 	// The trust policy decides *before* a credential exists. Minting first and
 	// checking after would leave a usable session in state behind a 403.
-	if err := p.checkTrustPolicy(ctx, role, roleARN, externalID); err != nil {
+	if err := p.checkTrustPolicy(ctx, role, roleARN, externalID, session); err != nil {
 		return nil, err
 	}
 
-	now := p.now()
-	expiry := now.Add(time.Duration(duration) * time.Second)
-
-	// AWS's aws:userid for an assumed role: "{role-id}:{caller-specified-role-name}
-	// where role-id is the unique id of the role and the caller-specified-role-name is
-	// specified by the RoleSessionName parameter". The response publishes it as
-	// AssumedRoleId below; the session record carries it so that a request signed with
-	// these credentials can be authorized against it (#771).
-	assumedRoleID := role.RoleID + ":" + sessionName
-
-	creds := STSSessionCredentials{
-		AccessKeyID:     generateIAMID(ctx.IDs, "ASIA"),
-		SecretAccessKey: stsGenerateSecret(ctx.IDs),
-		SessionToken:    stsGenerateToken(ctx.IDs),
-		Expiration:      expiry,
-		PrincipalARN:    fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", ctx.AccountID, roleName, sessionName),
-		AccountID:       ctx.AccountID,
-		PrincipalID:     assumedRoleID,
+	// "If you specify a value higher than this setting, the operation fails." The wording is the
+	// IAM troubleshooting guide's.
+	maxDuration := role.MaxSessionDuration
+	if maxDuration == 0 {
+		maxDuration = stsMaxSessionDuration
+	}
+	if duration > maxDuration {
+		return nil, stsFederationError("ValidationError",
+			"Requested DurationSeconds exceeds MaxSessionDuration set for this role.", http.StatusBadRequest)
 	}
 
-	credRaw, err := json.Marshal(creds)
+	policies, refusal, err := p.stsSessionPolicies(goCtx, req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal session credentials: %w", err)
+		return nil, err
 	}
-	if err := p.state.Put(goCtx, stsNamespace, "session:"+creds.AccessKeyID, credRaw); err != nil {
-		return nil, fmt.Errorf("store session credentials: %w", err)
+	if refusal != nil {
+		return nil, refusal
+	}
+
+	now := p.now()
+	creds, err := p.mintRoleSession(goCtx, ctx, ctx.AccountID, roleName, role.RoleID, sessionName,
+		now.Add(time.Duration(duration)*time.Second), stsSessionExtras{policies: policies, tags: session.tags,
+			transitiveKeys: session.transitiveKeys, sourceIdentity: session.sourceIdentity})
+	if err != nil {
+		return nil, err
 	}
 
 	if err := p.recordRoleLastUsed(goCtx, ctx, roleARN, roleName, &role, now); err != nil {
 		return nil, err
 	}
 
-	assumedRoleARN := fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", ctx.AccountID, roleName, sessionName)
+	assumedRoleID, assumedRoleARN := creds.PrincipalID, creds.PrincipalARN
 
 	type xmlCreds struct {
 		AccessKeyID     string    `xml:"AccessKeyId"`
@@ -316,6 +329,7 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	type assumeResult struct {
 		Credentials     xmlCreds        `xml:"Credentials"`
 		AssumedRoleUser assumedRoleUser `xml:"AssumedRoleUser"`
+		SourceIdentity  string          `xml:"SourceIdentity,omitempty"`
 	}
 	type response struct {
 		XMLName          xml.Name         `xml:"AssumeRoleResponse"`
@@ -333,6 +347,7 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 				SessionToken:    creds.SessionToken,
 				Expiration:      creds.Expiration,
 			},
+			SourceIdentity: session.sourceIdentity,
 			AssumedRoleUser: assumedRoleUser{
 				AssumedRoleID: assumedRoleID,
 				Arn:           assumedRoleARN,
@@ -344,14 +359,49 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	return stsXMLResponse(http.StatusOK, resp)
 }
 
+// mintRoleSession stores and returns the temporary credentials of an assumed-role session in
+// accountID, expiring at expiry. AssumeRole and the two federated assumes share it, so a
+// session minted by any of them authenticates and authorizes identically.
+//
+// The session's PrincipalID is AWS's aws:userid for an assumed role: "{role-id}:{caller-specified-
+// role-name} where role-id is the unique id of the role and the caller-specified-role-name is
+// specified by the RoleSessionName parameter". The response publishes it as AssumedRoleId; the
+// session record carries it so that a request signed with these credentials can be authorized
+// against it (#771).
+func (p *STSPlugin) mintRoleSession(
+	goCtx context.Context, ctx *RequestContext, accountID, roleName, roleID, sessionName string, expiry time.Time,
+	extras stsSessionExtras,
+) (STSSessionCredentials, error) {
+	assumedRoleARN := fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", accountID, roleName, sessionName)
+	creds := STSSessionCredentials{
+		AccessKeyID:       generateIAMID(ctx.IDs, "ASIA"),
+		SecretAccessKey:   stsGenerateSecret(ctx.IDs),
+		SessionToken:      stsGenerateToken(ctx.IDs),
+		Expiration:        expiry,
+		PrincipalARN:      assumedRoleARN,
+		AccountID:         accountID,
+		PrincipalID:       roleID + ":" + sessionName,
+		SessionPolicies:   extras.policies,
+		SessionTags:       extras.tags,
+		SourceIdentity:    extras.sourceIdentity,
+		TransitiveTagKeys: extras.transitiveKeys,
+	}
+	credRaw, err := json.Marshal(creds)
+	if err != nil {
+		return STSSessionCredentials{}, fmt.Errorf("marshal session credentials: %w", err)
+	}
+	if err := p.state.Put(goCtx, stsNamespace, "session:"+creds.AccessKeyID, credRaw); err != nil {
+		return STSSessionCredentials{}, fmt.Errorf("store session credentials: %w", err)
+	}
+	return creds, nil
+}
+
 // recordRoleLastUsed stamps the role's record with the time and region of this assume,
 // which is what `GetRole` reports as `RoleLastUsed` (#816).
 //
 // This is the one place substrate learns that a role was *used*: AWS's `RoleLastUsed`
 // advances on use, and an assume is the only use an emulator that models no workload can
-// observe. `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not implemented here,
-// so this is the single write site rather than one of three; adding either later must call
-// this too.
+// observe. AssumeRole, AssumeRoleWithWebIdentity and AssumeRoleWithSAML all call it.
 //
 // It makes AssumeRole a writer of IAM state, which is worth naming: every other substrate
 // write follows from an operation whose purpose is to mutate, and this is an STS operation
@@ -415,7 +465,8 @@ func (p *STSPlugin) recordRoleLastUsed(
 // and would break every caller who never wrote a policy. A nil principal is
 // skipped for the same reason CheckAccess skips one: an unauthenticated request
 // resolves to no ARN, so there is nothing for a Principal element to be true of.
-func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN, externalID string) error {
+func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN, externalID string,
+	session stsAssumeRoleSession) error {
 	if len(role.AssumeRolePolicyDocument.Statement) == 0 {
 		p.logger.Debug("sts: role has no trust policy, not enforced", "role", roleARN)
 		return nil
@@ -438,18 +489,22 @@ func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN,
 	// was satisfied by every caller, exempting nobody and, on an Allow, admitting all
 	// (#714). See [authzPrincipalContext].
 	authzPrincipalContext(condCtx, ctx.Principal)
+	multi := session.trustContext(condCtx)
 
-	// Resource is empty because a trust policy carries no Resource element — the
-	// role it is attached to *is* the resource. resourceMatches treats an empty
-	// resource as a match, so a statement stands or falls on its principal,
-	// action and conditions.
-	result := Evaluate([]PolicyDocument{role.AssumeRolePolicyDocument}, EvaluationRequest{
-		Principal: ctx.Principal.ARN,
-		Action:    "sts:AssumeRole",
-		Resource:  "",
-		Context:   condCtx,
-	})
+	result := stsTrustDecision(role, ctx.Principal.ARN, "sts:AssumeRole", condCtx, multi)
 	if result.Decision == DecisionAllow {
+		// Passing tags needs sts:TagSession, and a source identity sts:SetSourceIdentity, in the
+		// same trust policy. The refusal's wording is AWS's, observed through the AWS CLI.
+		for _, action := range session.extraActions() {
+			if stsTrustDecision(role, ctx.Principal.ARN, action, condCtx, multi).Decision != DecisionAllow {
+				return &AWSError{
+					Code: "AccessDenied",
+					Message: fmt.Sprintf("User: %s is not authorized to perform: %s on resource: %s",
+						ctx.Principal.ARN, action, roleARN),
+					HTTPStatus: http.StatusForbidden,
+				}
+			}
+		}
 		return nil
 	}
 
@@ -472,6 +527,25 @@ func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN,
 		Message:    msg,
 		HTTPStatus: http.StatusForbidden,
 	}
+}
+
+// stsTrustDecision evaluates role's trust policy for principal requesting action, with the
+// condition keys in condCtx (single-valued) and multi (multivalued).
+//
+// Resource is empty because a trust policy carries no Resource element — the role it is
+// attached to *is* the resource. resourceMatches treats an empty resource as a match, so a
+// statement stands or falls on its principal, action and conditions. For a federated assume the
+// principal is the identity provider's ARN, which only a `Federated` entry matches
+// ([principalCovered]).
+func stsTrustDecision(role IAMRole, principal, action string, condCtx map[string]string,
+	multi map[string][]string) EvaluationResult {
+	return Evaluate([]PolicyDocument{role.AssumeRolePolicyDocument}, EvaluationRequest{
+		Principal:    principal,
+		Action:       action,
+		Resource:     "",
+		Context:      condCtx,
+		MultiContext: multi,
+	})
 }
 
 func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -594,6 +668,21 @@ type STSSessionCredentials struct {
 	// would have to be read back from may since have been deleted or replaced with a
 	// new ID (#771).
 	PrincipalID string `json:"PrincipalId,omitempty"`
+
+	// SessionPolicies are the session policies the assume passed (`Policy` and the documents
+	// `PolicyArns` named), which narrow every request the session makes; see
+	// [Principal.SessionPolicies].
+	SessionPolicies []PolicyDocument `json:"SessionPolicies,omitempty"`
+
+	// SessionTags are the session tags a federated assume's token or assertion passed.
+	SessionTags map[string]string `json:"SessionTags,omitempty"`
+
+	// SourceIdentity is the session's source identity, set by the assume that minted it or carried
+	// from the session that called it.
+	SourceIdentity string `json:"SourceIdentity,omitempty"`
+
+	// TransitiveTagKeys are the session tag keys a role-chained AssumeRole carries forward.
+	TransitiveTagKeys []string `json:"TransitiveTagKeys,omitempty"`
 }
 
 // responseMetadata is the XML response metadata included in all STS responses.

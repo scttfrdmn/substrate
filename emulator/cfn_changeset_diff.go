@@ -101,6 +101,9 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::IAM::User":          {"UserName": "Always"},
 	"AWS::IAM::Group":         {"GroupName": "Always"},
 	"AWS::IAM::ManagedPolicy": {"Description": "Always", "ManagedPolicyName": "Always", "Path": "Always"},
+	// The identity providers (#1613): each page's only Replacement property.
+	"AWS::IAM::OIDCProvider": {"Url": "Always"},
+	"AWS::IAM::SAMLProvider": {"Name": "Always"},
 	// From the "Example change sets" page's own sample, which reports these two.
 	"AWS::EC2::Instance": {"KeyName": "Always", "InstanceType": "Conditionally"},
 	// The types #1427 and #1428 give an update path, whose replacement decision reads this

@@ -158,7 +158,7 @@ func (a *AuthController) checkS3CopySource(reqCtx *RequestContext, req *AWSReque
 			HTTPStatus: http.StatusForbidden,
 		}
 	}
-	return nil
+	return authzSessionPolicyEval(reqCtx.Principal, evalReq, deniedCode)
 }
 
 // checkS3CreateSideEffects runs the additional authorization pass S3 documents for a create that
@@ -212,6 +212,9 @@ func (a *AuthController) checkS3CreateSideEffects(reqCtx *RequestContext, req *A
 						reqCtx.Principal.ARN, action),
 					HTTPStatus: http.StatusForbidden,
 				}
+			}
+			if err := authzSessionPolicyEval(reqCtx.Principal, evalReq, deniedCode); err != nil {
+				return err
 			}
 		}
 	}

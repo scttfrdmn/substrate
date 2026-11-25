@@ -126,6 +126,9 @@ func authzPrincipalContext(ctx map[string]string, principal *Principal) {
 	if principal.UserID != "" {
 		ctx["aws:userid"] = principal.UserID
 	}
+	if principal.SourceIdentity != "" {
+		ctx["aws:SourceIdentity"] = principal.SourceIdentity
+	}
 	for key, value := range principal.Tags {
 		// One key per tag, which is the shape AWS documents: "aws:PrincipalTag/tag-key".
 		// A tag whose value is empty publishes an empty value, and [condKeyPresent] reads
@@ -133,6 +136,67 @@ func authzPrincipalContext(ctx map[string]string, principal *Principal) {
 		// makes a Null condition answer for a tag that exists with no value.
 		ctx["aws:PrincipalTag/"+key] = value
 	}
+}
+
+// authzSessionPolicyCheck refuses a request the principal's session policies do not allow. A
+// session policy narrows like a permissions boundary: the session may do only what both its
+// identity policies and its session policies allow. A principal with no session policies is not
+// narrowed.
+func authzSessionPolicyCheck(principal *Principal, action, resource string, condCtx map[string]string,
+	multi map[string][]string, deniedCode string) error {
+	return authzSessionPolicyEval(principal, EvaluationRequest{
+		Principal:    principalARN(principal),
+		Action:       action,
+		Resource:     resource,
+		Context:      condCtx,
+		MultiContext: multi,
+	}, deniedCode)
+}
+
+// authzSessionPolicyEval is [authzSessionPolicyCheck] for a pass that has already built its
+// evaluation request — the tag-on-create, copy-source and create-side-effect passes, each of which
+// a session policy narrows exactly as it narrows the main action.
+func authzSessionPolicyEval(principal *Principal, evalReq EvaluationRequest, deniedCode string) error {
+	if principal == nil || len(principal.SessionPolicies) == 0 {
+		return nil
+	}
+	if Evaluate(principal.SessionPolicies, evalReq).Decision == DecisionAllow {
+		return nil
+	}
+	return &AWSError{
+		Code: deniedCode,
+		Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by session policy)",
+			principal.ARN, evalReq.Action),
+		HTTPStatus: http.StatusForbidden,
+	}
+}
+
+// sessionPolicyOnly decides a request whose identity policies CheckAccess cannot read — the role
+// was deleted, or its policies failed to load — against the session's own policies. Those paths
+// fail open for the identity policies, but a session policy is recorded on the credential itself,
+// so it still narrows the request, with the same condition context and the same secondary passes
+// as a fully resolved request. A session with no session policies is not enforced, as before.
+func (a *AuthController) sessionPolicyOnly(reqCtx *RequestContext, req *AWSRequest, action string,
+	resources []authzResource, now time.Time, haveClock bool) error {
+	if len(reqCtx.Principal.SessionPolicies) == 0 {
+		return nil
+	}
+	return a.decide(reqCtx, req, action, resources, authzAllowAllDocs, nil, accessDeniedCodeFor(req.Service, ""),
+		now, haveClock)
+}
+
+// authzAllowAllDocs is the identity policy set [AuthController.sessionPolicyOnly] decides with: it
+// allows everything, so only the session's policies narrow the request.
+var authzAllowAllDocs = []PolicyDocument{{Version: "2012-10-17", Statement: []PolicyStatement{{
+	Effect: IAMEffectAllow, Action: StringOrSlice{"*"}, Resource: StringOrSlice{"*"},
+}}}}
+
+// principalARN returns principal's ARN, or "" for no principal.
+func principalARN(principal *Principal) string {
+	if principal == nil {
+		return ""
+	}
+	return principal.ARN
 }
 
 // now reports the controlled time, and whether there is a clock to read it from.
@@ -167,7 +231,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		// on a storage error would turn an infrastructure fault into a
 		// misleading AccessDeniedException.
 		a.logger.Warn("authz: failed to resolve principal", "principal", reqCtx.Principal.ARN, "err", err)
-		return nil
+		return a.sessionPolicyOnly(reqCtx, req, action, resources, now, haveClock)
 	}
 	if !exists {
 		// Enforcement is opt-in by creating the principal. A credential that
@@ -176,14 +240,14 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		// and warning on each would bury the signal it is meant to carry.
 		a.logger.Debug("authz: principal has no IAM entity, not enforced",
 			"principal", reqCtx.Principal.ARN, "action", action)
-		return nil
+		return a.sessionPolicyOnly(reqCtx, req, action, resources, now, haveClock)
 	}
 
 	docs, err := a.loadPoliciesForPrincipal(entity)
 	if err != nil {
 		// Fail open: if we cannot load policies we cannot block the caller.
 		a.logger.Warn("authz: failed to load policies", "principal", reqCtx.Principal.ARN, "err", err)
-		return nil
+		return a.sessionPolicyOnly(reqCtx, req, action, resources, now, haveClock)
 	}
 
 	// Both denial arms take their code from the same helper, so an identity-policy
@@ -199,6 +263,16 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		a.logger.Warn("authz: failed to load permission boundary", "principal", reqCtx.Principal.ARN, "err", err)
 	}
 
+	return a.decide(reqCtx, req, action, resources, docs, boundary, deniedCode, now, haveClock)
+}
+
+// decide evaluates a request against the principal's identity policies (docs), its permissions
+// boundary and its session policies, for every resource the request names and then in the
+// secondary passes. CheckAccess calls it with what it loaded; [AuthController.sessionPolicyOnly]
+// calls it with an allow-all identity set, so the same contexts and passes apply when only the
+// session's own policies are known.
+func (a *AuthController) decide(reqCtx *RequestContext, req *AWSRequest, action string, resources []authzResource,
+	docs []PolicyDocument, boundary *PolicyDocument, deniedCode string, now time.Time, haveClock bool) error {
 	// An S3 tag set the handler would refuse as unreadable is refused here first, so no
 	// aws:RequestTag condition is evaluated against a set substrate could not read —
 	// failing closed, where reading it as empty would let a Deny on a tag be sidestepped
@@ -319,6 +393,9 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 				}
 			}
 		}
+		if err := authzSessionPolicyCheck(reqCtx.Principal, action, res.ARN, condCtx, multi, deniedCode); err != nil {
+			return err
+		}
 	}
 
 	// The create is allowed. If it also applies tags, AWS authorizes those separately
@@ -419,6 +496,9 @@ func (a *AuthController) checkEC2TagOnCreate(reqCtx *RequestContext, req *AWSReq
 				HTTPStatus: http.StatusForbidden,
 			}
 		}
+		if err := authzSessionPolicyEval(reqCtx.Principal, evalReq, deniedCode); err != nil {
+			return err
+		}
 		if boundary == nil {
 			continue
 		}
@@ -507,7 +587,7 @@ func (a *AuthController) checkELBTagOnCreate(reqCtx *RequestContext, req *AWSReq
 			HTTPStatus: http.StatusForbidden,
 		}
 	}
-	return nil
+	return authzSessionPolicyEval(reqCtx.Principal, evalReq, deniedCode)
 }
 
 // iamEntity is the IAM entity a principal ARN names, in the terms the policy

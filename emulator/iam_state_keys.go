@@ -171,3 +171,25 @@ func iamSLRDeletionTaskPrefix(accountID string) string {
 func iamGroupPoliciesKey(accountID, groupName string) string {
 	return iamAttachedPoliciesKey(accountID, "group", groupName)
 }
+
+// iamOIDCProviderKey returns the state key for an OpenID Connect provider, keyed by the
+// provider's URL without its scheme — the component its ARN ends in, which may contain "/".
+func iamOIDCProviderKey(accountID, hostPath string) string {
+	return iamStateKey("oidc_provider", accountID, hostPath)
+}
+
+// iamOIDCProviderPrefix returns the List prefix reaching every OpenID Connect provider in one
+// account.
+func iamOIDCProviderPrefix(accountID string) string {
+	return iamStatePrefix("oidc_provider", accountID)
+}
+
+// iamSAMLProviderKey returns the state key for a SAML provider.
+func iamSAMLProviderKey(accountID, name string) string {
+	return iamStateKey("saml_provider", accountID, name)
+}
+
+// iamSAMLProviderPrefix returns the List prefix reaching every SAML provider in one account.
+func iamSAMLProviderPrefix(accountID string) string {
+	return iamStatePrefix("saml_provider", accountID)
+}

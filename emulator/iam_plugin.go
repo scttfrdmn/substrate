@@ -30,6 +30,10 @@ type IAMPlugin struct {
 	// and a tag write could each lose the other's change (#1560). One lock for the plugin rather
 	// than a stripe per policy, because these are rare control-plane writes.
 	policyMu sync.Mutex
+
+	// providerMu serializes the read-check-write of an OpenID Connect or SAML provider record:
+	// a create's duplicate check, a client-ID or thumbprint change, a tag write and a delete.
+	providerMu sync.Mutex
 }
 
 // Name returns the service name "iam".
@@ -235,6 +239,44 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.listInstanceProfiles(ctx, req)
 	case "ListInstanceProfilesForRole":
 		return p.listInstanceProfilesForRole(ctx, req)
+
+	case "CreateOpenIDConnectProvider":
+		return p.createOpenIDConnectProvider(ctx, req)
+	case "GetOpenIDConnectProvider":
+		return p.getOpenIDConnectProvider(ctx, req)
+	case "ListOpenIDConnectProviders":
+		return p.listOpenIDConnectProviders(ctx, req)
+	case "DeleteOpenIDConnectProvider":
+		return p.deleteOpenIDConnectProvider(ctx, req)
+	case "UpdateOpenIDConnectProviderThumbprint":
+		return p.updateOpenIDConnectProviderThumbprint(ctx, req)
+	case "AddClientIDToOpenIDConnectProvider":
+		return p.addClientIDToOpenIDConnectProvider(ctx, req)
+	case "RemoveClientIDFromOpenIDConnectProvider":
+		return p.removeClientIDFromOpenIDConnectProvider(ctx, req)
+	case "TagOpenIDConnectProvider":
+		return p.tagProvider(ctx, req, iamOIDCTagKind)
+	case "UntagOpenIDConnectProvider":
+		return p.untagProvider(ctx, req, iamOIDCTagKind)
+	case "ListOpenIDConnectProviderTags":
+		return p.listProviderTags(ctx, req, iamOIDCTagKind)
+
+	case "CreateSAMLProvider":
+		return p.createSAMLProvider(ctx, req)
+	case "GetSAMLProvider":
+		return p.getSAMLProvider(ctx, req)
+	case "ListSAMLProviders":
+		return p.listSAMLProviders(ctx, req)
+	case "UpdateSAMLProvider":
+		return p.updateSAMLProvider(ctx, req)
+	case "DeleteSAMLProvider":
+		return p.deleteSAMLProvider(ctx, req)
+	case "TagSAMLProvider":
+		return p.tagProvider(ctx, req, iamSAMLTagKind)
+	case "UntagSAMLProvider":
+		return p.untagProvider(ctx, req, iamSAMLTagKind)
+	case "ListSAMLProviderTags":
+		return p.listProviderTags(ctx, req, iamSAMLTagKind)
 
 	case "SimulatePrincipalPolicy":
 		return p.simulatePrincipalPolicy(ctx, req)
@@ -2004,7 +2046,7 @@ func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 		}
 	}
 
-	return nil
+	return authzSessionPolicyCheck(reqCtx.Principal, action, resource.ARN, condCtx, nil, iamAccessDeniedCode)
 }
 
 // --- Inline policies -------------------------------------------------------

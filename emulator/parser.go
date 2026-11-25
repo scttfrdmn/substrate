@@ -112,6 +112,9 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	// mybucket.s3[.<region>].amazonaws.com → service="s3", path="/mybucket/..."
 	effectivePath := r.URL.Path
 	service := extractService(target, host, r.URL.Path, authHeader)
+	if service == "unknown" && authHeader == "" {
+		service = extractUnsignedService(params["Action"])
+	}
 	if _, normPath, ok := normalizeS3VirtualHost(host, r.URL.Path); ok {
 		effectivePath = normPath
 		service = "s3"
@@ -237,6 +240,22 @@ func extractServiceSignals(target, host, urlPath, authHeader string) string {
 		}
 	}
 
+	return "unknown"
+}
+
+// extractUnsignedService resolves a request that carries none of the four routing signals: no
+// X-Amz-Target, a Host that is the emulator's own, no service path and no SigV4 credential scope.
+//
+// AssumeRoleWithWebIdentity and AssumeRoleWithSAML are the two operations a client sends that way.
+// Both pages say calling them "does not require the use of AWS security credentials", so the SDKs
+// send them unsigned, and a client pointed at a single base endpoint leaves nothing but the
+// Query protocol's Action to say they are STS calls. Their names are unique to STS, so reading
+// them here cannot misroute another service's request. Anything else stays "unknown".
+func extractUnsignedService(action string) string {
+	switch action {
+	case "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML":
+		return "sts"
+	}
 	return "unknown"
 }
 
