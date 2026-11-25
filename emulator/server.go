@@ -890,7 +890,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 //     1.6. SigV4 signature verification (when VerifySignatures is set)
 //     1.7. stateBefore := recordedStateHash() (only when the store records hashes)
 //  2. auth.CheckAccess()        → 403 AccessDenied / AccessDeniedException
-//     (per the service's wire protocol; see accessDeniedCodeFor)
+//     (per the service's wire protocol; see accessDeniedCodeForRequest)
 //  3. quota.CheckQuota()        → 429 ThrottlingException, or 503 SlowDown for S3
 //  4. consistency.CheckRead()   → 409 InconsistentStateException
 //     4.5. fault injection      → the armed rule's own code, or a latency delay

@@ -384,8 +384,9 @@ func TestErrorProtocolFor_Classification(t *testing.T) {
 		// The service name wins over the Content-Type: IAM sends x-amz-json on the
 		// way in but answers errors in XML, which is exactly why the sniff failed.
 		{"unknown falls back to json rpc", "notaservice", "application/x-amz-json-1.1", emulator.ErrProtoJSONRPCForTest},
-		{"unknown falls back to xml", "notaservice", "application/json", emulator.ErrProtoQueryXMLForTest},
-		{"unknown with no content type", "notaservice", "", emulator.ErrProtoQueryXMLForTest},
+		{"unknown REST is rest json", "notaservice", "application/json", emulator.ErrProtoRESTJSONForTest},
+		{"unknown form content type alone is rest json", "notaservice", "application/x-www-form-urlencoded", emulator.ErrProtoRESTJSONForTest},
+		{"unknown with no content type is rest json", "notaservice", "", emulator.ErrProtoRESTJSONForTest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

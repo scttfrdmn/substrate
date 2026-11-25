@@ -41,9 +41,14 @@ import (
 //     SQS's page establishes is that the Query family's code for this condition is
 //     still published somewhere, not that any one service answers it.
 //
-// service is the plugin's own [Plugin.Name]. An unregistered service falls back to
-// the Query answer, which is [errorProtocolFor]'s own default with no
-// Content-Type to read.
+// service is the plugin's own [Plugin.Name]. This function has no request to read, so a
+// service with no serviceErrorProtocols entry takes [errorProtocolFor]'s answer with no
+// Content-Type, which is REST-JSON's UnknownOperationException, while the envelope that carries
+// it is classified from the request (unclassifiedErrorProtocol). For a custom Query plugin
+// registered without an entry the two disagree: a JSON-family code inside an XML document.
+// Every built-in plugin has an entry (TestAccessDenied_EveryRegisteredPluginHasAnErrorProtocol
+// walks them), and a custom plugin needs one for its codes and envelopes to agree; see
+// docs/reference/concepts/errors.md.
 //
 // action is normalized to "(empty)" when blank, so a caller reading the message never
 // sees the two spaces a missing name would leave behind. A blank name is reachable:

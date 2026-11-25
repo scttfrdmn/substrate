@@ -49,7 +49,7 @@ import (
 //     policy can grant them.
 //
 // Neither refusal is in the pages' Errors lists: `AccessDeniedException` is the authorization answer,
-// with 403 and the JSON protocol's code, as [accessDeniedCodeFor] gives it for an identity-policy
+// with 403 and the JSON protocol's code, as [accessDeniedCodeForRequest] gives it for an identity-policy
 // denial (#595). Both are recorded as observed provenance in docs/reference/lambda.md.
 //
 // A statement scoped to an organization (`OrganizationId`) grants nothing here. Substrate does not
