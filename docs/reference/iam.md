@@ -1524,6 +1524,27 @@ that could race a rename take the same lock: IAM's own operations, and the taggi
 IAM records, which go through IAM. So none of them can write a record back under a name the rename
 removed.
 
+**A request is decided against one side of a rename.** The server resolves a request's caller
+and runs the authorization gate while holding the rename lock for reading, so a rename cannot
+run between reading the caller and deciding the request. A Deny on the user, or on a group it
+belongs to, therefore holds throughout. Two kinds of handler act on a caller resolved before they
+took the lock: IAM's own operations, and `GetSessionToken`, which writes the caller into a new
+session. Both look the user up again under the lock by its unique ID (the `AIDA…` it was created
+with). A user renamed in between is acted on under its new name, and a new session names the user
+as it now is. Existing `GetSessionToken` sessions are matched to the renamed user by the same ID.
+A session recorded before #771 has no ID, so it is matched by its name and ARN.
+
+**A credential whose user or role is gone is refused.** This covers an access key or session whose
+user or role has since been deleted or renamed away. It answers `AccessDenied` in every service,
+"User: … is not authorized to perform: … because no identity-based policy allows the … action";
+the message is substrate's own, in the shape of AWS's implicit-deny message. Leaving such a
+request unenforced, as one from a credential that never named an entity is, would let it outrun
+the Deny on the entity it was signed for.
+
+**Tag writes do not lose each other.** `TagUser`, `UntagUser`, `TagRole`, `UntagRole`,
+`TagInstanceProfile` and `UntagInstanceProfile`, and the tagging API's writes to the same records,
+each read, merge and write under one lock. So two concurrent tag writes to one record both land.
+
 The rename also authorizes the target name, since AWS requires "permissions on both the source
 object and the target object". The `NoSuchEntity` and `EntityAlreadyExists` messages match the other
 user and group operations, and the path message is substrate's own.

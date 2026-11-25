@@ -2178,8 +2178,10 @@ var errTagResourceNotFound = errors.New("no resource at the resolved state key")
 // caller at all; [taggingCheckTagQuota] records the reasoning (#1000).
 //
 // owners is the registry the namespace's plugin is looked up in. When the plugin registered under
-// ns implements [resourceTagger] it writes the record itself, under its own lock; otherwise, and
-// for a nil registry, the record is merged here.
+// ns implements [resourceTagger] it writes the record itself, under the lock its own tag operations
+// take, so a write through this API and one through the service's API cannot lose each other (IAM's
+// is [IAMPlugin.tagMu], taken inside its rename lock's read side). Otherwise, and for a nil
+// registry, the record is merged here, with no lock against the owning service's own writes.
 func mergeResourceTags(
 	goCtx context.Context, owners *PluginRegistry, state StateManager, ns, key string,
 	addTags map[string]string, removeKeys []string, quota tagQuotaMode,

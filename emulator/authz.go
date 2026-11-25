@@ -191,6 +191,20 @@ var authzAllowAllDocs = []PolicyDocument{{Version: "2012-10-17", Statement: []Po
 	Effect: IAMEffectAllow, Action: StringOrSlice{"*"}, Resource: StringOrSlice{"*"},
 }}}}
 
+// authzVanishedPrincipal is the refusal for a request whose credential names an IAM entity that
+// no longer exists: one deleted, or renamed after the credential was resolved. Leaving it
+// unenforced, as a credential that never had an entity is, would let a request outrun the Deny
+// on the entity it was signed for. The message is substrate's own, in the shape of AWS's
+// implicit-deny message.
+func authzVanishedPrincipal(reqCtx *RequestContext, action, deniedCode string) error {
+	return &AWSError{
+		Code: deniedCode,
+		Message: fmt.Sprintf("User: %s is not authorized to perform: %s because no identity-based policy allows the %s action",
+			reqCtx.Principal.ARN, action, action),
+		HTTPStatus: http.StatusForbidden,
+	}
+}
+
 // principalARN returns principal's ARN, or "" for no principal.
 func principalARN(principal *Principal) string {
 	if principal == nil {
@@ -232,6 +246,9 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		// misleading AccessDeniedException.
 		a.logger.Warn("authz: failed to resolve principal", "principal", reqCtx.Principal.ARN, "err", err)
 		return a.sessionPolicyOnly(reqCtx, req, action, resources, now, haveClock)
+	}
+	if !exists && reqCtx.Principal.iamCredential && entity.Name != "" {
+		return authzVanishedPrincipal(reqCtx, action, accessDeniedCodeFor(req.Service, ""))
 	}
 	if !exists {
 		// Enforcement is opt-in by creating the principal. A credential that

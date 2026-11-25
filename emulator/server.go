@@ -1030,6 +1030,15 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// from the registry. The *principal* comes from state, because only IAM's own
 	// records map an access key to the entity holding it. See [resolvePrincipal]
 	// and #411.
+	//
+	// Resolution and the authorization gate below read IAM's users and groups, so they hold
+	// IAM's entity lock for reading ([PluginRegistry.iamEntityReadLock]) until the gates have
+	// decided. A user or group rename holds it for writing, so a request is resolved and
+	// decided against one side of a rename, never against a principal the rename has moved
+	// out from under it. It is released before the latency sleep and the plugin call, and by
+	// the deferred call on every refusal in between.
+	releaseEntities := s.registry.iamEntityReadLock()
+	defer releaseEntities()
 	if accessKey := requestAccessKey(r, rawBody, !s.opts.VerifySignatures); accessKey != "" {
 		registryHit := false
 		if s.opts.Credentials != nil {
@@ -1106,6 +1115,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// refused before it reached a plugin is refused on replay too, instead of being
 	// re-executed and succeeding (#833).
 	gate := s.prePluginGates().check(reqCtx, req)
+	releaseEntities()
 	if gate.latency > 0 {
 		// A latency rule delays the response and lets the request through, so this is
 		// deliberately not gated on gate.err. A replay does not sleep here; see

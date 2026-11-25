@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // UpdateUser and UpdateGroup: an IAM user's or group's rename and path change.
@@ -18,8 +19,8 @@ import (
 // from), its login profile, its tags and its GetSessionToken sessions — AWS ties those to the user,
 // not the name, so a session minted before the rename keeps the renamed user's permissions.
 //
-// Two properties hold for readers that do not take [IAMPlugin.entityMu] — principal resolution,
-// the authorization gate, STS — and for those that do:
+// Two properties hold for every reader of these records, whether or not it holds
+// [IAMPlugin.entityMu]:
 //
 //   - A reader sees the user under its old name in full or its new name in full. The new name's
 //     records are written first, then the new entity record, then the pointers that name the user
@@ -33,6 +34,127 @@ import (
 // Writers that would race a rename — IAM's own operations, and the tagging API's writes to IAM
 // records, which reach IAM through [IAMPlugin.tagRecord] — take entityMu, which a rename holds for
 // writing, so none can recreate a record the rename removed.
+//
+// Readers that act on what they read take it too, through [PluginRegistry.iamEntityReadLock]: the
+// server holds it across principal resolution and the authorization gate, so a request is decided
+// against one side of a rename, and GetSessionToken holds it while it writes the caller into a new
+// session. A caller resolved before a handler took the lock is looked up again by its unique ID
+// ([iamRefreshedPrincipal]); one whose user is gone is refused ([authzVanishedPrincipal]).
+
+// iamEntityLocker is implemented by the plugin that owns IAM's users and groups. Principal
+// resolution and authorization in the server, and GetSessionToken in STS, read those records
+// outside IAM's own requests; they hold this lock for reading, as IAM's own operations do, so a
+// rename (which holds it for writing) never runs between their reading a user and their acting
+// on what they read.
+type iamEntityLocker interface {
+	// readLockEntities holds the entity lock for reading and returns its release.
+	readLockEntities() (release func())
+}
+
+// readLockEntities implements [iamEntityLocker].
+func (p *IAMPlugin) readLockEntities() func() {
+	p.entityMu.RLock()
+	return p.entityMu.RUnlock
+}
+
+// iamEntityReadLock holds the entity lock of the IAM plugin registered in r for reading, and
+// returns a release that may be called more than once. With no registry or no IAM plugin there
+// is nothing to race, and the release is a no-op. It is reached through the registry rather than
+// a package variable, so each server's lock is its own IAM plugin's.
+func (r *PluginRegistry) iamEntityReadLock() func() {
+	if r == nil {
+		return func() {}
+	}
+	plugin, ok := r.Plugin("iam")
+	if !ok {
+		return func() {}
+	}
+	locker, ok := plugin.(iamEntityLocker)
+	if !ok {
+		return func() {}
+	}
+	release := locker.readLockEntities()
+	var once sync.Once
+	return func() { once.Do(release) }
+}
+
+// iamCurrentUser returns the user a principal resolved as accountID's name with unique ID
+// userID is now: the record under name when it is that user, else the user holding userID under
+// another name (a rename ran after the principal was resolved), else nil. With no userID, which
+// a key written before #771 lacks, the record under name is taken as it is.
+func iamCurrentUser(ctx context.Context, state StateManager, accountID, name, userID string) (*IAMUser, error) {
+	named, err := iamUserAt(ctx, state, iamUserKey(accountID, name))
+	switch {
+	case err != nil:
+		return nil, err
+	case named != nil && (userID == "" || named.UserID == userID):
+		return named, nil
+	case userID == "":
+		return nil, nil
+	}
+	keys, err := state.List(ctx, iamNamespace, iamUserPrefix(accountID))
+	if err != nil {
+		return nil, fmt.Errorf("list users: %w", err)
+	}
+	for _, key := range keys {
+		u, err := iamUserAt(ctx, state, key)
+		if err != nil || (u != nil && u.UserID == userID) {
+			return u, err
+		}
+	}
+	return nil, nil
+}
+
+// iamRefreshedPrincipal returns principal as the IAM user it is now, for a principal
+// [resolvePrincipal] built from a user's access key or GetSessionToken session. The principal was
+// resolved before the caller took [IAMPlugin.entityMu], so a rename may have run since: the user
+// is found by its unique ID ([iamCurrentUser]) and a copy naming its current name, ARN and tags is
+// returned. Any other principal, and a user that has not moved, is returned as it is. nil means
+// the user no longer exists, which the authorization doors refuse ([authzVanishedPrincipal]).
+func iamRefreshedPrincipal(ctx context.Context, state StateManager, principal *Principal) (*Principal, error) {
+	if principal == nil || !principal.iamCredential {
+		return principal, nil
+	}
+	entity, ok := iamEntityForPrincipalARN(principal.ARN)
+	if !ok || entity.Kind != "user" {
+		return principal, nil
+	}
+	user, err := iamCurrentUser(ctx, state, entity.Account, entity.Name, principal.UserID)
+	if err != nil || user == nil {
+		return nil, err
+	}
+	if user.UserName == entity.Name && user.ARN == principal.ARN {
+		return principal, nil
+	}
+	moved := *principal
+	moved.ARN, moved.UserName, moved.Tags = user.ARN, user.UserName, iamTagMap(user.Tags)
+	return &moved, nil
+}
+
+// iamTagMap returns tags keyed by tag key, or nil for none.
+func iamTagMap(tags []IAMTag) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(tags))
+	for _, tag := range tags {
+		out[tag.Key] = tag.Value
+	}
+	return out
+}
+
+// iamUserAt reads the user record at key, or nil when there is none.
+func iamUserAt(ctx context.Context, state StateManager, key string) (*IAMUser, error) {
+	raw, err := state.Get(ctx, iamNamespace, key)
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	var u IAMUser
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return nil, fmt.Errorf("unmarshal %s: %w", key, err)
+	}
+	return &u, nil
+}
 
 // iamValidPath reports whether path matches the pattern every IAM path parameter documents:
 // `(/)|(/[!-~]+/)`, at most 512 characters.
@@ -66,26 +188,45 @@ type iamTxn struct {
 	moves [][2]string
 }
 
-// get reads key.
+// get reads IAM's key.
 func (t *iamTxn) get(key string) ([]byte, error) {
-	raw, err := t.p.state.Get(t.ctx, iamNamespace, key)
+	return t.getIn(iamNamespace, key)
+}
+
+// getIn reads key in namespace ns.
+func (t *iamTxn) getIn(ns, key string) ([]byte, error) {
+	raw, err := t.p.state.Get(t.ctx, ns, key)
 	if err != nil {
 		return nil, fmt.Errorf("get %s: %w", key, err)
 	}
 	return raw, nil
 }
 
-// put writes value at key, recording how to restore what was there.
+// put writes value at IAM's key, recording how to restore what was there.
 func (t *iamTxn) put(key string, value []byte) error {
-	prev, err := t.get(key)
+	return t.putIn(iamNamespace, key, value)
+}
+
+// putIn writes value at key in namespace ns, recording how to restore what was there.
+func (t *iamTxn) putIn(ns, key string, value []byte) error {
+	prev, err := t.getIn(ns, key)
 	if err != nil {
 		return err
 	}
-	if err := t.p.state.Put(t.ctx, iamNamespace, key, value); err != nil {
+	if err := t.p.state.Put(t.ctx, ns, key, value); err != nil {
 		return fmt.Errorf("put %s: %w", key, err)
 	}
-	t.undo = append(t.undo, t.restorer(key, prev))
+	t.undo = append(t.undo, t.restorer(ns, key, prev))
 	return nil
+}
+
+// putJSON writes v, encoded as JSON, at key in namespace ns, as [iamTxn.putIn] does.
+func (t *iamTxn) putJSON(ns, key string, v any) error {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", key, err)
+	}
+	return t.putIn(ns, key, raw)
 }
 
 // del deletes key, recording how to restore it.
@@ -97,17 +238,17 @@ func (t *iamTxn) del(key string) error {
 	if err := t.p.state.Delete(t.ctx, iamNamespace, key); err != nil {
 		return fmt.Errorf("delete %s: %w", key, err)
 	}
-	t.undo = append(t.undo, t.restorer(key, prev))
+	t.undo = append(t.undo, t.restorer(iamNamespace, key, prev))
 	return nil
 }
 
-// restorer returns the undo of a write to key whose previous value was prev (nil: absent).
-func (t *iamTxn) restorer(key string, prev []byte) func() error {
+// restorer returns the undo of a write to key in ns whose previous value was prev (nil: absent).
+func (t *iamTxn) restorer(ns, key string, prev []byte) func() error {
 	return func() error {
 		if prev == nil {
-			return t.p.state.Delete(t.ctx, iamNamespace, key)
+			return t.p.state.Delete(t.ctx, ns, key)
 		}
-		return t.p.state.Put(t.ctx, iamNamespace, key, prev)
+		return t.p.state.Put(t.ctx, ns, key, prev)
 	}
 }
 
@@ -161,11 +302,7 @@ func (t *iamTxn) renameInList(key, oldName, newName string) error {
 	}
 	list[i] = newName
 	sort.Strings(list)
-	raw, err := json.Marshal(slices.Compact(list))
-	if err != nil {
-		return fmt.Errorf("marshal list %s: %w", key, err)
-	}
-	return t.put(key, raw)
+	return t.putJSON(iamNamespace, key, slices.Compact(list))
 }
 
 // copyInlinePolicies copies an entity's inline-policy name list and every document it names.
@@ -260,15 +397,11 @@ func (p *IAMPlugin) renameUserSteps(t *iamTxn, accountID string, user *IAMUser, 
 	oldARN := user.ARN
 	user.UserName, user.Path = r.newName, r.newPath
 	user.ARN = iamUserARN(accountID, r.newPath, r.newName)
-	record, err := json.Marshal(user)
-	if err != nil {
-		return fmt.Errorf("marshal user: %w", err)
-	}
 	if r.newName == r.name {
-		if err := t.put(iamUserKey(accountID, r.name), record); err != nil {
+		if err := t.putJSON(iamNamespace, iamUserKey(accountID, r.name), user); err != nil {
 			return err
 		}
-		return p.rewriteUserSessions(t, accountID, r.name, r.name, oldARN, user.ARN)
+		return p.rewriteUserSessions(t, accountID, user.UserID, r.name, r.name, oldARN, user.ARN)
 	}
 
 	// The new name's dependents, then its entity record.
@@ -287,7 +420,7 @@ func (p *IAMPlugin) renameUserSteps(t *iamTxn, accountID string, user *IAMUser, 
 	if err := p.copyLoginProfile(t, accountID, r.name, r.newName); err != nil {
 		return err
 	}
-	if err := t.put(iamUserKey(accountID, r.newName), record); err != nil {
+	if err := t.putJSON(iamNamespace, iamUserKey(accountID, r.newName), user); err != nil {
 		return err
 	}
 
@@ -310,7 +443,7 @@ func (p *IAMPlugin) renameUserSteps(t *iamTxn, accountID string, user *IAMUser, 
 			return err
 		}
 	}
-	if err := p.rewriteUserSessions(t, accountID, r.name, r.newName, oldARN, user.ARN); err != nil {
+	if err := p.rewriteUserSessions(t, accountID, user.UserID, r.name, r.newName, oldARN, user.ARN); err != nil {
 		return err
 	}
 
@@ -331,11 +464,7 @@ func (p *IAMPlugin) copyLoginProfile(t *iamTxn, accountID, oldName, newName stri
 		return t.del(iamLoginProfileKey(accountID, newName))
 	}
 	lp.UserName = newName
-	raw, err := json.Marshal(lp)
-	if err != nil {
-		return fmt.Errorf("marshal login profile: %w", err)
-	}
-	if err := t.put(iamLoginProfileKey(accountID, newName), raw); err != nil {
+	if err := t.putJSON(iamNamespace, iamLoginProfileKey(accountID, newName), lp); err != nil {
 		return err
 	}
 	t.moves = append(t.moves, [2]string{iamLoginProfileKey(accountID, oldName), iamLoginProfileKey(accountID, newName)})
@@ -354,17 +483,17 @@ func (p *IAMPlugin) rewriteAccessKeyUser(t *iamTxn, accessKeyID, userName string
 		return fmt.Errorf("unmarshal access key: %w", err)
 	}
 	record.UserName = userName
-	out, err := json.Marshal(&record)
-	if err != nil {
-		return fmt.Errorf("marshal access key: %w", err)
-	}
-	return t.put(key, out)
+	return t.putJSON(iamNamespace, key, &record)
 }
 
 // rewriteUserSessions points the user's GetSessionToken sessions at its new name and ARN, so they
 // keep the user's permissions. AWS ties a session to the user rather than to its name; substrate
 // resolves a session's principal from the name it records, so the record is rewritten instead.
-func (p *IAMPlugin) rewriteUserSessions(t *iamTxn, accountID, oldName, newName, oldARN, newARN string) error {
+//
+// A session is the user's when it records the user's unique ID (`PrincipalID`, the AIDA... the
+// user was created with), which no other user shares. One recorded before #771 carries no ID and
+// is matched by the name and ARN it recorded.
+func (p *IAMPlugin) rewriteUserSessions(t *iamTxn, accountID, userID, oldName, newName, oldARN, newARN string) error {
 	if oldARN == newARN {
 		return nil
 	}
@@ -373,32 +502,39 @@ func (p *IAMPlugin) rewriteUserSessions(t *iamTxn, accountID, oldName, newName, 
 		return fmt.Errorf("list sessions: %w", err)
 	}
 	for _, key := range keys {
-		raw, err := p.state.Get(t.ctx, stsNamespace, key)
+		raw, err := t.getIn(stsNamespace, key)
 		if err != nil {
-			return fmt.Errorf("get session: %w", err)
+			return err
 		}
 		if raw == nil {
 			continue
 		}
 		var sess STSSessionCredentials
 		if err := json.Unmarshal(raw, &sess); err != nil {
-			return fmt.Errorf("unmarshal session: %w", err)
+			return fmt.Errorf("unmarshal session %s: %w", key, err)
 		}
-		if sess.AccountID != accountID || sess.UserName != oldName || sess.PrincipalARN != oldARN {
+		if !iamSessionOfUser(sess, accountID, userID, oldName, oldARN) {
 			continue
 		}
 		sess.UserName, sess.PrincipalARN = newName, newARN
-		out, err := json.Marshal(sess)
-		if err != nil {
-			return fmt.Errorf("marshal session: %w", err)
+		if err := t.putJSON(stsNamespace, key, sess); err != nil {
+			return err
 		}
-		if err := p.state.Put(t.ctx, stsNamespace, key, out); err != nil {
-			return fmt.Errorf("put session: %w", err)
-		}
-		sessionKey, previous := key, raw
-		t.undo = append(t.undo, func() error { return p.state.Put(t.ctx, stsNamespace, sessionKey, previous) })
 	}
 	return nil
+}
+
+// iamSessionOfUser reports whether sess is a GetSessionToken session of accountID's user with
+// unique ID userID, named name with ARN arn: by the ID when both sides have one, and by the name and
+// ARN for a session or user recorded before #771. A session of an assumed role names no user.
+func iamSessionOfUser(sess STSSessionCredentials, accountID, userID, name, arn string) bool {
+	if sess.AccountID != accountID || sess.UserName == "" {
+		return false
+	}
+	if sess.PrincipalID != "" && userID != "" {
+		return sess.PrincipalID == userID
+	}
+	return sess.UserName == name && sess.PrincipalARN == arn
 }
 
 func (p *IAMPlugin) updateGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -472,12 +608,8 @@ func (p *IAMPlugin) renameGroup(goCtx context.Context, accountID string, group *
 func (p *IAMPlugin) renameGroupSteps(t *iamTxn, accountID string, group *IAMGroup, r iamRenameParams) error {
 	group.GroupName, group.Path = r.newName, r.newPath
 	group.ARN = iamGroupARN(accountID, r.newPath, r.newName)
-	record, err := json.Marshal(group)
-	if err != nil {
-		return fmt.Errorf("marshal group: %w", err)
-	}
 	if r.newName == r.name {
-		return t.put(iamGroupKey(accountID, r.name), record)
+		return t.putJSON(iamNamespace, iamGroupKey(accountID, r.name), group)
 	}
 	if err := t.copyKey(iamGroupPoliciesKey(accountID, r.name), iamGroupPoliciesKey(accountID, r.newName)); err != nil {
 		return err
@@ -488,7 +620,7 @@ func (p *IAMPlugin) renameGroupSteps(t *iamTxn, accountID string, group *IAMGrou
 	if err := t.copyInlinePolicies(accountID, "group", r.name, r.newName); err != nil {
 		return err
 	}
-	if err := t.put(iamGroupKey(accountID, r.newName), record); err != nil {
+	if err := t.putJSON(iamNamespace, iamGroupKey(accountID, r.newName), group); err != nil {
 		return err
 	}
 	members, err := p.loadStringList(t.ctx, iamGroupUsersKey(accountID, r.name))

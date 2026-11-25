@@ -147,8 +147,10 @@ permissions boundary. A refusal says "(blocked by session policy)".
 
 Session policies reach every authorization pass: the main action, the tag-on-create passes for
 EC2 and ELB, S3's copy source and create side effects, and IAM's own check. They also apply when the
-role has been deleted or its policies cannot be read. That case leaves the identity policies
-unenforced, but it uses the same condition context and the same passes.
+role's policies cannot be read because the store fails. That case leaves the identity policies
+unenforced, but it uses the same condition context and the same passes. A session whose role has
+been deleted is refused outright: its owner is gone (see the IAM reference's "Renaming a user or
+group").
 The session's policies, tags, transitive keys and source identity are also recorded in two places:
 - **On every event the session signs.** A replay decides the request as the live run did, so a live
   refusal replays as a refusal.

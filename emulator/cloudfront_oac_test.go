@@ -619,6 +619,8 @@ type cfFaultStateManager struct {
 	corruptGet string
 	failPut    string
 	failDelete string
+	// failList fails a List whose prefix contains it.
+	failList string
 }
 
 func (m *cfFaultStateManager) Get(ctx context.Context, namespace, key string) ([]byte, error) {
@@ -646,6 +648,9 @@ func (m *cfFaultStateManager) Delete(ctx context.Context, namespace, key string)
 }
 
 func (m *cfFaultStateManager) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	if m.failList != "" && strings.Contains(prefix, m.failList) {
+		return nil, errCFFaultStore
+	}
 	return m.inner.List(ctx, namespace, prefix)
 }
 

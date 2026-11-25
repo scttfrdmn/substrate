@@ -110,6 +110,18 @@ func BuildCallerARNForTest(accountID, accessKeyID string) string {
 	return buildCallerARN(accountID, accessKeyID)
 }
 
+// IAMCredentialPrincipalForTest builds the principal [resolvePrincipal] returns for an IAM user's
+// access key, so a test can hand a plugin a caller resolved before a rename or a delete ran.
+func IAMCredentialPrincipalForTest(arn, userName, userID string) *Principal {
+	return &Principal{ARN: arn, Type: "IAMUser", UserName: userName, UserID: userID, iamCredential: true}
+}
+
+// IAMMergeRecordTagsForTest wraps iamMergeRecordTags for external tests: the tagging API reaches it
+// only for records IAM itself wrote, so a corrupt record and an unknown key are unreachable over HTTP.
+func IAMMergeRecordTagsForTest(state StateManager, key string, raw []byte, add map[string]string, remove []string) error {
+	return iamMergeRecordTags(context.Background(), state, key, raw, add, remove)
+}
+
 // ResolvePrincipalForTest wraps resolvePrincipal for external tests.
 //
 // The HTTP path can only reach the records IAM and STS themselves write, so the

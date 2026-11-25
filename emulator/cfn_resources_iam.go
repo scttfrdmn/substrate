@@ -431,6 +431,21 @@ func (d *StackDeployer) applyIAMPath(
 	return total + cost, err
 }
 
+// cfnIAMPathARN is the ARN of the user or group e under the Path props declare, given its ARN
+// before the update; "" stays "". "Fn::GetAtt Arn" embeds the path, so once [StackDeployer.applyIAMPath]
+// has applied a Path change the resource's ARN is a new one under the same name, whatever a later
+// step of the update does.
+func cfnIAMPathARN(arn string, e cfnIAMEntity, props map[string]interface{}, cctx *cfnContext) string {
+	if arn == "" {
+		return ""
+	}
+	path := resolveStringProp(props, "Path", "/", cctx)
+	if e.Kind == "User" {
+		return iamUserARN(arnAccountID(arn), path, e.Name)
+	}
+	return iamGroupARN(arnAccountID(arn), path, e.Name)
+}
+
 // cfnLoginProfile is an AWS::IAM::User's LoginProfile property: a password and whether it must be
 // reset at next sign-in.
 type cfnLoginProfile struct {
@@ -715,7 +730,13 @@ func (d *StackDeployer) updateIAMUser(
 	rec := d.liveIAMRecord(ctx, cctx, prior)
 	var total float64
 	steps := []func() (float64, error){
-		func() (float64, error) { return d.applyIAMPath(ctx, e, props, changed, streamID, cctx) },
+		func() (float64, error) {
+			cost, err := d.applyIAMPath(ctx, e, props, changed, streamID, cctx)
+			if err == nil {
+				dr.ARN = cfnIAMPathARN(dr.ARN, e, props, cctx)
+			}
+			return cost, err
+		},
 		func() (float64, error) {
 			if !slices.Contains(changed, "LoginProfile") {
 				return 0, nil
@@ -747,10 +768,6 @@ func (d *StackDeployer) updateIAMUser(
 		if err != nil {
 			return cfnIAMUpdated(dr, rec, total, err)
 		}
-	}
-	// "Fn::GetAtt Arn" embeds the path, so a Path change is a new ARN under the same name.
-	if dr.ARN != "" {
-		dr.ARN = iamUserARN(arnAccountID(dr.ARN), resolveStringProp(props, "Path", "/", cctx), e.Name)
 	}
 	return cfnIAMUpdated(dr, rec, total, nil)
 }
@@ -813,11 +830,9 @@ func (d *StackDeployer) updateIAMGroup(
 	if err != nil {
 		return cfnIAMUpdated(dr, rec, total, err)
 	}
+	dr.ARN = cfnIAMPathARN(dr.ARN, e, props, cctx)
 	cost, err := d.syncIAMEntityPolicies(ctx, e, &rec, resolveStringList(props["ManagedPolicyArns"], cctx),
 		cfnInlinePolicies(props["Policies"], cctx), slices.Contains(changed, "Policies"), streamID)
-	if err == nil && dr.ARN != "" {
-		dr.ARN = iamGroupARN(arnAccountID(dr.ARN), resolveStringProp(props, "Path", "/", cctx), e.Name)
-	}
 	return cfnIAMUpdated(dr, rec, total+cost, err)
 }
 

@@ -282,8 +282,9 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 				UserName: key.UserName,
 				// The AIDA… AWS publishes as aws:userid, recorded beside the key when
 				// it was created. Empty for a key written before #771.
-				UserID: key.UserID,
-				Tags:   tags,
+				UserID:        key.UserID,
+				Tags:          tags,
+				iamCredential: true,
 			}, adopt
 		}
 	}
@@ -315,6 +316,7 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 				SourceIdentity:    sess.SourceIdentity,
 				SessionTags:       sess.SessionTags,
 				TransitiveTagKeys: sess.TransitiveTagKeys,
+				iamCredential:     true,
 			}, sess.AccountID
 		}
 	}

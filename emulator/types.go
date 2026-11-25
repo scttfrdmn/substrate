@@ -221,6 +221,13 @@ type Principal struct {
 
 	// TransitiveTagKeys are the session tag keys that persist through role chaining.
 	TransitiveTagKeys []string
+
+	// iamCredential records that [resolvePrincipal] built this principal from an IAM access
+	// key's record or an STS session's, both of which name an IAM entity. When that entity is
+	// then absent the credential's owner has vanished, by a delete or a rename racing the
+	// request, rather than never having been created, so the authorization doors deny instead
+	// of leaving the request unenforced.
+	iamCredential bool
 }
 
 // StateManager defines the interface for reading and writing emulator state.

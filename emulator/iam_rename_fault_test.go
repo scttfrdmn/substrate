@@ -39,12 +39,28 @@ func TestIAMRenameAndLoginProfile_StoreFaults(t *testing.T) {
 	}
 	renameUser := map[string]string{"UserName": "bob", "NewUserName": "robert"}
 	renameGroup := map[string]string{"GroupName": "devs", "NewGroupName": "eng"}
+	pathOnlyUser := map[string]string{"UserName": "bob", "NewPath": "/moved/"}
+	pathOnlyGroup := map[string]string{"GroupName": "devs", "NewPath": "/moved/"}
+	boundaryOnly := map[string]string{"PolicyArn": policy, "PolicyUsageFilter": "PermissionsBoundary"}
 	cases := []struct {
 		name                       string
 		op                         string
 		body                       map[string]string
 		failGet, corrupt, put, del string
+		list                       string
 	}{
+		{name: "rename user target lookup", op: "UpdateUser", body: renameUser, failGet: "user:123456789012/robert"},
+		{name: "rename user group side get", op: "UpdateUser", body: renameUser, failGet: "group_users"},
+		{name: "rename user inline doc get", op: "UpdateUser", body: renameUser, failGet: "user_inline:"},
+		{name: "rename user key get", op: "UpdateUser", body: renameUser, failGet: "accesskey:"},
+		{name: "rename user path only", op: "UpdateUser", body: pathOnlyUser, put: "user:"},
+		{name: "rename group target lookup", op: "UpdateGroup", body: renameGroup, failGet: "group:123456789012/eng"},
+		{name: "rename group path only", op: "UpdateGroup", body: pathOnlyGroup, put: "group:"},
+		{name: "entities attachment scan", op: "ListEntitiesForPolicy", body: map[string]string{"PolicyArn": policy}, list: "user_policies"},
+		{name: "entities boundary list", op: "ListEntitiesForPolicy", body: map[string]string{"PolicyArn": policy}, list: "user:"},
+		{name: "entities boundary get", op: "ListEntitiesForPolicy", body: boundaryOnly, failGet: "user:"},
+		{name: "entities boundary corrupt", op: "ListEntitiesForPolicy", body: boundaryOnly, corrupt: "user:"},
+		{name: "login profile user", op: "CreateLoginProfile", body: map[string]string{"UserName": "bob", "Password": "x"}, failGet: "user:"},
 		{name: "rename user get", op: "UpdateUser", body: renameUser, failGet: "user:"},
 		{name: "rename user put", op: "UpdateUser", body: renameUser, put: "user:"},
 		{name: "rename user attached", op: "UpdateUser", body: renameUser, put: "user_policies"},
@@ -95,7 +111,31 @@ func TestIAMRenameAndLoginProfile_StoreFaults(t *testing.T) {
 				}
 			}
 			d.state.failGet, d.state.corruptGet, d.state.failPut, d.state.failDelete = tc.failGet, tc.corrupt, tc.put, tc.del
+			d.state.failList = tc.list
 			_, err := d.call(t, d.iam, tc.op, tc.body, nil)
+			assert.Error(t, err)
+		})
+	}
+}
+
+// TestIAMDeleteUserAndLoginProfile_StoreFaults reaches the checks DeleteUser makes after the login
+// profile, and CreateLoginProfile's write, each with nothing ahead of it to refuse first.
+func TestIAMDeleteUserAndLoginProfile_StoreFaults(t *testing.T) {
+	for _, tc := range []struct {
+		name, op, failGet, put string
+		inline                 bool
+	}{
+		{name: "access key list", op: "DeleteUser", failGet: "user_accesskeys"},
+		{name: "inline policy names", op: "DeleteUser", failGet: "user_inline_names"},
+		{name: "create login profile write", op: "CreateLoginProfile", put: "login_profile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newIDPDirect(t)
+			resp, err := d.call(t, d.iam, "CreateUser", map[string]string{"UserName": "bob"}, nil)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode, string(resp.Body))
+			d.state.failGet, d.state.failPut = tc.failGet, tc.put
+			_, err = d.call(t, d.iam, tc.op, map[string]string{"UserName": "bob", "Password": "pw"}, nil)
 			assert.Error(t, err)
 		})
 	}
@@ -116,6 +156,7 @@ func TestIAMCredentialListings_Refusals(t *testing.T) {
 		{"UpdateLoginProfile", `{"UserName":5}`},
 		{"DeleteLoginProfile", `{"UserName":5}`},
 		{"ListEntitiesForPolicy", `{"PolicyArn":5}`},
+		{"ListVirtualMFADevices", `{"Marker":"!not-a-marker"}`},
 	} {
 		resp, err := d.iam.HandleRequest(d.ctx(), &emulator.AWSRequest{Service: "iam", Operation: tc.op,
 			Body: []byte(tc.body), Params: map[string]string{}, Headers: map[string]string{}})

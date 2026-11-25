@@ -35,9 +35,18 @@ type IAMPlugin struct {
 	// a create's duplicate check, a client-ID or thumbprint change, a tag write and a delete.
 	providerMu sync.Mutex
 
+	// tagMu serializes the read-merge-write of a user's, role's or instance profile's tags: IAM's
+	// own TagUser, UntagUser, TagRole, UntagRole, TagInstanceProfile and UntagInstanceProfile, and
+	// the tagging API's TagResources and UntagResources through [IAMPlugin.tagRecord]. They hold
+	// entityMu only for reading, which does not exclude each other, so without it two concurrent
+	// tag writes to one record could each read the old tags and one write would be lost.
+	tagMu sync.Mutex
+
 	// entityMu makes a user or group rename atomic against every other IAM request:
 	// UpdateUser and UpdateGroup move a dozen records keyed by the name and hold it for
 	// writing, and every other operation holds it for reading (see [IAMPlugin.HandleRequest]).
+	// The server's principal resolution and authorization gate, GetSessionToken and the tagging
+	// API's IAM writes hold it for reading too ([iamEntityLocker]).
 	entityMu sync.RWMutex
 }
 
@@ -79,6 +88,13 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 	} else {
 		p.entityMu.RLock()
 		defer p.entityMu.RUnlock()
+	}
+	// The caller was resolved before the lock was taken; a user renamed since is evaluated under
+	// its new name, and one that no longer exists is left as it was for the doors to refuse.
+	if refreshed, err := iamRefreshedPrincipal(context.Background(), p.state, ctx.Principal); err != nil {
+		return nil, fmt.Errorf("resolve the caller: %w", err)
+	} else if refreshed != nil {
+		ctx.Principal = refreshed
 	}
 	switch req.Operation {
 	case "CreateUser":
@@ -1950,6 +1966,10 @@ func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 	if err != nil {
 		return fmt.Errorf("resolve principal for authorization: %w", err)
 	}
+	if !exists && reqCtx.Principal.iamCredential && entity.Name != "" {
+		// Denied, matching CheckAccess: the credential's owner has vanished.
+		return authzVanishedPrincipal(reqCtx, action, iamAccessDeniedCode)
+	}
 	if !exists {
 		// Not enforced, matching CheckAccess: enforcement is opt-in by creating the
 		// principal. Denying here instead would refuse every IAM call made with a
@@ -2641,6 +2661,9 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
@@ -2695,6 +2718,9 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
@@ -2782,6 +2808,9 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
@@ -2836,6 +2865,9 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
