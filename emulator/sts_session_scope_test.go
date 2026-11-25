@@ -390,19 +390,40 @@ func TestSTSAssumeRole_TransitiveKeyMustNameATag(t *testing.T) {
 	caller := trustSetupCaller(t, srv, "alice")
 	trustCreateRole(t, srv, "tagging", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
 		"Principal":{"AWS":"123456789012"},"Action":["sts:AssumeRole","sts:TagSession"]}]}`)
-	form := url.Values{"Action": {"AssumeRole"}, "Version": {"2011-06-15"},
-		"RoleArn": {"arn:aws:iam::123456789012:role/tagging"}, "RoleSessionName": {"s"},
-		"Tags.member.1.Key": {"team"}, "Tags.member.1.Value": {"ci"}, "TransitiveTagKeys.member.1": {"project"}}
-	r, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(form.Encode()))
-	require.NoError(t, err)
-	r.Host = "sts.amazonaws.com"
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	r.Header.Set("Authorization", trustAuthHeader(caller, "sts"))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, r)
-	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
-	code, _ := fedErrorCode(t, w.Body.String())
+	idpOK(t, srv, "PutRolePolicy", map[string]string{"RoleName": "tagging", "PolicyName": "chain",
+		"PolicyDocument": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:*","Resource":"*"}]}`})
+	assume := func(key string, extra url.Values) (int, string) {
+		form := url.Values{"Action": {"AssumeRole"}, "Version": {"2011-06-15"},
+			"RoleArn": {"arn:aws:iam::123456789012:role/tagging"}, "RoleSessionName": {"s"}}
+		for k, v := range extra {
+			form[k] = v
+		}
+		r, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(form.Encode()))
+		require.NoError(t, err)
+		r.Host = "sts.amazonaws.com"
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("Authorization", trustAuthHeader(key, "sts"))
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+	tagged := func(transitive string) url.Values {
+		return url.Values{"Tags.member.1.Key": {"team"}, "Tags.member.1.Value": {"ci"},
+			"TransitiveTagKeys.member.1": {transitive}}
+	}
+
+	status, body := assume(caller, tagged("project"))
+	require.Equal(t, http.StatusBadRequest, status, body)
+	code, _ := fedErrorCode(t, body)
 	assert.Equal(t, "InvalidParameterValue", code)
+
+	// Tag keys are case-insensitive, so a transitive key names a tag whatever its case, and the tag it
+	// names carries forward: a chained call cannot then override it.
+	status, body = assume(caller, tagged("TEAM"))
+	require.Equal(t, http.StatusOK, status, "a transitive key matches its tag regardless of case: %s", body)
+	first := fedSessionKey(t, body)
+	status, body = assume(first, url.Values{"Tags.member.1.Key": {"team"}, "Tags.member.1.Value": {"x"}})
+	assert.Equal(t, http.StatusBadRequest, status, "the tag named in another case is still transitive: %s", body)
 }
 
 func TestSessionPolicy_CloudFormationCreatorKeepsItsEntityTags(t *testing.T) {
@@ -419,3 +440,77 @@ func TestSessionPolicy_CloudFormationCreatorKeepsItsEntityTags(t *testing.T) {
 
 // multipartWriter returns a multipart writer over buf.
 func multipartWriter(buf *strings.Builder) *multipart.Writer { return multipart.NewWriter(buf) }
+
+// presignedCallerAccount sends a presigned (unverified) STS GetCallerIdentity naming key and returns
+// the account it reports.
+func presignedCallerAccount(t *testing.T, ts *emulator.TestServer, key string) string {
+	t.Helper()
+	now := ts.TimeController().Now().UTC()
+	u := ts.URL + "/?Action=GetCallerIdentity&Version=2011-06-15&X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+		"&X-Amz-Credential=" + url.QueryEscape(key+"/"+now.Format("20060102")+"/us-east-1/sts/aws4_request") +
+		"&X-Amz-Date=" + now.Format("20060102T150405Z") +
+		"&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature=forged"
+	r, err := http.NewRequestWithContext(t.Context(), http.MethodGet, u, nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(r)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+	return xmlField(string(body), "Account")
+}
+
+func TestPresignedCredential_IsTrustedOnlyWithoutSignatureVerification(t *testing.T) {
+	const account = "111122223333"
+	t.Run("verification off", func(t *testing.T) {
+		ts := emulator.StartTestServer(t, emulator.WithAccounts(account))
+		entry, ok := ts.CredentialsFor(account)
+		require.True(t, ok)
+		assert.Equal(t, account, presignedCallerAccount(t, ts, entry.AccessKeyID),
+			"with nothing verified, a presigned request is attributed to its signer")
+	})
+	t.Run("verification on", func(t *testing.T) {
+		ts := emulator.StartTestServerWithAccounts(t, account)
+		entry, ok := ts.CredentialsFor(account)
+		require.True(t, ok)
+		assert.NotEqual(t, account, presignedCallerAccount(t, ts, entry.AccessKeyID),
+			"a presigned signature substrate does not verify cannot name a key's account")
+	})
+}
+
+func TestSigV2Credentials_ResolveTheirPrincipal(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	const setup = "AKIAIOSFODNN7EXAMPLE"
+	iam := func(op string, params url.Values) string {
+		params.Set("Action", op)
+		params.Set("Version", "2010-05-08")
+		status, body := tsCall(t, ts, http.MethodPost, "/", "iam", setup, params, nil)
+		require.Equal(t, http.StatusOK, status, "%s: %s", op, body)
+		return body
+	}
+	status, body := tsCall(t, ts, http.MethodPut, "/sigv2-scope", "s3", setup, nil, nil)
+	require.Equal(t, http.StatusOK, status, body)
+	status, body = tsCall(t, ts, http.MethodPut, "/sigv2-scope/key", "s3", setup, url.Values{"x": {"y"}}, nil)
+	require.Equal(t, http.StatusOK, status, body)
+	iam("CreateUser", url.Values{"UserName": {"v2"}})
+	iam("PutUserPolicy", url.Values{"UserName": {"v2"}, "PolicyName": {"deny"},
+		"PolicyDocument": {`{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"s3:GetObject","Resource":"*"}]}`}})
+	key := xmlField(iam("CreateAccessKey", url.Values{"UserName": {"v2"}}), "AccessKeyId")
+
+	get := func(path string, header string) int {
+		r, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+path, nil)
+		require.NoError(t, err)
+		r.Host = "s3.amazonaws.com"
+		if header != "" {
+			r.Header.Set("Authorization", header)
+		}
+		resp, err := http.DefaultClient.Do(r)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		return resp.StatusCode
+	}
+	assert.Equal(t, http.StatusForbidden, get("/sigv2-scope/key", "AWS "+key+":c2lnbmF0dXJl"), "a SigV2 header names its signer")
+	assert.Equal(t, http.StatusForbidden, get("/sigv2-scope/key?AWSAccessKeyId="+key+"&Expires=4102444800&Signature=x", ""),
+		"a SigV2 presigned URL names its signer")
+}

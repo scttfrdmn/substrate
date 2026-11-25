@@ -167,9 +167,18 @@ allows nothing. The session keeps only what its other, resolvable session polici
 nothing if there are none. The server logs a warning naming the ARN. The documents are read when the
 session is minted, so a later change to a managed policy does not reach an existing session.
 
-Session policies also reach presigned URLs and S3 POST-policy uploads. Their signer's access key is
-read from the `X-Amz-Credential` query parameter or form field, as well as from the `Authorization`
-header, so a presigned request is authorized as the principal that signed it.
+Session policies also reach presigned URLs, S3 POST-policy uploads and SigV2-signed requests. With
+signature verification off, which is the default, the signer's access key is read from wherever the
+signing puts it: a SigV4 or SigV2 (`AWS <key>:<signature>`) `Authorization` header, the
+`X-Amz-Credential` or `AWSAccessKeyId` query parameter, or the same S3 form field. A presigned request
+is then authorized as the principal that signed it.
+
+**With signature verification on, only a SigV4 `Authorization` header names the caller.** Substrate
+verifies that header and nothing else: it does not check a presigned URL's query signature, a POST
+policy's signature or a SigV2 signature. If it read the key from any of those, a forged request could
+name any key ID and act as that key's principal, in that key's account. So under verification those
+requests resolve no principal, exactly as an unsigned request does. Verifying them is
+[#1713](https://github.com/scttfrdmn/substrate/issues/1713).
 
 ### Seeding what the identity provider decides
 

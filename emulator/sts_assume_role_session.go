@@ -48,7 +48,7 @@ func stsAssumeRoleSessionParams(principal *Principal, params map[string]string) 
 	// A transitive key must name a tag this request passes; one that names none is refused rather
 	// than dropped. The message is substrate's own.
 	for _, k := range requestTransitive {
-		if _, ok := requestTags[k]; !ok {
+		if _, ok := stsTagKeyFold(requestTags, k); !ok {
 			return out, stsFederationError("InvalidParameterValue",
 				fmt.Sprintf("TransitiveTagKeys names %s, which is not one of the session tags in Tags.", k),
 				http.StatusBadRequest)
@@ -59,9 +59,9 @@ func stsAssumeRoleSessionParams(principal *Principal, params map[string]string) 
 	var inheritedKeys []string
 	if principal != nil {
 		for _, k := range principal.TransitiveTagKeys {
-			if v, ok := principal.SessionTags[k]; ok {
-				inherited[k] = v
-				inheritedKeys = append(inheritedKeys, k)
+			if actual, ok := stsTagKeyFold(principal.SessionTags, k); ok {
+				inherited[actual] = principal.SessionTags[actual]
+				inheritedKeys = append(inheritedKeys, actual)
 			}
 		}
 	}
@@ -89,8 +89,8 @@ func stsAssumeRoleSessionParams(principal *Principal, params map[string]string) 
 				http.StatusBadRequest)
 		}
 		for _, k := range append(inheritedKeys, requestTransitive...) {
-			if _, ok := out.tags[k]; ok && !slices.Contains(out.transitiveKeys, k) {
-				out.transitiveKeys = append(out.transitiveKeys, k)
+			if actual, ok := stsTagKeyFold(out.tags, k); ok && !slices.Contains(out.transitiveKeys, actual) {
+				out.transitiveKeys = append(out.transitiveKeys, actual)
 			}
 		}
 		sort.Strings(out.transitiveKeys)
@@ -148,4 +148,18 @@ func (s stsAssumeRoleSession) extraActions() []string {
 		out = append(out, "sts:SetSourceIdentity")
 	}
 	return out
+}
+
+// stsTagKeyFold returns the key in tags that equals key regardless of case — session tag keys are
+// case-insensitive — and whether there is one.
+func stsTagKeyFold(tags map[string]string, key string) (string, bool) {
+	if _, ok := tags[key]; ok {
+		return key, true
+	}
+	for k := range tags {
+		if strings.EqualFold(k, key) {
+			return k, true
+		}
+	}
+	return "", false
 }

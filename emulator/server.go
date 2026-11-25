@@ -1030,7 +1030,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// from the registry. The *principal* comes from state, because only IAM's own
 	// records map an access key to the entity holding it. See [resolvePrincipal]
 	// and #411.
-	if accessKey := requestAccessKey(r, rawBody); accessKey != "" {
+	if accessKey := requestAccessKey(r, rawBody, !s.opts.VerifySignatures); accessKey != "" {
 		registryHit := false
 		if s.opts.Credentials != nil {
 			if entry, ok := s.opts.Credentials.Lookup(accessKey); ok {

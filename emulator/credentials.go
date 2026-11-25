@@ -118,21 +118,47 @@ func extractAccessKeyFromAuth(authHeader string) string {
 	return ""
 }
 
-// requestAccessKey returns the access key ID a request is signed with, wherever SigV4 puts it: the
-// Authorization header; the `X-Amz-Credential` query parameter of a presigned URL; or the
-// `X-Amz-Credential` field of an S3 browser-upload (POST policy) form. It returns "" for an
-// unsigned request, which then resolves no principal and is not enforced, as before.
+// requestAccessKey returns the access key ID a request is signed with, wherever the signing puts it:
+// a SigV4 `Authorization` header; a SigV2 `Authorization: AWS <key>:<signature>` header; the
+// `X-Amz-Credential` (SigV4) or `AWSAccessKeyId` (SigV2) query parameter of a presigned URL; or the
+// same field of an S3 browser-upload (POST policy) form. It returns "" for an unsigned request, which
+// then resolves no principal and is not enforced, as before.
 //
-// Reading only the header left a presigned request and a POST-policy upload with no principal at
-// all, so every authorization door — identity policies, boundaries and session policies alike —
-// was skipped for them.
-func requestAccessKey(r *http.Request, body []byte) string {
-	if key := extractAccessKeyFromAuth(r.Header.Get("Authorization")); key != "" {
+// trustUnverified says whether a credential [VerifySigV4] does not verify may name the caller.
+// VerifySigV4 verifies a SigV4 Authorization header and nothing else, so with signature verification
+// on (`trustUnverified` false) only that header is read: a presigned URL, a POST policy or a SigV2
+// header could otherwise name any key ID it liked and act as that key's principal in that key's
+// account. With verification off, nothing is verified anyway, and reading every form is what makes a
+// presigned request authorized as the principal that signed it rather than not at all.
+func requestAccessKey(r *http.Request, body []byte, trustUnverified bool) string {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "AWS4-HMAC-SHA256 ") {
+		return extractAccessKeyFromAuth(auth)
+	}
+	if !trustUnverified {
+		return ""
+	}
+	if key, ok := strings.CutPrefix(auth, "AWS "); ok {
+		if colon := strings.IndexByte(key, ':'); colon > 0 {
+			return key[:colon]
+		}
+	}
+	if key := extractAccessKeyFromAuth(auth); key != "" {
 		return key
 	}
-	if key := accessKeyFromCredential(r.URL.Query().Get("X-Amz-Credential")); key != "" {
+	query := r.URL.Query()
+	if key := accessKeyFromCredential(query.Get("X-Amz-Credential")); key != "" {
 		return key
 	}
+	if key := query.Get("AWSAccessKeyId"); key != "" {
+		return key
+	}
+	return formAccessKey(r, body)
+}
+
+// formAccessKey reads the signer's access key from an S3 POST-policy form: `X-Amz-Credential`
+// (SigV4) or `AWSAccessKeyId` (SigV2), matched without regard to case as S3's form fields are.
+func formAccessKey(r *http.Request, body []byte) string {
 	if r.Method != http.MethodPost || len(body) == 0 {
 		return ""
 	}
@@ -146,13 +172,19 @@ func requestAccessKey(r *http.Request, body []byte) string {
 		if err != nil {
 			return ""
 		}
-		if strings.EqualFold(part.FormName(), "X-Amz-Credential") {
-			value, readErr := io.ReadAll(io.LimitReader(part, 512))
-			if readErr != nil {
-				return ""
-			}
-			return accessKeyFromCredential(strings.TrimSpace(string(value)))
+		name := part.FormName()
+		if !strings.EqualFold(name, "X-Amz-Credential") && !strings.EqualFold(name, "AWSAccessKeyId") {
+			continue
 		}
+		value, readErr := io.ReadAll(io.LimitReader(part, 512))
+		if readErr != nil {
+			return ""
+		}
+		v := strings.TrimSpace(string(value))
+		if strings.EqualFold(name, "X-Amz-Credential") {
+			return accessKeyFromCredential(v)
+		}
+		return v
 	}
 }
 

@@ -453,13 +453,21 @@ func (p *STSPlugin) federatedSession(goCtx context.Context, ctx *RequestContext,
 	}
 	// A transitive key must name a session tag the token passes; one that names none is refused
 	// rather than dropped. The message is substrate's own.
+	source := "token"
+	if a.action == stsSAMLAction {
+		source = "assertion"
+	}
+	var transitive []string
 	for _, k := range a.transitiveKeys {
-		if _, ok := a.tags[k]; !ok {
+		actual, ok := stsTagKeyFold(a.tags, k)
+		if !ok {
 			return STSSessionCredentials{}, stsFederationError("InvalidIdentityToken",
-				fmt.Sprintf("The transitive tag key %s names none of the token's session tags.", k), http.StatusBadRequest), nil
+				fmt.Sprintf("The transitive tag key %s names none of the %s's session tags.", k, source), http.StatusBadRequest), nil
+		}
+		if !slices.Contains(transitive, actual) {
+			transitive = append(transitive, actual)
 		}
 	}
-	transitive := a.transitiveKeys
 	creds, err := p.mintRoleSession(goCtx, ctx, arnAccountID(a.roleARN), a.roleName, a.role.RoleID, a.sessionName,
 		expiry, stsSessionExtras{policies: policies, tags: a.tags, transitiveKeys: transitive, sourceIdentity: a.sourceIdentity})
 	if err != nil {

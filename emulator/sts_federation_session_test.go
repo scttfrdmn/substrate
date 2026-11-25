@@ -282,6 +282,15 @@ func TestSTSAssumeRoleWithSAML_IssuerAudienceAndSessionExtras(t *testing.T) {
 			o.extraAttrs = `<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/PrincipalTag:team"><saml:AttributeValue>ci</saml:AttributeValue></saml:Attribute>` +
 				`<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys"><saml:AttributeValue>team</saml:AttributeValue></saml:Attribute>`
 		}, trust: "sts:TagSession", status: http.StatusOK},
+		{name: "transitive key in another case", mutate: func(o *samlAssertionOpts) {
+			o.extraAttrs = `<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/PrincipalTag:team"><saml:AttributeValue>ci</saml:AttributeValue></saml:Attribute>` +
+				`<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys"><saml:AttributeValue>TEAM</saml:AttributeValue></saml:Attribute>`
+		}, trust: "sts:TagSession", status: http.StatusOK},
+		{name: "transitive key naming no tag", mutate: func(o *samlAssertionOpts) {
+			o.extraAttrs = `<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/PrincipalTag:team"><saml:AttributeValue>ci</saml:AttributeValue></saml:Attribute>` +
+				`<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys"><saml:AttributeValue>project</saml:AttributeValue></saml:Attribute>`
+		}, trust: "sts:TagSession", status: http.StatusBadRequest, code: "InvalidIdentityToken",
+			message: "names none of the assertion's session tags"},
 		{name: "source identity with SetSourceIdentity", mutate: func(o *samlAssertionOpts) {
 			o.extraAttrs = `<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/SourceIdentity"><saml:AttributeValue>jane</saml:AttributeValue></saml:Attribute>`
 		}, trust: "sts:SetSourceIdentity", status: http.StatusOK, message: "<SourceIdentity>jane</SourceIdentity>"},
