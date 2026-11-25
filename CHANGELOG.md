@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.134.0] - 2026-11-25
+
 ### Added
 
 - Kinesis: `ListShards` with `ShardFilter`, `ExclusiveStartShardId` and `NextToken` paging (#1613).
@@ -21967,7 +21969,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.133.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.134.0...HEAD
+[v0.134.0]: https://github.com/scttfrdmn/substrate/compare/v0.133.0...v0.134.0
 [v0.133.0]: https://github.com/scttfrdmn/substrate/compare/v0.132.0...v0.133.0
 [v0.132.0]: https://github.com/scttfrdmn/substrate/compare/v0.131.0...v0.132.0
 [v0.131.0]: https://github.com/scttfrdmn/substrate/compare/v0.130.0...v0.131.0
