@@ -170,7 +170,7 @@ func TestEC2_VPCFilters_InertNameSelectsEverything(t *testing.T) {
 	ts := newEC2TestServer(t)
 	ec2CreateVPC(t, ts, "10.9.0.0/16")
 
-	for _, filter := range []string{"dhcp-options-id", "cidr-block-association.cidr-block", "ipv6-cidr-block-association.state"} {
+	for _, filter := range []string{"cidr-block-association.cidr-block", "ipv6-cidr-block-association.state"} {
 		t.Run(filter, func(t *testing.T) {
 			items := ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", filter, "nothing-matches-this"))
 			assert.Len(t, items, 2, "an inert filter is accepted and constrains nothing: "+

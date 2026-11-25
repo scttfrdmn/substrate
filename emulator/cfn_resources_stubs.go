@@ -498,13 +498,11 @@ var cfnGetAttUnmodelled = map[string]map[string]string{
 	// family of attributes, in cfnGetAttUnmodelledPrefixes), as TestCFN_GetAttCoverage asserts.
 	"AWS::EC2::VPC": {
 		"CidrBlockAssociations": "EC2 records no CIDR block association IDs for a VPC",
-		"DefaultNetworkAcl":     "network ACLs are not modeled",
 		"Ipv6CidrBlocks":        "EC2 models no IPv6 CIDR blocks",
 	},
 	"AWS::EC2::Subnet": {
-		"Ipv6CidrBlocks":          "EC2 models no IPv6 CIDR blocks",
-		"NetworkAclAssociationId": "network ACLs are not modeled",
-		"OutpostArn":              "Outposts are not modeled",
+		"Ipv6CidrBlocks": "EC2 models no IPv6 CIDR blocks",
+		"OutpostArn":     "Outposts are not modeled",
 	},
 	"AWS::EC2::NatGateway": {
 		"EniId":              "substrate creates no network interface for a NAT gateway",

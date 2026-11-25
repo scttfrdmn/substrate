@@ -64,7 +64,9 @@ type EC2Plugin struct {
 	// tagMu serializes tag writes with each other: CreateTags, DeleteTags, the tagging API's writes
 	// through [EC2Plugin.tagRecord], and CloudFormation's stamps and stack-tag propagation through
 	// [EC2Plugin.applyTagsByID] (#1609). It orders only those. Another operation that rewrites the
-	// same record, such as an instance state change, does not take it.
+	// same record, such as an instance state change, does not take it — except that a tag write
+	// naming a VPC, network ACL, DHCP option set or flow log also takes sgMu, first; see
+	// [EC2Plugin.lockTagWrite].
 	tagMu sync.Mutex
 }
 
@@ -335,6 +337,36 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.modifySnapshotAttribute(ctx, req)
 	case "ResetSnapshotAttribute":
 		return p.resetSnapshotAttribute(ctx, req)
+
+	// Network ACLs, DHCP option sets and flow logs (#1614).
+	case "CreateNetworkAcl":
+		return p.createNetworkACL(ctx, req)
+	case "DeleteNetworkAcl":
+		return p.deleteNetworkACL(ctx, req)
+	case "DescribeNetworkAcls":
+		return p.describeNetworkACLs(ctx, req)
+	case "CreateNetworkAclEntry":
+		return p.createNetworkACLEntry(ctx, req)
+	case "ReplaceNetworkAclEntry":
+		return p.replaceNetworkACLEntry(ctx, req)
+	case "DeleteNetworkAclEntry":
+		return p.deleteNetworkACLEntry(ctx, req)
+	case "ReplaceNetworkAclAssociation":
+		return p.replaceNetworkACLAssociation(ctx, req)
+	case "CreateDhcpOptions":
+		return p.createDHCPOptions(ctx, req)
+	case "DeleteDhcpOptions":
+		return p.deleteDHCPOptions(ctx, req)
+	case "DescribeDhcpOptions":
+		return p.describeDHCPOptions(ctx, req)
+	case "AssociateDhcpOptions":
+		return p.associateDHCPOptions(ctx, req)
+	case "CreateFlowLogs":
+		return p.createFlowLogs(ctx, req)
+	case "DescribeFlowLogs":
+		return p.describeFlowLogs(ctx, req)
+	case "DeleteFlowLogs":
+		return p.deleteFlowLogs(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), action)
 	}
@@ -1900,6 +1932,15 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "InvalidParameterValue",
 			Message: "Value (" + tenancy + ") for parameter InstanceTenancy is invalid", HTTPStatus: http.StatusBadRequest}
 	}
+	// Held through the VPC's creation, so the default DHCP option set it is associated with
+	// cannot be deleted between the read and the write, and its default network ACL is written
+	// under the lock every ACL write holds (#1614).
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
+	dhcpOptionsID, err := p.newVPCDHCPOptionsID(context.Background(), reqCtx)
+	if err != nil {
+		return nil, err
+	}
 	vpcID := generateVPCID(reqCtx.IDs)
 	vpc := EC2VPC{
 		VPCID:            vpcID,
@@ -1908,6 +1949,7 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		State:            "available",
 		EnableDNSSupport: true,
 		InstanceTenancy:  tenancy,
+		DhcpOptionsID:    dhcpOptionsID,
 		Tags:             tags,
 		AccountID:        reqCtx.AccountID,
 		Region:           reqCtx.Region,
@@ -1931,6 +1973,10 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	// Guide), so every VPC gets one (#1492). It is minted after the route table, so the route
 	// table's and association's IDs a recorded CreateVpc minted are unchanged on replay.
 	if err := p.createDefaultSecurityGroup(context.Background(), reqCtx, vpcID); err != nil {
+		return nil, err
+	}
+	// The default network ACL is drawn after the security group, for the same reason (#1614).
+	if err := p.createDefaultNetworkACL(context.Background(), reqCtx, vpcID, nil); err != nil {
 		return nil, err
 	}
 
@@ -1958,12 +2004,10 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 // tag:<key> and tag-key filters do — a filter over a member the response never showed would
 // be unreadable even when it worked.
 //
-// Five members AWS's samples carry are deliberately absent: dhcpOptionsId,
-// ipv6CidrBlockAssociationSet, cidrBlockAssociationSet, isDefault's
-// blockPublicAccessStates sibling and encryptionControl. instanceTenancy was a sixth until
-// #1519. Nothing in [EC2VPC] backs them,
-// which is exactly why [ec2VPCFilterSpec] leaves the CIDR-association and dhcp-options-id
-// filters inert.
+// Four members AWS's samples carry are deliberately absent: ipv6CidrBlockAssociationSet,
+// cidrBlockAssociationSet, isDefault's blockPublicAccessStates sibling and encryptionControl.
+// Nothing in [EC2VPC] backs them, which is exactly why [ec2VPCFilterSpec] leaves the
+// CIDR-association filters inert. dhcpOptionsId is rendered by [ec2VPCDHCPOptionsID] (#1614).
 //
 // tagSet is omitted entirely when the VPC has no tags, which is what AWS's DescribeVpcs
 // sample shows for an untagged VPC. DescribeInternetGateways' page shows the opposite — a
@@ -1982,6 +2026,9 @@ type ec2VPCItem struct {
 
 	// OwnerID is the account that owns the VPC.
 	OwnerID string `xml:"ownerId"`
+
+	// DhcpOptionsID is the VPC's DHCP option set, or "default" for none.
+	DhcpOptionsID string `xml:"dhcpOptionsId"`
 
 	// InstanceTenancy is the tenancy of instances launched into the VPC.
 	InstanceTenancy string `xml:"instanceTenancy"`
@@ -2009,6 +2056,7 @@ func ec2VPCXML(vpc EC2VPC) ec2VPCItem {
 		State:           vpc.State,
 		CIDRBlock:       vpc.CIDRBlock,
 		OwnerID:         vpc.AccountID,
+		DhcpOptionsID:   ec2VPCDHCPOptionsID(vpc),
 		InstanceTenancy: tenancy,
 		IsDefault:       vpc.IsDefault,
 		Tags:            ec2TagSet(vpc.Tags),
@@ -2184,6 +2232,10 @@ func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "subnet_ids", subnetID); err != nil {
 		return nil, err
 	}
+	// Drawn after the subnet's own ID (#1614).
+	if err := p.associateSubnetWithDefaultNetworkACL(context.Background(), reqCtx, subnetID, vpcID); err != nil {
+		return nil, err
+	}
 	type response struct {
 		XMLName xml.Name      `xml:"CreateSubnetResponse"`
 		XMLNS   string        `xml:"xmlns,attr"`
@@ -2290,6 +2342,9 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deleteSubnet: %w", err)
+	}
+	if err := p.deleteSubnetNetworkACLAssociation(context.Background(), reqCtx, subnetID); err != nil {
+		return nil, err
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteSubnetResponse"`
@@ -3704,8 +3759,7 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if awsErr := ec2CheckTagResourceIDs(p.state, reqCtx, resourceIDs); awsErr != nil {
 		return nil, awsErr
 	}
-	p.tagMu.Lock()
-	defer p.tagMu.Unlock()
+	defer p.lockTagWrite(resourceIDs)()
 	for _, id := range resourceIDs {
 		existing, found, err := ec2ResourceTags(p.state, reqCtx, id)
 		if err != nil {
@@ -3720,6 +3774,11 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		if awsErr := ec2CheckTagLimit(existing, tags); awsErr != nil {
 			return nil, awsErr
 		}
+	}
+	// A default network ACL or DHCP option set that is synthesized when read is persisted, once
+	// every limit check has passed, so the tags have a record to land on (#1614).
+	if err := p.materializeTagTargets(reqCtx, resourceIDs, tags); err != nil {
+		return nil, err
 	}
 	for _, id := range resourceIDs {
 		if err := ec2ApplyTagsToResource(p.state, reqCtx, id, tags, false); err != nil {
@@ -3757,8 +3816,7 @@ func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if awsErr := ec2CheckTagResourceIDs(p.state, reqCtx, resourceIDs); awsErr != nil {
 		return nil, awsErr
 	}
-	p.tagMu.Lock()
-	defer p.tagMu.Unlock()
+	defer p.lockTagWrite(resourceIDs)()
 	for _, id := range resourceIDs {
 		if err := ec2ApplyTagsToResource(p.state, reqCtx, id, tags, true); err != nil {
 			return nil, err
@@ -3917,6 +3975,12 @@ func ec2TaggableResource(state StateManager, reqCtx *RequestContext, id string) 
 		return ec2Taggable{stateKey: "igw:" + scope + "/" + id, arnType: "internet-gateway", arnID: id}, true
 	case strings.HasPrefix(id, "rtb-"):
 		return ec2Taggable{stateKey: "rtb:" + scope + "/" + id, arnType: "route-table", arnID: id}, true
+	case strings.HasPrefix(id, "acl-"):
+		return ec2Taggable{stateKey: ec2NetworkACLKey(acct, region, id), arnType: "network-acl", arnID: id}, true
+	case strings.HasPrefix(id, "dopt-"):
+		return ec2Taggable{stateKey: ec2DHCPOptionsKey(acct, region, id), arnType: "dhcp-options", arnID: id}, true
+	case strings.HasPrefix(id, "fl-"):
+		return ec2Taggable{stateKey: ec2FlowLogKey(acct, region, id), arnType: "vpc-flow-log", arnID: id}, true
 	case strings.HasPrefix(id, "eipalloc-"):
 		// elastic-ip, and the ARN carries the allocation ID — which is the ID CreateTags
 		// takes for an address, so no translation is needed here either.
@@ -6019,6 +6083,10 @@ func ec2CheckVPCAttributeRequest(params map[string]string, vpc EC2VPC) *AWSError
 func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	vpcID := req.Params["VpcId"]
 	key := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
+	// The VPC record's read-modify-write holds the lock AssociateDhcpOptions and a VPC's tag
+	// writes hold, so none of them overwrites another's change (#1614).
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 modifyVpcAttribute get: %w", err)

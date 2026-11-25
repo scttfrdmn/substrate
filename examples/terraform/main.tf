@@ -48,6 +48,109 @@ resource "aws_security_group" "app" {
   tags = local.tags
 }
 
+# --- Network controls (#1614) -------------------------------------------------
+# The default network ACL every VPC comes with, a custom ACL with an inline rule and
+# a standalone one, a DHCP option set associated with the VPC, and a flow log. Each
+# is recorded and read back; substrate enforces no rule and delivers no flow log.
+
+resource "aws_default_network_acl" "main" {
+  default_network_acl_id = aws_vpc.main.default_network_acl_id
+
+  ingress {
+    protocol   = -1
+    rule_no    = 100
+    action     = "allow"
+    cidr_block = "0.0.0.0/0"
+    from_port  = 0
+    to_port    = 0
+  }
+
+  egress {
+    protocol   = -1
+    rule_no    = 100
+    action     = "allow"
+    cidr_block = "0.0.0.0/0"
+    from_port  = 0
+    to_port    = 0
+  }
+
+  # The subnets move to aws_network_acl.private, which manages their association.
+  lifecycle {
+    ignore_changes = [subnet_ids]
+  }
+
+  tags = local.tags
+}
+
+resource "aws_network_acl" "private" {
+  vpc_id     = aws_vpc.main.id
+  subnet_ids = [aws_subnet.main.id]
+  tags       = merge(local.tags, { Name = "${var.name}-private" })
+}
+
+resource "aws_network_acl_rule" "https_in" {
+  network_acl_id = aws_network_acl.private.id
+  rule_number    = 100
+  egress         = false
+  protocol       = "tcp"
+  rule_action    = "allow"
+  cidr_block     = aws_vpc.main.cidr_block
+  from_port      = 443
+  to_port        = 443
+}
+
+resource "aws_network_acl_rule" "ephemeral_out" {
+  network_acl_id = aws_network_acl.private.id
+  rule_number    = 100
+  egress         = true
+  protocol       = "tcp"
+  rule_action    = "allow"
+  cidr_block     = aws_vpc.main.cidr_block
+  from_port      = 1024
+  to_port        = 65535
+}
+
+resource "aws_vpc_dhcp_options" "main" {
+  domain_name         = "${var.name}.internal"
+  domain_name_servers = ["AmazonProvidedDNS"]
+  tags                = local.tags
+}
+
+resource "aws_vpc_dhcp_options_association" "main" {
+  vpc_id          = aws_vpc.main.id
+  dhcp_options_id = aws_vpc_dhcp_options.main.id
+}
+
+data "aws_iam_policy_document" "assume_flow_logs" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["vpc-flow-logs.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "flow_logs" {
+  name               = "${var.name}-flow-logs"
+  assume_role_policy = data.aws_iam_policy_document.assume_flow_logs.json
+  tags               = local.tags
+}
+
+resource "aws_cloudwatch_log_group" "flow_logs" {
+  name              = "/vpc/${var.name}-flow-logs"
+  retention_in_days = 7
+  tags              = local.tags
+}
+
+resource "aws_flow_log" "vpc" {
+  vpc_id          = aws_vpc.main.id
+  traffic_type    = "REJECT"
+  iam_role_arn    = aws_iam_role.flow_logs.arn
+  log_destination = aws_cloudwatch_log_group.flow_logs.arn
+  tags            = local.tags
+}
+
 # --- IAM ----------------------------------------------------------------------
 
 data "aws_iam_policy_document" "assume_lambda" {

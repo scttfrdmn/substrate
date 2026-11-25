@@ -134,7 +134,7 @@ func TestEC2_FilterNames_DocumentedButUnevaluatedIsAccepted(t *testing.T) {
 		{"DescribeInstanceStatus", "system-status.status"},
 		{"DescribeInstanceStatus", "event.code"},
 		{"DescribeInstanceStatus", "availability-zone-id"},
-		{"DescribeVpcs", "dhcp-options-id"},
+		{"DescribeVpcs", "ipv6-cidr-block-association.state"},
 		{"DescribeVpcs", "cidr-block-association.cidr-block"},
 		{"DescribeAvailabilityZones", "zone-type"},
 		{"DescribeAvailabilityZones", "parent-zone-id"},

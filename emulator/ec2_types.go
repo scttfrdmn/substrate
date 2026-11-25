@@ -279,6 +279,10 @@ type EC2VPC struct {
 	// InstanceTenancy is the tenancy CreateVpc was given, empty for the default.
 	InstanceTenancy string `json:"instance_tenancy,omitempty"`
 
+	// DhcpOptionsID is the VPC's DHCP option set: a dopt- ID, or "default" for none. A VPC an
+	// older build wrote carries none and reads as the Region's default set (#1614).
+	DhcpOptionsID string `json:"dhcp_options_id,omitempty"`
+
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
 

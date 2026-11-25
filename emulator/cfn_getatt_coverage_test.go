@@ -92,7 +92,7 @@ func TestCFN_GetAttCoverage(t *testing.T) {
 	assert.Contains(t, unmodelled, "AWS::Lambda::Function.SnapStartResponse")
 
 	t.Run("an unmodelled attribute in an Output refuses the request", func(t *testing.T) {
-		for _, attr := range []string{"DefaultNetworkAcl", "VpcEncryptionControl.State"} {
+		for _, attr := range []string{"CidrBlockAssociations", "VpcEncryptionControl.State"} {
 			_, err := newStrictDeployer(t).Deploy(context.Background(), cfnCoverageTemplate(t, map[string]interface{}{
 				"X": map[string]interface{}{"Value": map[string]interface{}{"Fn::GetAtt": []interface{}{"Vpc", attr}}},
 			}), "refused", nil)

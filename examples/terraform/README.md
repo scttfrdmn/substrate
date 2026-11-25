@@ -4,7 +4,8 @@ Fourteen kinds of resource most Terraform configurations start from, applied wit
 provider pointed at substrate: a VPC, a subnet, a security group, an IAM role and policy, a
 versioned S3 bucket, an SQS queue, an SNS topic, a DynamoDB table, a KMS key, a Secrets Manager
 secret, a CloudWatch metric alarm, an EventBridge rule, a CloudWatch Logs log group, and a Lambda
-function from a zip.
+function from a zip. The VPC also carries its network controls: the default network ACL, a custom
+ACL with two rules, a DHCP option set, and a flow log.
 
 ## Run it
 

@@ -3145,7 +3145,9 @@ func (d *StackDeployer) deployResource(
 	if err == nil && dr.Error == "" {
 		// The attributes only the service's record holds, read once it exists, so Fn::GetAtt
 		// on a later resource or an Output answers them.
-		d.recordEC2Attributes(ctx, &dr)
+		if attrErr := d.recordEC2Attributes(ctx, &dr); attrErr != nil {
+			dr.Error = attrErr.Error()
+		}
 		d.recordELBAttributes(ctx, &dr)
 	}
 	failures := cctx.takeFailures()

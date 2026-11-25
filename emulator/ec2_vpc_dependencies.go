@@ -249,10 +249,11 @@ func ec2ScanRecords[T any](ctx context.Context, state StateManager, prefix strin
 
 // vpcDependents reports whether vpcID still holds anything AWS requires to be gone before
 // DeleteVpc, and returns the state keys of what the delete itself removes: the default security
-// group and the main route table.
+// group, the main route table, the default network ACL and the VPC's flow logs.
 //
 // A dependent is a subnet, an attached internet gateway, a security group other than the
-// default one ([ec2IsDefaultSecurityGroup]), a route table that is not the main one, a NAT
+// default one ([ec2IsDefaultSecurityGroup]), a route table that is not the main one, a network
+// ACL that is not the default one, a NAT
 // gateway not yet deleted, or an instance not yet terminated. A NAT gateway answers `deleted` and an instance `terminated` for a
 // while after their deletes, in AWS as here, and neither holds the VPC.
 func (p *EC2Plugin) vpcDependents(reqCtx *RequestContext, vpcID string) (bool, []string, error) {
@@ -304,6 +305,14 @@ func (p *EC2Plugin) vpcDependents(reqCtx *RequestContext, vpcID string) (bool, [
 	}); err != nil {
 		return false, owned, fmt.Errorf("ec2 deleteVpc NAT gateways: %w", err)
 	}
+	// A network ACL other than the default one holds the VPC; the default one and the VPC's flow
+	// logs go with it (#1614).
+	aclHeld, aclOwned, err := p.vpcNetworkControlDependents(ctx, reqCtx, vpcID)
+	if err != nil {
+		return false, owned, err
+	}
+	held = held || aclHeld
+	owned = append(owned, aclOwned...)
 	if err := ec2ScanRecords(ctx, p.state, "instance:"+scope, func(_ string, inst EC2Instance) {
 		held = held || (inst.VPCID == vpcID && inst.State.Name != ec2StateTerminated)
 	}); err != nil {

@@ -5,7 +5,7 @@
 
 ## Supported operations
 
-**All 97 operations the EC2 plugin routes have a row below.** The table and the plugin's dispatch
+**All 114 operations the EC2 plugin routes have a row below.** The table and the plugin's dispatch
 switch agree in both directions — no row names an action the switch does not handle, and no action
 the switch handles is missing a row. Thirty-six of the rows were added by
 [#1094](https://github.com/scttfrdmn/substrate/issues/1094), which is also where the count came
@@ -25,18 +25,18 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
 | ModifyInstanceMetadataOptions | Each of the five options named replaces the instance's and the rest are kept, validated against the published values (`InvalidParameterValue`). The response's `instanceMetadataOptions` reports `pending` and every later `DescribeInstances` `applied`. A `terminated` instance is `IncorrectInstanceState`. See [Instance metadata options](#instance-metadata-options) |
-| CreateVpc | Stores `TagSpecification.N` scoped to `vpc` and `InstanceTenancy` (`default` or `dedicated`; anything else, `host` included, is `InvalidParameterValue`, since API_CreateVpc says host "cannot be used with this parameter"), both dropped before #1519. Renders the same VPC `DescribeVpcs` does, `ownerId`, `instanceTenancy` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters). Creates the VPC's main route table and, as of [#1492](https://github.com/scttfrdmn/substrate/issues/1492), its security group named `default` — the self-referencing all-traffic ingress rule and the all-traffic egress rule to `0.0.0.0/0` — see [A VPC's dependents](#a-vpc-s-dependents) |
+| CreateVpc | Stores `TagSpecification.N` scoped to `vpc` and `InstanceTenancy` (`default` or `dedicated`; anything else, `host` included, is `InvalidParameterValue`, since API_CreateVpc says host "cannot be used with this parameter"), both dropped before #1519. Renders the same VPC `DescribeVpcs` does, `ownerId`, `instanceTenancy` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters). Creates the VPC's main route table and, as of [#1492](https://github.com/scttfrdmn/substrate/issues/1492), its security group named `default` — the self-referencing all-traffic ingress rule and the all-traffic egress rule to `0.0.0.0/0` — see [A VPC's dependents](#a-vpc-s-dependents). As of [#1614](https://github.com/scttfrdmn/substrate/issues/1614) it also creates the VPC's default network ACL and associates the VPC with the Region's default DHCP option set — see [Network ACLs, DHCP option sets and flow logs](#network-acls-dhcp-option-sets-and-flow-logs) |
 | CreateDefaultVpc | Creates the [default VPC](#the-default-vpc) and everything AWS creates with one; `DefaultVpcAlreadyExists` when the Region has one. Clears the tombstone a deleted default VPC leaves |
 | CreateDefaultSubnet | A `/20` default subnet in the named zone of the [default VPC](#the-default-vpc), by `AvailabilityZone` or `AvailabilityZoneId`; refuses with `DefaultVpcDoesNotExist`, `DefaultSubnetAlreadyExistsInAvailabilityZone` or `InvalidAvailabilityZone`. `Ipv6Native` is unread |
 | DescribeNetworkInterfaces | The interfaces live instances recorded from `NetworkInterface.N` at launch; substrate mints none for an instance launched without one, or for a Lambda function or load balancer. [Explicit resource IDs](#explicit-resource-ids) (`InvalidNetworkInterfaceID.NotFound`/`.Malformed`); sixteen filters evaluated and the rest inert, with [filter names checked](#one-rule-for-an-unrecognized-filter-name); paginates on `MaxResults`/`NextToken` over 5–1000 (#1519) |
-| DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); six of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); seven of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId`, `dhcpOptionsId` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifyVpcAttribute | `VpcId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `EnableDnsSupport.Value`, `EnableDnsHostnames.Value` and `EnableNetworkAddressUsageMetrics.Value` are read under the spellings the page publishes, and each is readable back through `DescribeVpcAttribute` ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then the first two were read as `EnableDNSSupport.Value`/`EnableDNSHostnames.Value`, which no SDK sends, and every modify was discarded). One attribute per request, and hostnames only where DNS support is enabled ([#1554](https://github.com/scttfrdmn/substrate/issues/1554)) — see [VPC attributes and internet gateways](#vpc-attributes-and-internet-gateways) |
 | DescribeVpcAttribute | `VpcId` and `Attribute` are required; `Attribute` is one of `enableDnsSupport`, `enableDnsHostnames` and `enableNetworkAddressUsageMetrics` (`InvalidParameterValue` otherwise), and the response carries `vpcId` and that one attribute as `value` — the shape of the page's samples. A new VPC answers DNS support on and hostnames off; the [default VPC](#the-default-vpc) has both on. Network Address Usage metrics is a recorded flag: no metric is produced |
-| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Refused with `DependencyViolation` while the VPC holds a subnet, an attached internet gateway, a security group other than `default`, a route table other than its main one, a NAT gateway not yet `deleted`, or an instance not yet `terminated`, and nothing is written; otherwise its `default` security group and main route table go with it — see [A VPC's dependents](#a-vpc-s-dependents). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again |
-| CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them) |
+| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Refused with `DependencyViolation` while the VPC holds a subnet, an attached internet gateway, a security group other than `default`, a route table other than its main one, a network ACL other than its default one, a NAT gateway not yet `deleted`, or an instance not yet `terminated`, and nothing is written; otherwise its `default` security group, main route table, default network ACL and flow logs go with it — see [A VPC's dependents](#a-vpc-s-dependents). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again |
+| CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them). The subnet is associated with its VPC's default network ACL ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)) |
 | DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifySubnetAttribute | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `MapPublicIpOnLaunch` is the one modelled attribute — it decides whether a launch into the subnet gets a public IPv4 address, and it is readable back through [`DescribeSubnets`](#a-subnet-reports-its-tags-and-filters-on-them) — and the other ten published parameters are unread. It is read as `MapPublicIpOnLaunch.Value`, the page's own spelling ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then it was read as `MapPublicIPOnLaunch.Value` and every SDK's modify was discarded). AWS's *"You can only modify one attribute at a time"* is not enforced, which is inert while one attribute is modelled |
-| DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids). A subnet still holding an instance that is not terminated, or a NAT gateway not yet `deleted`, is `DependencyViolation` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) — see [What a delete refuses on](#what-a-delete-refuses-on) |
+| DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids). A subnet still holding an instance that is not terminated, or a NAT gateway not yet `deleted`, is `DependencyViolation` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) — see [What a delete refuses on](#what-a-delete-refuses-on). A deleted subnet's network ACL association goes with it |
 | CreateSecurityGroup | `TagSpecification.N` scoped to `security-group`, answered in `tagSet`; an absent `VpcId` places the group in the [default VPC](#the-default-vpc), or is `VPCIdNotSpecified` without one; the name `default` is reserved (`InvalidParameterValue`), and a name another group in the same VPC holds, compared case-insensitively, is `InvalidGroup.Duplicate` ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)); a `VpcId` naming no VPC is `InvalidVpcID.NotFound` — see [Security group tags and rules](#security-group-tags-and-rules) |
 | DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); `GroupName.N` selects among the [default VPC](#the-default-vpc)'s groups only, as the page scopes it, case-insensitively ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)); reports `ownerId` and `tagSet`, and evaluates every filter it documents, `tag:<key>` and the rule filters included — see [Security group tags and rules](#security-group-tags-and-rules); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range, and `GroupName.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids). `GroupName` names a group in the [default VPC](#the-default-vpc), case-insensitively, and one that resolves to nothing there is `InvalidGroup.NotFound`; `GroupId` wins when both are sent ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)). A VPC's `default` group is `CannotDelete`, and a group an instance carries or another group's rule references is `DependencyViolation` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) — see [What a delete refuses on](#what-a-delete-refuses-on) |
@@ -67,6 +67,20 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | CreateRoute | `RouteTableId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)); the route is appended with `state` `active`. All twelve published targets are read and each renders under its own `Route` element — see [Route targets](#route-targets) ([#1187](https://github.com/scttfrdmn/substrate/issues/1187)). No destination, or no target, is `MissingParameter`; two destinations, or two targets, is `InvalidParameterCombination`. A `DestinationCidrBlock` is canonicalised (`100.68.0.18/18` is stored as `100.68.0.0/18`), a destination the table already routes is `RouteAlreadyExists`, and an internet gateway, NAT gateway or instance target that does not exist is `InvalidGatewayID.NotFound`, `InvalidNatGatewayID.NotFound` or `InvalidInstanceID.NotFound`. A NAT gateway that is `deleted` or `failed`, or an instance that is `shutting-down` or `terminated`, is stored `blackhole` |
 | ReplaceRoute | `RouteTableId` is required and checked; the route matching the destination exactly has its target and `state` rewritten, and a destination no route carries answers `InvalidRoute.NotFound`/400. The destination and target are read as `CreateRoute` reads them, plus `LocalTarget=true` for `local`, and the previous target is cleared — see [Route targets](#route-targets) |
 | DeleteRoute | `RouteTableId` is required and checked; the route matching `DestinationCidrBlock` (canonicalised as `CreateRoute` stores it), `DestinationIpv6CidrBlock` or `DestinationPrefixListId` is dropped, and a request naming none is `MissingParameter`. A destination no route carries is `InvalidRoute.NotFound`, as `ReplaceRoute` answers it — the client-error table's gloss reads *"Ensure that you indicate the exact CIDR range for the route in the request"*. Until [#1187](https://github.com/scttfrdmn/substrate/issues/1187) it answered `return=true` |
+| CreateNetworkAcl | A new ACL in `VpcId` (`InvalidVpcID.NotFound` when it names nothing) holding only the two catch-all denies, rule 32767 in each direction; `TagSpecification.N` scoped to `network-acl`. A `ClientToken` is echoed, not used to deduplicate — see [Network ACLs, DHCP option sets and flow logs](#network-acls-dhcp-option-sets-and-flow-logs) |
+| DeleteNetworkAcl | `InvalidNetworkAclID.NotFound` for an unknown ACL; a default ACL is `InvalidParameterValue` / "cannot delete default network ACL acl-…", and one still associated with a subnet is `DependencyViolation` |
+| DescribeNetworkAcls | [Explicit resource IDs](#explicit-resource-ids); **all nineteen** filters, the `association.*` and `entry.*` families included, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range. A VPC or subnet recorded before #1614 reads its default ACL and association under IDs derived from its own — see [Network ACLs, DHCP option sets and flow logs](#network-acls-dhcp-option-sets-and-flow-logs) |
+| CreateNetworkAclEntry | Rule numbers 1–32766; a rule number the direction already holds is `NetworkAclEntryAlreadyExists` unless the stored rule is identical, which succeeds unchanged; more than 20 rules in one direction is `NetworkAclEntryLimitExceeded`. Protocol names are stored as numbers, the CIDR is canonicalised, and a port range or ICMP type and code is kept only for the protocols that take one |
+| ReplaceNetworkAclEntry | The rule with the number and direction is replaced whole; one that does not exist is `InvalidNetworkAclEntry.NotFound` |
+| DeleteNetworkAclEntry | A rule that does not exist is `InvalidNetworkAclEntry.NotFound`; the catch-all deny cannot be named |
+| ReplaceNetworkAclAssociation | `AssociationId` names the subnet's current association (`InvalidAssociationID.NotFound`) and `NetworkAclId` the new ACL, which must be in the subnet's VPC; a fresh `aclassoc-` ID is answered as `newAssociationId` |
+| CreateDhcpOptions | `DhcpConfiguration.N` with the six documented keys, each at most once and within its documented value count; `TagSpecification.N` scoped to `dhcp-options` |
+| DeleteDhcpOptions | `InvalidDhcpOptionsID.NotFound` for an unknown set; a set any VPC uses is `DependencyViolation` / "The dhcpOptions 'dopt-…' has dependencies and cannot be deleted." Deleting the Region's default set means later VPCs are created with none |
+| DescribeDhcpOptions | The Region's default set and the caller's; `DhcpOptionsId.N` naming nothing is `InvalidDhcpOptionID.NotFound` — the reference's other spelling; **all six** filters. Paginates over the published 5–1000 range |
+| AssociateDhcpOptions | `default` associates the VPC with no set, and DescribeVpcs then renders `dhcpOptionsId` as `default`; an unknown VPC or set is `InvalidVpcID.NotFound` or `InvalidDhcpOptionsID.NotFound` |
+| CreateFlowLogs | `ResourceType` `VPC`, `Subnet` or `NetworkInterface`; each resource must exist, or the whole request is its kind's `NotFound`. Validates the destination parameters as the page states them. A resource already holding a flow log with the same traffic type and destination is an `Unsuccessful` item carrying `FlowLogAlreadyExists`. Nothing is delivered — see [Network ACLs, DHCP option sets and flow logs](#network-acls-dhcp-option-sets-and-flow-logs) |
+| DescribeFlowLogs | `FlowLogId.N` narrows rather than asserts; **all eight** filters; `deliverLogsStatus` is `SUCCESS` and `flowLogStatus` `ACTIVE`. Paginates with no published range |
+| DeleteFlowLogs | An ID naming no flow log is a top-level `InvalidFlowLogId.NotFound`, and nothing is deleted |
 | CreateVolume | `TagSpecification.N` scoped to `volume`, validated [before the volume is written](#a-tagged-create-is-authorized-twice) — see [A volume carries tags](#a-volume-carries-tags). Exactly one of `AvailabilityZone`/`AvailabilityZoneId` and at least one of `Size`/`SnapshotId` are required, both refused with `InvalidParameterCombination`; a named snapshot is resolved, must be observed `completed` (`IncorrectState`), and sets the size floor — see [`CreateVolume` invents neither a size nor a zone](#createvolume-invents-neither-a-size-nor-a-zone). `VolumeType` defaults to `gp2`, and `Iops`/`Throughput` are stored without the per-type rules AWS publishes for them |
 | DescribeVolumes | [Explicit resource IDs](#explicit-resource-ids) — `VolumeId.N` [asserts existence](#which-selectors-assert-existence) as of [#731](https://github.com/scttfrdmn/substrate/issues/731), where it used to answer a superset; eleven of twenty filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` and the volume's `attachmentSet`. Paginates on `MaxResults`/`NextToken`, with **no published range** — so a floor of 1 and no ceiling, and `VolumeId.N` with `MaxResults` is `InvalidParameterCombination`, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteVolume | `VolumeId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)); an `in-use` volume is refused with `VolumeInUse`/400, and the record is deleted rather than marked, so the delete is **not** idempotent |
@@ -191,7 +205,10 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeInstanceTypeOfferings | `instance-type`, `location` (both with [wildcards](#wildcards-in-filter-values)) | — |
 | DescribeTags | `key`, `resource-id`, `resource-type`, `value`, `tag:<key>` — all five AWS documents, all with [wildcards](#wildcards-in-filter-values) | — |
 | DescribeInstanceStatus | `availability-zone`, `instance-state-code`, `instance-state-name` | the other fifteen — the `event.*`, `system-status.*`, `instance-status.*` and `operator.*` families, plus `application-status.status`, `attached-ebs-status.status` and `availability-zone-id` |
-| DescribeVpcs | `cidr`, `is-default`, `owner-id`, `state`, `tag-key`, `tag:<key>` | `dhcp-options-id`, and the eight `cidr-block-association.*`/`ipv6-cidr-block-association.*` filters |
+| DescribeVpcs | `cidr`, `dhcp-options-id`, `is-default`, `owner-id`, `state`, `tag-key`, `tag:<key>` | the eight `cidr-block-association.*`/`ipv6-cidr-block-association.*` filters |
+| DescribeNetworkAcls | `association.association-id`, `association.network-acl-id`, `association.subnet-id`, `default`, the ten `entry.*` filters, `network-acl-id`, `owner-id`, `tag-key`, `tag:<key>`, `vpc-id` — **all nineteen** | — |
+| DescribeDhcpOptions | `dhcp-options-id`, `key`, `owner-id`, `tag-key`, `tag:<key>`, `value` — **all six** | — |
+| DescribeFlowLogs | `deliver-log-status`, `flow-log-id`, `log-destination-type`, `log-group-name`, `resource-id`, `tag-key`, `tag:<key>`, `traffic-type` — **all eight** | — |
 | DescribeInternetGateways | `attachment.state`, `attachment.vpc-id`, `internet-gateway-id`, `owner-id`, `tag-key`, `tag:<key>` — **all six** | — |
 | DescribeKeyPairs | `fingerprint`, `key-name`, `key-pair-id`, `tag-key`, `tag:<key>` — **all five** | — |
 | DescribeAvailabilityZones | `region-name`, `state`, `zone-id`, `zone-name` | `group-long-name`, `group-name`, `message`, `opt-in-status`, `parent-zone-id`, `parent-zone-name`, `zone-type` |
@@ -1141,12 +1158,14 @@ route tables stayed listed, so a teardown in the wrong order passed here and fai
 | an internet gateway | it is attached (detach it with `DetachInternetGateway`) |
 | a security group | it exists and is not the VPC's `default` group |
 | a route table | it exists and is not the VPC's main one |
+| a network ACL | it exists and is not the VPC's default one ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)) |
 | a NAT gateway | its state is not `deleted` |
 | an instance | its state is not `terminated` |
 
 Any of them is `DependencyViolation` / "The specified object has dependent resources." — the
 client-error table's gloss — and nothing is written. Once none remains the VPC is deleted, and its
-`default` security group and main route table with it. Dependents substrate does not store as
+`default` security group, main route table and default network ACL with it, along with its flow
+logs: "flow logs for deleted VPCs are eventually automatically removed". Dependents substrate does not store as
 records of their own — network interfaces, VPC endpoints, peering connections, egress-only
 gateways — cannot hold a VPC here.
 
@@ -1212,6 +1231,97 @@ for the subnet).
 referencing it, a subnet before its instances or NAT gateway, or a default group at all, is now
 refused, as on AWS, and so is a launch naming a subnet that does not exist. CloudFormation's delete
 sweep reverses dependency order, so a stack whose template orders them validly still tears down.
+
+## Network ACLs, DHCP option sets and flow logs
+
+[#1614](https://github.com/scttfrdmn/substrate/issues/1614) adds the three VPC resources a
+Terraform VPC reads on every refresh. The `aws_vpc` resource reads `default_network_acl_id` from
+`DescribeNetworkAcls` filtered on `vpc-id` and `default=true`, and `dhcp_options_id` from
+`DescribeVpcs`; `terraform-aws-modules/vpc` manages the default ACL with `aws_default_network_acl`.
+Each is recorded and rendered, never enforced: substrate carries no packets, runs no DHCP server
+and delivers no flow-log records, so what a caller can observe is the configuration itself.
+
+### Network ACLs
+
+**Every VPC has a default network ACL**, as the VPC User Guide says: "Your virtual private cloud
+(VPC) automatically comes with a default network ACL." It carries the guide's default rules in
+each direction: rule 100 allowing all IPv4 traffic, and the catch-all deny rendered as rule 32767.
+The IPv6 rules are "added only if you create the VPC with an associated IPv6 CIDR block", which
+substrate does not model. `CreateVpc`, the seeded [default VPC](#the-default-vpc) and
+`CreateDefaultVpc` all create one. Every subnet is associated with its VPC's default ACL when it is
+created, through an `aclassoc-` association that `ReplaceNetworkAclAssociation` replaces with a
+freshly minted one. A custom ACL starts with only the two denies.
+
+**Entries are stored the way AWS returns them.** Protocol names (`tcp`, `udp`, `icmp`, `icmpv6`,
+`all`) are stored as numbers, and the `entry.protocol` filter accepts either spelling. A port range
+is kept only for TCP and UDP, and an ICMP type and code only for ICMP and ICMPv6. For any other
+protocol "traffic on all ports is allowed, regardless of any ports or ICMP types or codes that you
+specify", so a range sent with protocol `-1` is not kept, and a reader sees no `portRange`. The
+CIDR is canonicalised (`100.68.0.18/18` is stored as `100.68.0.0/18`). Entries render egress first,
+each direction by rule number, as AWS's `DescribeNetworkAcls` sample does. Each `entry.*` and
+`association.*` filter matches an ACL when any one of its entries or associations does.
+
+| Request | Answer |
+|---|---|
+| A rule number outside 1–32766 | `InvalidParameterValue` — "Positive integer from 1 to 32766. The range 32767 to 65535 is reserved for internal use." |
+| A rule number the direction holds, with different attributes | `NetworkAclEntryAlreadyExists` |
+| The same, with identical attributes | success, unchanged |
+| A 21st rule in one direction | `NetworkAclEntryLimitExceeded` (the quota's default of 20) |
+| `ReplaceNetworkAclEntry` or `DeleteNetworkAclEntry` on a rule that does not exist | `InvalidNetworkAclEntry.NotFound` |
+| `DeleteNetworkAcl` on a default ACL | `InvalidParameterValue` / "cannot delete default network ACL acl-…" |
+| `DeleteNetworkAcl` on an ACL a subnet is associated with | `DependencyViolation` |
+| `DeleteVpc` on a VPC holding a custom ACL | `DependencyViolation`; the default ACL goes with the VPC |
+
+**A VPC or subnet recorded before #1614 reads as if it had always had one.** Such a VPC has no ACL
+record, so `DescribeNetworkAcls` synthesizes its default ACL at read time. The ID is derived from
+the account, Region and VPC ID, and a subnet's association ID from its subnet ID, so the same VPC
+always reports the same `acl-` ID and no request's identifier sequence moves. A write that changes
+a synthesized ACL — an entry, a replaced association, a tag — stores it under that same ID.
+
+### DHCP option sets
+
+**Each Region has a default DHCP option set**: `domain-name` is `ec2.internal` in `us-east-1` and
+`<region>.compute.internal` elsewhere, and `domain-name-servers` is `AmazonProvidedDNS`. These are
+the values `CreateDhcpOptions` documents for `AmazonProvidedDNS`. The set's ID is derived from the
+account and Region, so it is the same on every read. A new VPC is associated with it, and DescribeVpcs
+renders the association as `dhcpOptionsId`; a VPC recorded before #1614 reads as associated with
+it too. `AssociateDhcpOptions` with `default` associates a VPC with no set, which DescribeVpcs
+renders as `dhcpOptionsId` `default`. The `dhcp-options-id` filter on `DescribeVpcs` selects on
+the same value.
+
+`DescribeDhcpOptions` answers an unknown `DhcpOptionsId.N` with `InvalidDhcpOptionID.NotFound`, and
+`DeleteDhcpOptions` and `AssociateDhcpOptions` answer an unknown set with
+`InvalidDhcpOptionsID.NotFound`. The error reference publishes both spellings, and the Terraform
+AWS provider expects each from the operation it reads it from. A set any VPC uses is not deleted:
+`DependencyViolation` / "The dhcpOptions 'dopt-…' has dependencies and cannot be deleted."
+
+### Flow logs
+
+**A flow log is recorded intent.** `CreateFlowLogs` stores the configuration — resource, traffic
+type, destination type and destination or log group, delivery role, format, aggregation interval
+and S3 destination options. `DescribeFlowLogs` reports it with `deliverLogsStatus` `SUCCESS` and
+`flowLogStatus` `ACTIVE`. Nothing is written to CloudWatch Logs, S3 or Firehose, and the
+destination need not exist. A flow log created without `LogFormat` reports the default format; one
+created with a CloudWatch Logs ARN also reports the group's name as `logGroupName`.
+
+| Request | Answer |
+|---|---|
+| A resource that does not exist | the whole request is `InvalidVpcID.NotFound`, `InvalidSubnetID.NotFound` or `InvalidNetworkInterfaceID.NotFound`; nothing is created |
+| A resource already holding a flow log with the same traffic type and destination | an `Unsuccessful` item with `FlowLogAlreadyExists`; the request's other resources still get theirs |
+| `cloud-watch-logs` with no `DeliverLogsPermissionArn` | `MissingParameter` |
+| `LogGroupName` with an `s3` or `kinesis-data-firehose` destination, or with `LogDestination` | `InvalidParameterCombination` |
+| `MaxAggregationInterval` other than 60 or 600 | `InvalidParameterValue` |
+| A transit gateway, regional NAT gateway or Cloud WAN `ResourceType` | `InvalidParameterValue` — substrate models none of them |
+| `DeleteFlowLogs` naming an ID that does not exist | a top-level `InvalidFlowLogId.NotFound`, and the request's other flow logs are kept |
+
+The delete's shape is EC2's observed behavior (aws-controllers-k8s/ec2-controller#402). No
+source shows which shape `CreateFlowLogs` uses for a missing resource; substrate answers it the
+same way.
+
+**A VPC's flow logs go with it.** `API_DeleteVpc`: "flow logs for deleted VPCs are eventually
+automatically removed". Substrate removes them in the same `DeleteVpc`, since "eventually" names
+no delay a caller could observe. A subnet's flow logs are kept when the subnet is deleted, because
+no AWS source says what happens to them.
 
 ## VPC attributes and internet gateways
 
