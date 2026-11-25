@@ -51,12 +51,12 @@ func r53DefaultNameServers() []string {
 // named zoneName, NS first, the order ListResourceRecordSets lists two record sets of one name in.
 func r53DefaultRecordSets(zoneID, zoneName string) []Route53ResourceRecordSet {
 	servers := r53DefaultNameServers()
-	ns := Route53ResourceRecordSet{Name: zoneName, Type: "NS", TTL: r53DefaultNSTTL, ZoneID: zoneID}
+	ns := Route53ResourceRecordSet{Name: zoneName, Type: "NS", TTL: r53DefaultNSTTL, ZoneID: zoneID, RoutingRecorded: true}
 	for _, s := range servers {
 		ns.ResourceRecords = append(ns.ResourceRecords, Route53ResourceRecord{Value: s})
 	}
 	soa := Route53ResourceRecordSet{
-		Name: zoneName, Type: "SOA", TTL: r53DefaultSOATTL, ZoneID: zoneID,
+		Name: zoneName, Type: "SOA", TTL: r53DefaultSOATTL, ZoneID: zoneID, RoutingRecorded: true,
 		ResourceRecords: []Route53ResourceRecord{{
 			Value: servers[0] + " " + r53DefaultSOAContact + " " + r53DefaultSOATimers,
 		}},
@@ -98,11 +98,10 @@ func r53InvalidType(i int, rrType string) *AWSError {
 // No API page publishes them; they are what Route 53 answers, as Terraform's AWS provider reports
 // quote it (hashicorp/terraform-provider-aws#37863 and #45241): "InvalidChangeBatch: [A HostedZone
 // must contain at least one NS record for the zone itself., A HostedZone must contain exactly one SOA
-// record.]". The message for a second apex NS record set is substrate's own.
+// record.]".
 const (
-	r53MsgExactlyOneSOA  = "A HostedZone must contain exactly one SOA record."
-	r53MsgAtLeastOneNS   = "A HostedZone must contain at least one NS record for the zone itself."
-	r53MsgSecondApexNSet = "The hosted zone already has an NS record set at its apex; a second cannot be created."
+	r53MsgExactlyOneSOA = "A HostedZone must contain exactly one SOA record."
+	r53MsgAtLeastOneNS  = "A HostedZone must contain at least one NS record for the zone itself."
 )
 
 // r53ApexChange is the part of one change the apex check reads.
@@ -113,9 +112,9 @@ type r53ApexChange struct {
 // r53CheckApexDefaults refuses a change batch that would leave a zone holding its defaults without
 // exactly one apex SOA, or without an apex NS (#1537). It evaluates the batch's end state rather than
 // each change, so a batch that deletes the SOA and creates its replacement is accepted. index is the
-// zone's record-set index before the batch. A CREATE of a record set that already exists counts as a
-// second one; an UPSERT replaces; a DELETE removes. The batch is transactional, so a refusal makes no
-// change.
+// zone's record-set index before the batch. It runs after [planChangeBatch] has accepted every change,
+// so a CREATE here names an apex record set the batch deleted first; an UPSERT replaces; a DELETE
+// removes. The batch is transactional, so a refusal makes no change.
 func r53CheckApexDefaults(index []string, changes []r53ApexChange, zoneName string) *AWSError {
 	count := map[string]int{}
 	for _, t := range []string{"SOA", "NS"} {
@@ -141,9 +140,6 @@ func r53CheckApexDefaults(index []string, changes []r53ApexChange, zoneName stri
 	if count["NS"] == 0 {
 		msgs = append(msgs, r53MsgAtLeastOneNS)
 	}
-	if count["NS"] > 1 {
-		msgs = append(msgs, r53MsgSecondApexNSet)
-	}
 	if count["SOA"] != 1 {
 		msgs = append(msgs, r53MsgExactlyOneSOA)
 	}
@@ -157,24 +153,23 @@ func r53CheckApexDefaults(index []string, changes []r53ApexChange, zoneName stri
 //
 // Before #1537 a record set's key was its Type and Name exactly as the request spelled them, so
 // "NS:Example.com." and "ns:example.com" were two keys for one record set. An index entry is matched
-// by canonicalizing it the way [r53RRSetKey] does, so a record set written under its old key is still
+// by canonicalizing it the way [r53RRSetIdentityKey] does ([r53EntryIdentity]), so a record set written under its old key is still
 // found: a DELETE removes it, and a CREATE or UPSERT replaces it under the canonical key rather than
 // writing a second. This is the migrate-on-access the CloudFormation stack keys use (cfn_scope.go).
 func r53MatchingKeys(index []string, key string) []string {
 	var out []string
 	for _, k := range index {
-		rrType, name, ok := strings.Cut(k, ":")
-		if ok && r53RRSetKey(rrType, name) == key {
+		if r53EntryIdentity(k) == key {
 			out = append(out, k)
 		}
 	}
 	return out
 }
 
-// putRecordSet stores one record set in zone id under its canonical key, which it returns. The caller
-// owns the index.
+// putRecordSet stores one record set in zone id under its canonical key ([r53RRSetIdentityKey]),
+// which it returns. The caller owns the index.
 func (p *Route53Plugin) putRecordSet(id string, rrset Route53ResourceRecordSet) (string, error) {
-	key := r53RRSetKey(rrset.Type, rrset.Name)
+	key := r53RRSetIdentityKey(rrset.Type, rrset.Name, rrset.SetIdentifier)
 	data, err := json.Marshal(rrset)
 	if err != nil {
 		return "", fmt.Errorf("route53 marshal record set %s: %w", key, err)

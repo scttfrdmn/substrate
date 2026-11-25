@@ -298,8 +298,8 @@ func TestRoute53_ChangeResourceRecordSets_Create(t *testing.T) {
 	if len(listResult.ResourceRecordSets) != 3 {
 		t.Fatalf("expected the default NS and SOA plus www.example.com, got %d", len(listResult.ResourceRecordSets))
 	}
-	if listResult.ResourceRecordSets[2].Name != "www.example.com" {
-		t.Errorf("expected www.example.com, got %q", listResult.ResourceRecordSets[2].Name)
+	if listResult.ResourceRecordSets[2].Name != "www.example.com." {
+		t.Errorf("expected www.example.com. (listed with its trailing dot), got %q", listResult.ResourceRecordSets[2].Name)
 	}
 	if listResult.ResourceRecordSets[2].Type != "A" {
 		t.Errorf("expected A, got %q", listResult.ResourceRecordSets[2].Type)

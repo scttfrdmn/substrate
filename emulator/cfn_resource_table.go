@@ -56,6 +56,7 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	"AWS::ElasticLoadBalancingV2::Listener":       (*StackDeployer).deployELBListener,
 	"AWS::ElasticLoadBalancingV2::ListenerRule":   (*StackDeployer).deployELBListenerRule,
 	"AWS::Route53::HostedZone":                    (*StackDeployer).deployRoute53HostedZone,
+	"AWS::Route53::HealthCheck":                   (*StackDeployer).deployRoute53HealthCheck,
 	"AWS::Route53::RecordSet":                     (*StackDeployer).deployRoute53RecordSet,
 	"AWS::Route53::RecordSetGroup":                (*StackDeployer).deployRoute53RecordSetGroup,
 	"AWS::KMS::Key":                               (*StackDeployer).deployKMSKey,

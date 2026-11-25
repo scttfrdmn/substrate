@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,6 +20,13 @@ type Route53Plugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// mu serializes every read-check-write of a record a write operation rewrites: a hosted zone
+	// and its record sets (create, delete, change batch, comment), a health check, and a resource's
+	// tags (route53_healthcheck.go, route53_tags.go, route53_zones.go).
+	mu sync.Mutex
+	// seedMu serializes advancing a seeded change-status countdown (route53_change_progression.go).
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "route53".
@@ -66,6 +73,32 @@ func (p *Route53Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 		return p.changeResourceRecordSets(ctx, req, zoneID)
 	case "ListResourceRecordSets":
 		return p.listResourceRecordSets(ctx, req, zoneID)
+	case "ListHostedZonesByName":
+		return p.listHostedZonesByName(ctx, req)
+	case "UpdateHostedZoneComment":
+		return p.updateHostedZoneComment(ctx, req, zoneID)
+	case "GetChange":
+		return p.getChange(ctx, req, zoneID)
+	case "ChangeTagsForResource":
+		return p.changeTagsForResource(ctx, req, zoneID)
+	case "ListTagsForResource":
+		return p.listTagsForResource(ctx, req, zoneID)
+	case "ListTagsForResources":
+		return p.listTagsForResources(ctx, req, zoneID)
+	case "CreateHealthCheck":
+		return p.createHealthCheck(ctx, req)
+	case "GetHealthCheck":
+		return p.getHealthCheck(ctx, req, zoneID)
+	case "ListHealthChecks":
+		return p.listHealthChecks(ctx, req)
+	case "UpdateHealthCheck":
+		return p.updateHealthCheck(ctx, req, zoneID)
+	case "DeleteHealthCheck":
+		return p.deleteHealthCheck(ctx, req, zoneID)
+	case "GetHealthCheckStatus":
+		return p.getHealthCheckStatus(ctx, req, zoneID)
+	case "GetHealthCheckCount":
+		return p.getHealthCheckCount(ctx, req)
 	default:
 		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
@@ -98,6 +131,9 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 		name += "."
 	}
 
+	// The account's zone index is read and rewritten below, as DeleteHostedZone rewrites it.
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	isPrivate := strings.EqualFold(xmlReq.Config.PrivateZone, "true")
 	suffix := generateHostedZoneID(reqCtx.IDs)
 	zoneID := "Z" + suffix
@@ -133,10 +169,9 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 		return nil, err
 	}
 
-	changeInfo := Route53ChangeInfo{
-		ID:          generateChangeID(reqCtx.IDs),
-		Status:      "INSYNC",
-		SubmittedAt: p.now().UTC(),
+	changeInfo, err := p.recordChange(reqCtx, "")
+	if err != nil {
+		return nil, fmt.Errorf("route53 createHostedZone: %w", err)
 	}
 
 	type xmlZone struct {
@@ -149,11 +184,6 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 			PrivateZone bool   `xml:"PrivateZone"`
 		} `xml:"Config"`
 	}
-	type xmlChangeInfo struct {
-		ID          string `xml:"Id"`
-		Status      string `xml:"Status"`
-		SubmittedAt string `xml:"SubmittedAt"`
-	}
 	type xmlDelegationSet struct {
 		NameServers []string `xml:"NameServers>NameServer"`
 	}
@@ -161,7 +191,7 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 		XMLName       xml.Name         `xml:"CreateHostedZoneResponse"`
 		XMLNS         string           `xml:"xmlns,attr"`
 		HostedZone    xmlZone          `xml:"HostedZone"`
-		ChangeInfo    xmlChangeInfo    `xml:"ChangeInfo"`
+		ChangeInfo    r53XMLChangeInfo `xml:"ChangeInfo"`
 		DelegationSet xmlDelegationSet `xml:"DelegationSet"`
 	}
 
@@ -169,15 +199,11 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 		XMLNS: r53XMLNS,
 		HostedZone: xmlZone{
 			ID:                     fullID,
-			Name:                   name,
+			Name:                   r53WireName(name),
 			CallerReference:        xmlReq.CallerReference,
 			ResourceRecordSetCount: zone.ResourceRecordSetCount,
 		},
-		ChangeInfo: xmlChangeInfo{
-			ID:          changeInfo.ID,
-			Status:      changeInfo.Status,
-			SubmittedAt: changeInfo.SubmittedAt.Format(time.RFC3339),
-		},
+		ChangeInfo:    changeInfo,
 		DelegationSet: xmlDelegationSet{NameServers: r53DefaultNameServers()},
 	}
 	resp.HostedZone.Config.Comment = xmlReq.Config.Comment
@@ -226,7 +252,7 @@ func (p *Route53Plugin) listHostedZones(reqCtx *RequestContext, _ *AWSRequest) (
 		}
 		item := xmlZone{
 			ID:                     zone.ID,
-			Name:                   zone.Name,
+			Name:                   r53WireName(zone.Name),
 			CallerReference:        zone.CallerReference,
 			ResourceRecordSetCount: zone.ResourceRecordSetCount,
 		}
@@ -272,7 +298,7 @@ func (p *Route53Plugin) getHostedZone(_ *RequestContext, _ *AWSRequest, zoneID s
 	}
 	item := xmlZone{
 		ID:                     zone.ID,
-		Name:                   zone.Name,
+		Name:                   r53WireName(zone.Name),
 		CallerReference:        zone.CallerReference,
 		ResourceRecordSetCount: zone.ResourceRecordSetCount,
 	}
@@ -298,6 +324,9 @@ func (p *Route53Plugin) getHostedZone(_ *RequestContext, _ *AWSRequest, zoneID s
 // message is substrate's own; the page publishes none.
 func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
+	// The emptiness check and the delete are one step against a concurrent batch, tag or comment write.
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	zone, err := p.loadHostedZone(zoneID)
 	if err != nil {
 		return nil, err
@@ -323,29 +352,16 @@ func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, 
 		return nil, fmt.Errorf("route53 deleteHostedZone removeFromList: %w", err)
 	}
 
-	changeInfo := Route53ChangeInfo{
-		ID:          generateChangeID(reqCtx.IDs),
-		Status:      "INSYNC",
-		SubmittedAt: p.now().UTC(),
-	}
-	type xmlChangeInfo struct {
-		ID          string `xml:"Id"`
-		Status      string `xml:"Status"`
-		SubmittedAt string `xml:"SubmittedAt"`
+	changeInfo, err := p.recordChange(reqCtx, "")
+	if err != nil {
+		return nil, fmt.Errorf("route53 deleteHostedZone: %w", err)
 	}
 	type xmlResponse struct {
-		XMLName    xml.Name      `xml:"DeleteHostedZoneResponse"`
-		XMLNS      string        `xml:"xmlns,attr"`
-		ChangeInfo xmlChangeInfo `xml:"ChangeInfo"`
+		XMLName    xml.Name         `xml:"DeleteHostedZoneResponse"`
+		XMLNS      string           `xml:"xmlns,attr"`
+		ChangeInfo r53XMLChangeInfo `xml:"ChangeInfo"`
 	}
-	return r53XMLResponse(http.StatusOK, xmlResponse{
-		XMLNS: r53XMLNS,
-		ChangeInfo: xmlChangeInfo{
-			ID:          changeInfo.ID,
-			Status:      changeInfo.Status,
-			SubmittedAt: changeInfo.SubmittedAt.Format(time.RFC3339),
-		},
-	})
+	return r53XMLResponse(http.StatusOK, xmlResponse{XMLNS: r53XMLNS, ChangeInfo: changeInfo})
 }
 
 // --- Resource Record Set operations ---
@@ -412,14 +428,12 @@ func (p *Route53Plugin) loadRecordSet(id, key string) (Route53ResourceRecordSet,
 	return rrset, true, nil
 }
 
-// r53CanonicalName lower-cases a DNS name and drops its trailing dot, so "Example.com." and
-// "example.com" compare equal.
-func r53CanonicalName(name string) string {
-	return strings.TrimSuffix(strings.ToLower(name), ".")
-}
-
 func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
+	// The zone record, its record-set index and its record sets are read, checked and written as one,
+	// against a tag or comment write to the zone and against another batch.
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	zone, err := p.loadHostedZone(zoneID)
 	if err != nil {
 		return nil, err
@@ -431,20 +445,8 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 		ChangeBatch struct {
 			Comment string `xml:"Comment"`
 			Changes []struct {
-				Action            string `xml:"Action"`
-				ResourceRecordSet struct {
-					Name            string `xml:"Name"`
-					Type            string `xml:"Type"`
-					TTL             string `xml:"TTL"`
-					ResourceRecords []struct {
-						Value string `xml:"Value"`
-					} `xml:"ResourceRecords>ResourceRecord"`
-					AliasTarget *struct {
-						HostedZoneID         string `xml:"HostedZoneId"`
-						DNSName              string `xml:"DNSName"`
-						EvaluateTargetHealth string `xml:"EvaluateTargetHealth"`
-					} `xml:"AliasTarget"`
-				} `xml:"ResourceRecordSet"`
+				Action            string          `xml:"Action"`
+				ResourceRecordSet r53XMLRecordSet `xml:"ResourceRecordSet"`
 			} `xml:"Changes>Change"`
 		} `xml:"ChangeBatch"`
 	}
@@ -467,13 +469,29 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 	// The page calls a change batch transactional — "Route 53 validates the changes in the request and
 	// then either makes all or none of the changes" — so every refusal is found before any change is
 	// made.
+	changes := make([]r53BatchChange, 0, len(xmlReq.ChangeBatch.Changes))
 	apex := make([]r53ApexChange, 0, len(xmlReq.ChangeBatch.Changes))
 	for i, change := range xmlReq.ChangeBatch.Changes {
 		rrs := change.ResourceRecordSet
 		if !slices.Contains(r53RRTypes(), rrs.Type) {
 			return nil, r53InvalidType(i, rrs.Type)
 		}
+		rrset, awsErr := rrs.recordSet(i, id)
+		if awsErr != nil {
+			return nil, awsErr
+		}
+		changes = append(changes, r53BatchChange{action: strings.ToUpper(change.Action), rrset: rrset})
 		apex = append(apex, r53ApexChange{action: change.Action, rrType: rrs.Type, name: rrs.Name})
+	}
+	// The per-change check runs first, so a CREATE of the existing apex SOA or NS is answered as a
+	// CREATE of any existing record set is; the apex check then reads the batch's end state.
+	stored, err := p.loadStoredSets(id, index, changes)
+	if err != nil {
+		return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
+	}
+	plan, awsErr := planChangeBatch(stored, changes)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 	if zone.DefaultRecordSets {
 		if awsErr := r53CheckApexDefaults(index, apex, zone.Name); awsErr != nil {
@@ -481,49 +499,18 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 		}
 	}
 
-	// The index is held in memory across the batch and written once. Each change first finds every
-	// index entry naming its record set, including one written under a pre-#1537 key.
-	for _, change := range xmlReq.ChangeBatch.Changes {
-		rrs := change.ResourceRecordSet
-		key := r53RRSetKey(rrs.Type, rrs.Name)
-		existing := r53MatchingKeys(index, key)
-
-		switch strings.ToUpper(change.Action) {
-		case "CREATE", "UPSERT":
-			ttl, _ := strconv.ParseInt(rrs.TTL, 10, 64)
-			rrset := Route53ResourceRecordSet{
-				Name:   rrs.Name,
-				Type:   rrs.Type,
-				TTL:    ttl,
-				ZoneID: id,
-			}
-			for _, rr := range rrs.ResourceRecords {
-				rrset.ResourceRecords = append(rrset.ResourceRecords, Route53ResourceRecord{Value: rr.Value})
-			}
-			if rrs.AliasTarget != nil {
-				evalHealth := strings.EqualFold(rrs.AliasTarget.EvaluateTargetHealth, "true")
-				rrset.AliasTarget = &Route53AliasTarget{
-					HostedZoneID:         rrs.AliasTarget.HostedZoneID,
-					DNSName:              rrs.AliasTarget.DNSName,
-					EvaluateTargetHealth: evalHealth,
-				}
-			}
-			if _, err := p.putRecordSet(id, rrset); err != nil {
-				return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
-			}
-			// A record set stored under an older key is migrated: its old record goes.
-			stale := slices.DeleteFunc(slices.Clone(existing), func(k string) bool { return k == key })
-			if index, err = p.deleteRecordSetKeys(id, index, stale); err != nil {
-				return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
-			}
-			if !slices.Contains(index, key) {
-				index = append(index, key)
-			}
-		case "DELETE":
-			if index, err = p.deleteRecordSetKeys(id, index, existing); err != nil {
-				return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
-			}
+	// The index is held in memory across the batch and written once.
+	for _, rrset := range plan.writes {
+		key, err := p.putRecordSet(id, rrset)
+		if err != nil {
+			return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
 		}
+		if !slices.Contains(index, key) {
+			index = append(index, key)
+		}
+	}
+	if index, err = p.deleteRecordSetKeys(id, index, plan.removes); err != nil {
+		return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
 	}
 
 	if err := p.saveList(id, "rrset_keys", index); err != nil {
@@ -535,34 +522,17 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 		return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
 	}
 
-	changeInfo := Route53ChangeInfo{
-		ID:          generateChangeID(reqCtx.IDs),
-		Status:      "INSYNC",
-		SubmittedAt: p.now().UTC(),
-		Comment:     xmlReq.ChangeBatch.Comment,
-	}
-	type xmlChangeInfo struct {
-		ID          string `xml:"Id"`
-		Status      string `xml:"Status"`
-		SubmittedAt string `xml:"SubmittedAt"`
-		Comment     string `xml:"Comment,omitempty"`
+	changeInfo, err := p.recordChange(reqCtx, xmlReq.ChangeBatch.Comment)
+	if err != nil {
+		return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
 	}
 	type xmlResponse struct {
-		XMLName    xml.Name      `xml:"ChangeResourceRecordSetsResponse"`
-		XMLNS      string        `xml:"xmlns,attr"`
-		ChangeInfo xmlChangeInfo `xml:"ChangeInfo"`
+		XMLName    xml.Name         `xml:"ChangeResourceRecordSetsResponse"`
+		XMLNS      string           `xml:"xmlns,attr"`
+		ChangeInfo r53XMLChangeInfo `xml:"ChangeInfo"`
 	}
-	return r53XMLResponse(http.StatusOK, xmlResponse{
-		XMLNS: r53XMLNS,
-		ChangeInfo: xmlChangeInfo{
-			ID:          changeInfo.ID,
-			Status:      changeInfo.Status,
-			SubmittedAt: changeInfo.SubmittedAt.Format(time.RFC3339),
-			Comment:     changeInfo.Comment,
-		},
-	})
+	return r53XMLResponse(http.StatusOK, xmlResponse{XMLNS: r53XMLNS, ChangeInfo: changeInfo})
 }
-
 func (p *Route53Plugin) listResourceRecordSets(_ *RequestContext, _ *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
 	if err := p.requireHostedZone(zoneID); err != nil {
@@ -576,6 +546,12 @@ func (p *Route53Plugin) listResourceRecordSets(_ *RequestContext, _ *AWSRequest,
 	type xmlRR struct {
 		Value string `xml:"Value"`
 	}
+	// xmlRRs is the ResourceRecords element, absent for an alias record set: API_ResourceRecordSet
+	// says "If you're creating an alias resource record set, omit ResourceRecords", and the list's
+	// minimum is one, so an empty element read back and sent in a DELETE would be refused.
+	type xmlRRs struct {
+		Records []xmlRR `xml:"ResourceRecord"`
+	}
 	type xmlAliasTarget struct {
 		HostedZoneID         string `xml:"HostedZoneId"`
 		DNSName              string `xml:"DNSName"`
@@ -584,9 +560,14 @@ func (p *Route53Plugin) listResourceRecordSets(_ *RequestContext, _ *AWSRequest,
 	type xmlRRSet struct {
 		Name            string          `xml:"Name"`
 		Type            string          `xml:"Type"`
+		SetIdentifier   string          `xml:"SetIdentifier,omitempty"`
+		Weight          *int64          `xml:"Weight,omitempty"`
+		Region          string          `xml:"Region,omitempty"`
+		Failover        string          `xml:"Failover,omitempty"`
 		TTL             int64           `xml:"TTL,omitempty"`
-		ResourceRecords []xmlRR         `xml:"ResourceRecords>ResourceRecord"`
+		ResourceRecords *xmlRRs         `xml:"ResourceRecords,omitempty"`
 		AliasTarget     *xmlAliasTarget `xml:"AliasTarget,omitempty"`
+		HealthCheckID   string          `xml:"HealthCheckId,omitempty"`
 	}
 	type xmlResponse struct {
 		XMLName            xml.Name   `xml:"ListResourceRecordSetsResponse"`
@@ -607,17 +588,29 @@ func (p *Route53Plugin) listResourceRecordSets(_ *RequestContext, _ *AWSRequest,
 			continue
 		}
 		item := xmlRRSet{
-			Name: rrset.Name,
-			Type: rrset.Type,
-			TTL:  rrset.TTL,
+			Name:          r53WireName(rrset.Name),
+			Type:          rrset.Type,
+			SetIdentifier: rrset.SetIdentifier,
+			Weight:        rrset.Weight,
+			Region:        rrset.Region,
+			Failover:      rrset.Failover,
+			TTL:           rrset.TTL,
+			HealthCheckID: rrset.HealthCheckID,
 		}
-		for _, rr := range rrset.ResourceRecords {
-			item.ResourceRecords = append(item.ResourceRecords, xmlRR{Value: rr.Value}) //nolint:staticcheck
+		if len(rrset.ResourceRecords) > 0 {
+			item.ResourceRecords = &xmlRRs{}
+			for _, rr := range rrset.ResourceRecords {
+				item.ResourceRecords.Records = append(item.ResourceRecords.Records, xmlRR{Value: rr.Value}) //nolint:staticcheck
+			}
 		}
 		if rrset.AliasTarget != nil {
+			// An alias target's DNSName is a domain name, so it is reported in the form every name is
+			// ([r53WireName]). Route 53 is observed to lower-case it: a load balancer whose DNS name has
+			// capitals is read back lower-cased (hashicorp/terraform-provider-aws#306), which is why the
+			// provider normalizes alias names before comparing them.
 			item.AliasTarget = &xmlAliasTarget{
 				HostedZoneID:         rrset.AliasTarget.HostedZoneID,
-				DNSName:              rrset.AliasTarget.DNSName,
+				DNSName:              r53WireName(rrset.AliasTarget.DNSName),
 				EvaluateTargetHealth: rrset.AliasTarget.EvaluateTargetHealth,
 			}
 		}
