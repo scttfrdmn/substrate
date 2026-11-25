@@ -2,6 +2,7 @@ package emulator_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -277,4 +278,29 @@ func TestLambdaFunctionFields_ARecordWithoutThemRendersTheDefaults(t *testing.T)
 	require.Equal(t, http.StatusOK, status, raw)
 	assert.Equal(t, map[string]any{"Size": float64(512)}, got["EphemeralStorage"])
 	assert.Equal(t, map[string]any{"LogFormat": "Text", "LogGroup": "/aws/lambda/old"}, got["LoggingConfig"])
+}
+
+// TestLambdaFunctionFields_AnImageConfigRefusalSpendsNoRoleObservation pins the order of
+// CreateFunction's checks: an ImageConfig on a Zip function is refused before the role is checked,
+// so it uses up no observation of a seeded propagation window, and a retry loop still sees every
+// refusal it seeded.
+func TestLambdaFunctionFields_AnImageConfigRefusalSpendsNoRoleObservation(t *testing.T) {
+	t.Parallel()
+	ts := lrpServer(t)
+	status, out := lrpSeed(t, ts, `{"roleArn":"`+lrpRoleA+`","refusedAttempts":2}`)
+	require.Equal(t, http.StatusOK, status, "%s", out)
+
+	status, out = lrpCall(t, ts, http.MethodPost, "/2015-03-31/functions", map[string]any{
+		"FunctionName": "zip-img", "Runtime": "python3.12", "Handler": "index.handler", "Role": lrpRoleA,
+		"Code": map[string]string{"ZipFile": "UEsDBA=="}, "ImageConfig": map[string]any{"Command": []string{"x"}},
+	})
+	require.Equal(t, http.StatusBadRequest, status, "%s", out)
+	assert.Contains(t, string(out), "The ImageConfig parameter is not supported")
+
+	for i := range 2 {
+		status, out = lrpCreate(t, ts, "zip-img", lrpRoleA)
+		lrpRequireNotAssumable(t, status, out, fmt.Sprintf("seeded refusal %d", i+1))
+	}
+	status, out = lrpCreate(t, ts, "zip-img", lrpRoleA)
+	assert.Equal(t, http.StatusCreated, status, "the window closes after its two refusals: %s", out)
 }

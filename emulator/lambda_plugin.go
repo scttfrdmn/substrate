@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -229,20 +230,6 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, awsErr
 	}
 
-	// Check for existing function.
-	existing, err := p.state.Get(context.Background(), lambdaNamespace,
-		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, body.FunctionName))
-	if err != nil {
-		return nil, fmt.Errorf("lambda createFunction state.Get: %w", err)
-	}
-	if existing != nil {
-		return nil, &AWSError{Code: "ResourceConflictException", Message: "Function already exists", HTTPStatus: http.StatusConflict}
-	}
-	// A role inside a seeded propagation window cannot be assumed yet (#1274).
-	if err := p.checkRolePropagated(context.Background(), body.Role); err != nil {
-		return nil, err
-	}
-
 	timeout := body.Timeout
 	if timeout <= 0 {
 		timeout = 3
@@ -271,8 +258,24 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	if len(archs) == 0 {
 		archs = []string{"x86_64"}
 	}
+	// Refused before the role check below, so a refusal spends no observation of a seeded
+	// propagation window.
 	if pkgType != "Image" && !body.ImageConfig.empty() {
 		return nil, lambdaImageConfigOnZip()
+	}
+
+	// Check for existing function.
+	existing, err := p.state.Get(context.Background(), lambdaNamespace,
+		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, body.FunctionName))
+	if err != nil {
+		return nil, fmt.Errorf("lambda createFunction state.Get: %w", err)
+	}
+	if existing != nil {
+		return nil, &AWSError{Code: "ResourceConflictException", Message: "Function already exists", HTTPStatus: http.StatusConflict}
+	}
+	// A role inside a seeded propagation window cannot be assumed yet (#1274).
+	if err := p.checkRolePropagated(context.Background(), body.Role); err != nil {
+		return nil, err
 	}
 
 	now := p.tc.Now()
@@ -1790,6 +1793,7 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 	if esm == nil {
 		return nil, lambdaESMNotFound(uuid)
 	}
+	prev := *esm // the record as stored, restored if the index cannot follow a re-point
 	// Re-pointing an SQS mapping is checked against the new function's timeout, as a create is.
 	if newFunctionARN != "" && newFunctionARN != esm.FunctionARN && lambdaIsSQSSource(esm.EventSourceARN) {
 		if err := p.checkQueueVisibility(ctx, input.FunctionName, esm.EventSourceARN); err != nil {
@@ -1812,10 +1816,8 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 
 	prevState := esm.State
 
-	if newFunctionARN != "" && newFunctionARN != esm.FunctionARN {
-		if err := p.moveESMIndex(context.Background(), uuid, esm.FunctionARN, newFunctionARN); err != nil {
-			return nil, err
-		}
+	repointed := newFunctionARN != "" && newFunctionARN != esm.FunctionARN
+	if repointed {
 		esm.FunctionARN = newFunctionARN
 	}
 	if input.BatchSize > 0 {
@@ -1831,6 +1833,16 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 
 	if err := p.saveESM(context.Background(), esm); err != nil {
 		return nil, fmt.Errorf("lambda updateEventSourceMapping saveESM: %w", err)
+	}
+	// The index moves after the record is saved, and a failed move restores the record, so the
+	// record and the index never name different functions.
+	if repointed {
+		if err := p.moveESMIndex(context.Background(), uuid, prev.FunctionARN, newFunctionARN); err != nil {
+			if restoreErr := p.saveESM(context.Background(), &prev); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("lambda updateEventSourceMapping restore: %w", restoreErr))
+			}
+			return nil, err
+		}
 	}
 
 	// Polling follows the state transition: enabling starts the cadence again from now,

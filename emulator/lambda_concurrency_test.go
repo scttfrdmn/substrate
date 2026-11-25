@@ -1,14 +1,39 @@
 package emulator_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/scttfrdmn/substrate/emulator"
 )
+
+// lambdaServeStatus sends one Lambda request and answers its status. It reports failure with
+// assert rather than require, so it is safe on a goroutine other than the test's own.
+func lambdaServeStatus(t *testing.T, srv *emulator.Server, method, path string, body any) int {
+	t.Helper()
+	var raw []byte
+	if body != nil {
+		var err error
+		raw, err = json.Marshal(body)
+		if !assert.NoError(t, err) {
+			return 0
+		}
+	}
+	r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+	r.Host = "lambda.us-east-1.amazonaws.com"
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	return w.Code
+}
 
 // lambdaCreateStreamMapping creates a mapping on a Kinesis stream, which nothing polls, and returns
 // its UUID and ARN.
@@ -39,17 +64,15 @@ func TestLambdaESMConcurrency_TagsSurviveConcurrentUpdates(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			resp := lambdaRequest(t, srv, http.MethodPost, "/2017-03-31/tags/"+arn,
+			code := lambdaServeStatus(t, srv, http.MethodPost, "/2017-03-31/tags/"+arn,
 				map[string]any{"Tags": map[string]string{fmt.Sprintf("k%02d", i): "v"}})
-			assert.Equal(t, http.StatusNoContent, resp.StatusCode)
-			_ = resp.Body.Close()
+			assert.Equal(t, http.StatusNoContent, code)
 		}()
 		go func() {
 			defer wg.Done()
-			resp := lambdaRequest(t, srv, http.MethodPut, "/2015-03-31/event-source-mappings/"+uuid,
+			code := lambdaServeStatus(t, srv, http.MethodPut, "/2015-03-31/event-source-mappings/"+uuid,
 				map[string]any{"BatchSize": i + 1})
-			assert.Equal(t, http.StatusOK, resp.StatusCode)
-			_ = resp.Body.Close()
+			assert.Equal(t, http.StatusOK, code)
 		}()
 	}
 	wg.Wait()
@@ -75,19 +98,16 @@ func TestLambdaESMConcurrency_ATagDoesNotResurrectADeletedMapping(t *testing.T) 
 		wg.Add(3)
 		go func() {
 			defer wg.Done()
-			resp := lambdaRequest(t, srv, http.MethodPost, "/2017-03-31/tags/"+arn, map[string]any{"Tags": map[string]string{"k": "v"}})
-			_ = resp.Body.Close()
+			_ = lambdaServeStatus(t, srv, http.MethodPost, "/2017-03-31/tags/"+arn, map[string]any{"Tags": map[string]string{"k": "v"}})
 		}()
 		go func() {
 			defer wg.Done()
-			resp := lambdaRequest(t, srv, http.MethodPut, "/2015-03-31/event-source-mappings/"+uuid, map[string]any{"BatchSize": 7})
-			_ = resp.Body.Close()
+			_ = lambdaServeStatus(t, srv, http.MethodPut, "/2015-03-31/event-source-mappings/"+uuid, map[string]any{"BatchSize": 7})
 		}()
 		go func() {
 			defer wg.Done()
-			resp := lambdaRequest(t, srv, http.MethodDelete, "/2015-03-31/event-source-mappings/"+uuid, nil)
-			assert.Equal(t, http.StatusOK, resp.StatusCode)
-			_ = resp.Body.Close()
+			code := lambdaServeStatus(t, srv, http.MethodDelete, "/2015-03-31/event-source-mappings/"+uuid, nil)
+			assert.Equal(t, http.StatusOK, code)
 		}()
 		wg.Wait()
 
@@ -114,14 +134,12 @@ func TestLambdaEventInvokeConcurrency_AConfigDoesNotOutliveItsAlias(t *testing.T
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			resp := lambdaRequest(t, srv, http.MethodPut, lambdaEventInvokePath+"?Qualifier="+alias, map[string]any{"MaximumRetryAttempts": 1})
-			_ = resp.Body.Close()
+			_ = lambdaServeStatus(t, srv, http.MethodPut, lambdaEventInvokePath+"?Qualifier="+alias, map[string]any{"MaximumRetryAttempts": 1})
 		}()
 		go func() {
 			defer wg.Done()
-			resp := lambdaRequest(t, srv, http.MethodDelete, "/2015-03-31/functions/eic/aliases/"+alias, nil)
-			assert.Equal(t, http.StatusNoContent, resp.StatusCode)
-			_ = resp.Body.Close()
+			code := lambdaServeStatus(t, srv, http.MethodDelete, "/2015-03-31/functions/eic/aliases/"+alias, nil)
+			assert.Equal(t, http.StatusNoContent, code)
 		}()
 		wg.Wait()
 

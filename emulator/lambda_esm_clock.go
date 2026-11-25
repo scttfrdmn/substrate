@@ -128,6 +128,10 @@ func (p *LambdaPlugin) RunDue(trigger *RequestContext, dispatch InternalDispatch
 }
 
 // runDueFor runs one mapping's due polls and advances its cursor.
+//
+// The polls use a snapshot of the mapping read without [LambdaPlugin.esmWriteMu], so an update
+// that lands while they run applies from the next poll. The cursor is written only through
+// [LambdaPlugin.saveCursorIfActive], so a delete or disable that lands meanwhile is not undone.
 func (p *LambdaPlugin) runDueFor(ctx context.Context, trigger *RequestContext, dispatch InternalDispatch, uuid string, now time.Time) error {
 	esm, err := p.loadESM(ctx, uuid)
 	if err != nil {
@@ -141,7 +145,7 @@ func (p *LambdaPlugin) runDueFor(ctx context.Context, trigger *RequestContext, d
 		return err
 	}
 	if cur == nil {
-		return p.savePollCursor(ctx, uuid, esmPollCursor{Next: now.Add(esmPollInterval)})
+		return p.saveCursorIfActive(ctx, uuid, esmPollCursor{Next: now.Add(esmPollInterval)})
 	}
 	if cur.Next.After(now) {
 		return nil
@@ -160,7 +164,30 @@ func (p *LambdaPlugin) runDueFor(ctx context.Context, trigger *RequestContext, d
 		}
 		cur.Next = cur.Next.Add(esmPollInterval)
 	}
-	return p.savePollCursor(ctx, uuid, *cur)
+	return p.saveCursorIfActive(ctx, uuid, *cur)
+}
+
+// saveCursorIfActive writes a mapping's poll cursor only if the mapping still exists, is enabled and
+// is still polled, re-checked under [LambdaPlugin.esmWriteMu]. Without the check, a poll that a
+// delete or a disable overtook would write esm_poll:{uuid} back for a mapping that no longer polls.
+// The lock order is esmWriteMu, then esmMu, as in every write that starts or stops polling.
+func (p *LambdaPlugin) saveCursorIfActive(ctx context.Context, uuid string, cur esmPollCursor) error {
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
+	esm, err := p.loadESM(ctx, uuid)
+	if err != nil {
+		return err
+	}
+	if esm == nil || esm.State != "Enabled" {
+		return nil
+	}
+	p.esmMu.Lock()
+	_, active := p.esmActive[uuid]
+	p.esmMu.Unlock()
+	if !active {
+		return nil
+	}
+	return p.savePollCursor(ctx, uuid, cur)
 }
 
 // pollAndInvoke runs one poll: it receives a batch from the queue, invokes the function with
