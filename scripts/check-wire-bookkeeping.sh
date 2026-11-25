@@ -153,6 +153,9 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #     publish `Region`, "the name of the AWS Region in which the role was last
 #     used" and "where the service-linked role is being used". A Region member is
 #     the service's own data on both shapes, not substrate scoping a record.
+#   - route53_types.go Route53ResourceRecordSet.Region — `API_ResourceRecordSet`
+#     publishes `Region`, a latency record set's "Amazon EC2 Region where you created
+#     the resource that this resource record set refers to" (#1613).
 #   - ecr_types.go ECRPullThroughCacheRule and ECRRepositoryCreationTemplate,
 #     CreatedAt and UpdatedAt, and the same two names on the five ecr_wire.go
 #     structs that render them (#1461) — `API_PullThroughCacheRule` and
@@ -222,6 +225,7 @@ extract() {
       published["emulator/organizations_types.go\tOrgCreateAccountStatus\tAccountID"] = 1
       published["emulator/iam_types.go\tIAMRoleLastUsed\tRegion"] = 1
       published["emulator/iam_service_linked_roles.go\tIAMSLRRoleUsage\tRegion"] = 1
+      published["emulator/route53_types.go\tRoute53ResourceRecordSet\tRegion"] = 1
       published["emulator/ecr_types.go\tECRPullThroughCacheRule\tCreatedAt"] = 1
       published["emulator/ecr_types.go\tECRPullThroughCacheRule\tUpdatedAt"] = 1
       published["emulator/ecr_types.go\tECRRepositoryCreationTemplate\tCreatedAt"] = 1

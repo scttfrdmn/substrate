@@ -559,6 +559,12 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Post("/v1/cloudfront/distribution-status", s.handleCloudFrontSeedDistributionStatus)
 		cp.Delete("/v1/cloudfront/distribution-status", s.handleCloudFrontClearDistributionStatus)
 
+		// Route 53 GetChange progression and GetHealthCheckStatus seeds (#1613).
+		cp.Post("/v1/route53/change-status", s.handleRoute53SeedChangeStatus)
+		cp.Delete("/v1/route53/change-status", s.handleRoute53ClearChangeStatus)
+		cp.Post("/v1/route53/health-check-status", s.handleRoute53SeedHealthCheckStatus)
+		cp.Delete("/v1/route53/health-check-status", s.handleRoute53ClearHealthCheckStatus)
+
 		// Kinesis stream-status progression control-plane endpoints (#1119).
 		cp.Post("/v1/kinesis/stream-status", s.handleKinesisSeedStreamStatus)
 		cp.Delete("/v1/kinesis/stream-status", s.handleKinesisClearStreamStatus)

@@ -465,7 +465,8 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 		"IdentityPoolId"),
 
 	// --- Everything else -----------------------------------------------------
-	"AWS::Route53::HostedZone": pathDeleter("route53", "/2013-04-01/hostedzone/"),
+	"AWS::Route53::HostedZone":  pathDeleter("route53", "/2013-04-01/hostedzone/"),
+	"AWS::Route53::HealthCheck": pathDeleter("route53", "/2013-04-01/healthcheck/"),
 	// AWS::Route53::RecordSet and RecordSetGroup are in [cfnSequencedDeleters]: whether a record set
 	// is deleted or restored to its default depends on the zone, read with the sweep's context.
 	"AWS::CertificateManager::Certificate": jsonBodyDeleter("acm", "DeleteCertificate",
@@ -1080,6 +1081,7 @@ var cfnDeleteAbsentCodes = map[string]bool{
 	"NoSuchDeliveryChannelException":       true,
 	"NoSuchDistribution":                   true,
 	"NoSuchEntity":                         true,
+	"NoSuchHealthCheck":                    true, // Route 53 DeleteHealthCheck.
 	"NoSuchHostedZone":                     true,
 	"NotFound":                             true, // SNS DeleteTopic.
 	"NotFoundException":                    true,

@@ -12,6 +12,50 @@ import (
 	"github.com/scttfrdmn/substrate/emulator"
 )
 
+// TestRoute53Wire_HealthCheckResponsesCarryNoBookkeepingMember is the raw-bytes assertion
+// scripts/wire-bookkeeping-projected.txt cites for Route53HealthCheck (#1613). The record holds
+// AccountID under a wire-visible json tag; every health check response is marshaled from an XML
+// struct that has no such member. Every operation that answers a health check is driven.
+func TestRoute53Wire_HealthCheckResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p := &emulator.Route53Plugin{}
+	ctx, state := wireSetup(t, p, "req-route53-hc-wire")
+	call := func(method, path, body string) []byte {
+		t.Helper()
+		resp, err := p.HandleRequest(ctx, &emulator.AWSRequest{
+			Service: "route53", HTTPMethod: method, Path: path,
+			Body: []byte(body), Headers: map[string]string{"Content-Type": "application/xml"}, Params: map[string]string{},
+		})
+		require.NoError(t, err, "%s %s", method, path)
+		require.Truef(t, resp.StatusCode >= 200 && resp.StatusCode < 300, "%s %s answered %d: %s", method, path, resp.StatusCode, resp.Body)
+		return resp.Body
+	}
+	created := call(http.MethodPost, "/2013-04-01/healthcheck", `<CreateHealthCheckRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">`+
+		`<CallerReference>wire</CallerReference><HealthCheckConfig><IPAddress>192.0.2.1</IPAddress><Type>TCP</Type><Port>22</Port></HealthCheckConfig></CreateHealthCheckRequest>`)
+	m := regexp.MustCompile(`<Id>([^<]+)</Id>`).FindSubmatch(created)
+	require.NotNil(t, m, "CreateHealthCheck must report an id: %s", created)
+	id := string(m[1])
+	wireRequireHeld(t, state, "route53", "healthcheck:"+id, "AccountID")
+	path := "/2013-04-01/healthcheck/" + id
+	for _, tc := range []struct {
+		op   string
+		body []byte
+	}{
+		{"CreateHealthCheck", created},
+		{"GetHealthCheck", call(http.MethodGet, path, "")},
+		{"ListHealthChecks", call(http.MethodGet, "/2013-04-01/healthcheck", "")},
+		{"UpdateHealthCheck", call(http.MethodPost, path, `<UpdateHealthCheckRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><Port>2222</Port></UpdateHealthCheckRequest>`)},
+		{"GetHealthCheckStatus", call(http.MethodGet, path+"/status", "")},
+		{"GetHealthCheckCount", call(http.MethodGet, "/2013-04-01/healthcheckcount", "")},
+		{"ListTagsForResource", call(http.MethodGet, "/2013-04-01/tags/healthcheck/"+id, "")},
+		{"DeleteHealthCheck", call(http.MethodDelete, path, "")},
+	} {
+		t.Run(tc.op, func(t *testing.T) {
+			wireAssertNoMemberXML(t, tc.op, tc.body, []string{"AccountID"}, "")
+		})
+	}
+}
+
 // TestRoute53Wire_HostedZoneResponsesCarryNoBookkeepingMember is the raw-bytes assertion
 // scripts/wire-bookkeeping-projected.txt cites for Route53HostedZone (#756).
 //

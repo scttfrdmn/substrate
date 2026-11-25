@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1171 routed operations.
+// 68 plugins, 1184 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -1048,11 +1048,24 @@ var routedOperations = map[string][]string{
 	},
 	"route53": {
 		"ChangeResourceRecordSets",
+		"ChangeTagsForResource",
+		"CreateHealthCheck",
 		"CreateHostedZone",
+		"DeleteHealthCheck",
 		"DeleteHostedZone",
+		"GetChange",
+		"GetHealthCheck",
+		"GetHealthCheckCount",
+		"GetHealthCheckStatus",
 		"GetHostedZone",
+		"ListHealthChecks",
 		"ListHostedZones",
+		"ListHostedZonesByName",
 		"ListResourceRecordSets",
+		"ListTagsForResource",
+		"ListTagsForResources",
+		"UpdateHealthCheck",
+		"UpdateHostedZoneComment",
 	},
 	"s3": {
 		"AbortMultipartUpload",

@@ -31,7 +31,7 @@ onUnmounted(() => window.removeEventListener('hashchange', redirect))
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1171 operations**. This
+Substrate ships **68 built-in service plugins** routing **1184 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -99,7 +99,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 49 | [RDS](/reference/rds) | `rds` | Query | 23 |
 | 50 | [Redshift](/reference/redshift) | `redshift` | Query | 10 |
 | 51 | [Redshift Data API](/reference/redshift-data) | `redshift-data` | JSON | 3 |
-| 52 | [Route 53](/reference/route53) | `route53` | REST/XML | 6 |
+| 52 | [Route 53](/reference/route53) | `route53` | REST/XML | 19 |
 | 53 | [S3](/reference/s3) | `s3` | REST/XML | 68 |
 | 54 | [SageMaker](/reference/sagemaker) | `sagemaker` | JSON | 10 |
 | 55 | [EventBridge Scheduler](/reference/scheduler) | `scheduler` | REST/JSON | 12 |

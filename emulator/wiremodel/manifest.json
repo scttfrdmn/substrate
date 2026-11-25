@@ -215,7 +215,7 @@
     },
     "route53": {
       "apiVersion": "2013-04-01",
-      "operations": 6
+      "operations": 19
     },
     "s3": {
       "apiVersion": "2006-03-01",

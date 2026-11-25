@@ -113,9 +113,13 @@ var validatedServices = map[string]wireServiceRules{ //nolint:gochecknoglobals /
 	},
 
 	// Route 53, REST-XML. InvalidInput at HTTP 400, "The input is not valid.", is in the Errors
-	// section of every Route 53 operation substrate routes (API_CreateHostedZone,
+	// section of every Route 53 operation substrate routes that takes input (API_CreateHostedZone,
 	// API_ChangeResourceRecordSets, API_GetHostedZone, API_DeleteHostedZone, API_ListHostedZones,
-	// API_ListResourceRecordSets). The message form, value quoted, is Route 53's observed answer:
+	// API_ListResourceRecordSets, API_ListHostedZonesByName, API_UpdateHostedZoneComment,
+	// API_GetChange, API_ChangeTagsForResource, API_ListTagsForResource, API_ListTagsForResources,
+	// API_CreateHealthCheck, API_GetHealthCheck, API_ListHealthChecks, API_UpdateHealthCheck,
+	// API_DeleteHealthCheck, API_GetHealthCheckStatus). GetHealthCheckCount takes none and publishes no
+	// error, so the gate has nothing to refuse there. The message form, value quoted, is Route 53's observed answer:
 	// "InvalidInput: 1 validation error detected: Value '/hostedzone/…' at 'resourceId' failed to
 	// satisfy constraint: Member must have length less than or equal to 32"
 	// (hashicorp/terraform-provider-aws#37817). The enum opt-in is from "InvalidInput: 1 validation

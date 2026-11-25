@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EventBridge: `EnableRule`, `DisableRule` and `ListRuleNamesByTarget` (#1613).
 - EventBridge: rules and buses answer the Resource Groups Tagging API's `GetResources`, `TagResources` and `UntagResources`; an `aws:` key is refused (#1640).
 - CloudFormation: `AWS::Events::EventBus`, with `Policy`, `Tags` and in-place updates; `AWS::Events::Rule` is created on its `EventBusName`, passes `RoleArn`, `Tags` and `Targets`, and updates in place, moving to a changed `EventBusName` with its targets (#1613).
+- Route 53: `GetChange` reports every change a zone create, zone delete or change batch minted; `POST/DELETE /v1/route53/change-status` seeds a PENDING window, counted in observations (#1613).
+- Route 53: `ListHostedZonesByName`, sorted by reversed labels then ID, and `UpdateHostedZoneComment`; the `InvalidDomainName` and `InvalidInput` messages are substrate's own (#1613).
+- Route 53: `ChangeTagsForResource`, `ListTagsForResource` and `ListTagsForResources` for hosted zones and health checks, at most 10 tags each; the over-limit message is substrate's own (#1613).
+- Route 53: health check create, get, list, update, delete and count, with idempotent `CallerReference` and `HealthCheckVersion`; `GetHealthCheckStatus` comes from `POST/DELETE /v1/route53/health-check-status`. The health check and `ListHealthChecks` messages are substrate's own (#1613).
+- CloudFormation: `AWS::Route53::HealthCheck`, with `HealthCheckTags` and `Fn::GetAtt HealthCheckId`, and a `CallerReference` per create attempt (#1613).
 
 ### Changed
 
@@ -39,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Kinesis: `DescribeStream` and `DescribeStreamSummary` report `EncryptionType` `NONE`, so Terraform's `aws_kinesis_stream` plans no change on refresh (#1613).
+- Route 53: a change batch that creates an existing record set, deletes a missing or mismatched one, or deletes one twice is `InvalidChangeBatch` in AWS's words, and makes no change (#1586).
+- Route 53: an unreadable `TTL` or `Weight` is `InvalidInput` instead of 0; the message is substrate's own (#1586).
+- Route 53: record sets keep `SetIdentifier`, `Weight`, `Failover`, `HealthCheckId` and `Region`, and are keyed by name, type and `SetIdentifier`, so weighted and failover records no longer collide (#1613).
+- Route 53: names are matched and listed in Route 53's form, lower-cased with octal escapes, so `*.example.com` and `\052.example.com` are one record set (#1586).
+- CloudFormation: a record set's deploy sends its `SetIdentifier` and routing members, and its stack delete finds it by that identity, sends the stored values, and counts one already gone as deleted (#1586).
 
 ### Compatibility
 
@@ -58,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - S3: the reads of these configurations, which the AWS provider for Terraform makes on every `aws_s3_bucket` refresh, answer AWS's "not configured" document or error instead of `501 NotImplemented`. Their Puts and Deletes are routed, and `PutBucketReplication` requires versioning on both buckets (#1658).
 - S3: authorization uses the published actions: `s3:GetAccelerateConfiguration`/`s3:PutAccelerateConfiguration`, `s3:GetReplicationConfiguration`, `s3:PutReplicationConfiguration` (also for `DeleteBucketReplication`) and `s3:Get/PutBucketObjectLockConfiguration` (#1613).
 - CloudWatch: a Query-protocol error's `<Code>` is the model's Query code where it differs from the code a handler raised; only a missing dashboard (`ResourceNotFound`, shape `DashboardNotFoundError`) differs today (#1613).
+- Route 53: a `CREATE` of an existing record set, and a `DELETE` whose values (TTL, records, alias target, routing members) differ from the stored ones, now fail the batch with `InvalidChangeBatch`/400 (#1586).
+- Route 53: record sets with a `SetIdentifier` get their own key; one stored before this release is found by a `DELETE` naming its `SetIdentifier` (#1613).
+- Route 53: change IDs are stored and `GetChange` answers them; unseeded, every change is `INSYNC` as before (#1613).
+- Route 53: record, hosted zone and alias target names are reported lower-cased, escaped and with a trailing dot; a `CREATE` of an existing apex SOA or NS now answers "already exists" (#1586).
 
 ## [v0.133.0] - 2026-11-24
 

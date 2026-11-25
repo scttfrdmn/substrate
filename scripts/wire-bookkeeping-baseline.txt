@@ -336,6 +336,7 @@ emulator/redshift_types.go	RedshiftSnapshot	AccountID	accountID
 emulator/redshift_types.go	RedshiftSnapshot	Region	region
 emulator/redshiftdata_types.go	RedshiftDataStatement	AccountID	AccountID
 emulator/redshiftdata_types.go	RedshiftDataStatement	Region	Region
+emulator/route53_healthcheck.go	Route53HealthCheck	AccountID	AccountID
 emulator/route53_types.go	Route53HostedZone	AccountID	AccountID
 emulator/s3_types.go	S3Bucket	AccountID	account_id
 emulator/s3_types.go	S3Bucket	EverTagged	ever_tagged,omitempty

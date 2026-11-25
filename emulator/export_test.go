@@ -2019,3 +2019,14 @@ func TaggingWriterForTest(p *TaggingPlugin, arn string) string {
 	}
 	return owner
 }
+
+// CFNRoute53ChangeForTest wraps cfnRoute53Change, the change a record set's stack delete sends.
+func CFNRoute53ChangeForTest(action string, rrset Route53ResourceRecordSet) string {
+	return cfnRoute53Change(action, rrset)
+}
+
+// R53OnlyNotFoundForTest wraps r53OnlyNotFound, which a record set's stack delete reads as "already
+// gone".
+func R53OnlyNotFoundForTest(err error) bool {
+	return r53OnlyNotFound(err)
+}

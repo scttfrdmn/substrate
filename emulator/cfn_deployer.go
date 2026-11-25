@@ -1165,6 +1165,7 @@ var typePriority = map[string]int{
 	"AWS::IAM::Role":            1,
 	"AWS::EC2::VPC":             1,
 	"AWS::Route53::HostedZone":  1,
+	"AWS::Route53::HealthCheck": 2,
 	"AWS::KMS::Key":             1,
 	"AWS::DynamoDB::Table":      2,
 	"AWS::S3::Bucket":           2,
@@ -4411,10 +4412,22 @@ func (d *StackDeployer) deployRoute53RecordSet(
 	rtype := resolveStringProp(props, "Type", "A", cctx)
 	ttl := resolveStringProp(props, "TTL", "300", cctx)
 	value := resolveStringProp(props, "ResourceRecords", "", cctx)
+	// The routing members are part of the record set's identity (SetIdentifier) and values, so they
+	// are sent as the template declares them, and the stack delete names the same record set.
+	var routing strings.Builder
+	for _, k := range []string{"SetIdentifier", "Weight", "Region", "Failover"} {
+		if v := resolveStringProp(props, k, "", cctx); v != "" {
+			routing.WriteString(`<` + k + `>` + cfnXMLText(v) + `</` + k + `>`)
+		}
+	}
+	healthCheck := ""
+	if v := resolveStringProp(props, "HealthCheckId", "", cctx); v != "" {
+		healthCheck = `<HealthCheckId>` + cfnXMLText(v) + `</HealthCheckId>`
+	}
 	body := `<ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"><ChangeBatch><Changes><Change><Action>UPSERT</Action><ResourceRecordSet>` +
-		`<Name>` + name + `</Name><Type>` + rtype + `</Type><TTL>` + ttl + `</TTL>` +
+		`<Name>` + name + `</Name><Type>` + rtype + `</Type>` + routing.String() + `<TTL>` + ttl + `</TTL>` +
 		`<ResourceRecords><ResourceRecord><Value>` + value + `</Value></ResourceRecord></ResourceRecords>` +
-		`</ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
+		healthCheck + `</ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 	req := &AWSRequest{
 		Service:   "route53",
 		Operation: "POST",
