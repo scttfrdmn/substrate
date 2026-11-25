@@ -374,6 +374,9 @@ func (p *LambdaPlugin) deleteAlias(ctx *RequestContext, ref, aliasName string) (
 	if err := p.state.Delete(goCtx, lambdaNamespace, lambdaQualifiedPolicyStateKey(acct, region, name, aliasName)); err != nil {
 		return nil, fmt.Errorf("lambda deleteAlias policy state.Delete: %w", err)
 	}
+	if err := p.state.Delete(goCtx, lambdaNamespace, lambdaQualifiedInvokeConfigStateKey(acct, region, name, aliasName)); err != nil {
+		return nil, fmt.Errorf("lambda deleteAlias invoke config state.Delete: %w", err)
+	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}}, nil
 }
 

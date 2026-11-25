@@ -297,6 +297,7 @@ emulator/kinesis_types.go	KinesisStream	Region	Region
 emulator/kms_types.go	KMSKey	AccountID	AccountID
 emulator/kms_types.go	KMSKey	EverTagged	ever_tagged,omitempty
 emulator/kms_types.go	KMSKey	Region	Region
+emulator/lambda_plugin.go	ESMConfig	EverTagged	ever_tagged,omitempty
 emulator/lambda_types.go	LambdaFunction	EverTagged	ever_tagged,omitempty
 emulator/msk_types.go	MSKCluster	AccountID	AccountID
 emulator/msk_types.go	MSKCluster	CreatedAt	CreatedAt

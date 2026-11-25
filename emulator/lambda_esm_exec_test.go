@@ -155,10 +155,9 @@ func esmCreateLambdaFunction(t *testing.T, ts *emulator.TestServer, name string)
 func esmCreateESM(t *testing.T, ts *emulator.TestServer, fnName, eventSourceARN string) string {
 	t.Helper()
 	payload, _ := json.Marshal(map[string]interface{}{
-		"FunctionName":     fnName,
-		"EventSourceArn":   eventSourceARN,
-		"BatchSize":        10,
-		"StartingPosition": "TRIM_HORIZON",
+		"FunctionName":   fnName,
+		"EventSourceArn": eventSourceARN,
+		"BatchSize":      10,
 	})
 	resp := esmDoRequest(t, ts, http.MethodPost, "/2015-03-31/event-source-mappings",
 		"lambda.us-east-1.amazonaws.com", "application/json",

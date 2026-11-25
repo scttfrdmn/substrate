@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -19,7 +20,7 @@ import (
 // LambdaPlugin emulates the AWS Lambda REST API.
 // It handles CreateFunction, GetFunction, GetFunctionConfiguration, DeleteFunction,
 // ListFunctions, UpdateFunctionCode, UpdateFunctionConfiguration, Invoke, InvokeAsync,
-// AddPermission, RemovePermission, GetPolicy, PutFunctionEventInvokeConfig,
+// AddPermission, RemovePermission, GetPolicy, the event-invoke configuration,
 // TagResource, UntagResource, ListTags, versions, aliases, layers and event source
 // mappings.
 // Function code never runs: Invoke answers a seeded result or error, or a stub
@@ -38,9 +39,14 @@ type LambdaPlugin struct {
 	// [progression.observe].
 	seedMu sync.Mutex
 	// versionMu serializes the operations that read, check and write a function's versions and
-	// aliases: PublishVersion's counter, an alias's existence and targets, and the alias check that
-	// guards deleting a version.
+	// aliases: PublishVersion's counter, an alias's existence and targets, the alias check that
+	// guards deleting a version, and the event-invoke configuration writes, which resolve the version
+	// or alias they belong to and must not outlive its delete.
 	versionMu sync.Mutex
+	// esmWriteMu serializes every write to an event-source mapping record and to the per-function
+	// mapping index: create, update, delete, tag and untag. Each reads the record under it, so none
+	// saves a stale copy over another's write or re-saves a mapping a delete removed.
+	esmWriteMu sync.Mutex
 }
 
 // Name returns the service name "lambda".
@@ -138,6 +144,14 @@ func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 		return p.getPolicy(ctx, req, name)
 	case "PutFunctionEventInvokeConfig":
 		return p.putFunctionEventInvokeConfig(ctx, req, name)
+	case "UpdateFunctionEventInvokeConfig":
+		return p.updateFunctionEventInvokeConfig(ctx, req, name)
+	case "GetFunctionEventInvokeConfig":
+		return p.getFunctionEventInvokeConfig(ctx, req, name)
+	case "DeleteFunctionEventInvokeConfig":
+		return p.deleteFunctionEventInvokeConfig(ctx, req, name)
+	case "ListFunctionEventInvokeConfigs":
+		return p.listFunctionEventInvokeConfigs(ctx, req, name)
 	case "TagResource":
 		return p.tagResource(ctx, req, name)
 	case "UntagResource":
@@ -191,7 +205,10 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		Environment struct {
 			Variables map[string]string `json:"Variables"`
 		} `json:"Environment"`
-		TracingConfig lambdaTracingConfig `json:"TracingConfig"`
+		TracingConfig    lambdaTracingConfig     `json:"TracingConfig"`
+		ImageConfig      *LambdaImageConfig      `json:"ImageConfig"`
+		EphemeralStorage *lambdaEphemeralStorage `json:"EphemeralStorage"`
+		LoggingConfig    *LambdaLoggingConfig    `json:"LoggingConfig"`
 		// Publish creates version 1 as part of the create.
 		Publish bool `json:"Publish"`
 	}
@@ -204,19 +221,13 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	if awsErr := body.TracingConfig.validate(); awsErr != nil {
 		return nil, awsErr
 	}
-
-	// Check for existing function.
-	existing, err := p.state.Get(context.Background(), lambdaNamespace,
-		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, body.FunctionName))
-	if err != nil {
-		return nil, fmt.Errorf("lambda createFunction state.Get: %w", err)
+	ephemeral, awsErr := lambdaResolveEphemeralStorage(0, body.EphemeralStorage)
+	if awsErr != nil {
+		return nil, awsErr
 	}
-	if existing != nil {
-		return nil, &AWSError{Code: "ResourceConflictException", Message: "Function already exists", HTTPStatus: http.StatusConflict}
-	}
-	// A role inside a seeded propagation window cannot be assumed yet (#1274).
-	if err := p.checkRolePropagated(context.Background(), body.Role); err != nil {
-		return nil, err
+	logging, awsErr := lambdaResolveLoggingConfig(nil, body.LoggingConfig, body.FunctionName)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	timeout := body.Timeout
@@ -247,6 +258,25 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	if len(archs) == 0 {
 		archs = []string{"x86_64"}
 	}
+	// Refused before the role check below, so a refusal spends no observation of a seeded
+	// propagation window.
+	if pkgType != "Image" && !body.ImageConfig.empty() {
+		return nil, lambdaImageConfigOnZip()
+	}
+
+	// Check for existing function.
+	existing, err := p.state.Get(context.Background(), lambdaNamespace,
+		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, body.FunctionName))
+	if err != nil {
+		return nil, fmt.Errorf("lambda createFunction state.Get: %w", err)
+	}
+	if existing != nil {
+		return nil, &AWSError{Code: "ResourceConflictException", Message: "Function already exists", HTTPStatus: http.StatusConflict}
+	}
+	// A role inside a seeded propagation window cannot be assumed yet (#1274).
+	if err := p.checkRolePropagated(context.Background(), body.Role); err != nil {
+		return nil, err
+	}
 
 	now := p.tc.Now()
 	fn := LambdaFunction{
@@ -270,6 +300,10 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		TracingMode:   body.TracingConfig.Mode,
 		LastModified:  now,
 		CreateDate:    now,
+
+		ImageConfig:          lambdaResolveImageConfig(nil, body.ImageConfig),
+		EphemeralStorageSize: ephemeral,
+		LoggingConfig:        logging,
 	}
 
 	// Store ZIP bytes when provided directly.
@@ -468,7 +502,10 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 		Environment struct {
 			Variables map[string]string `json:"Variables"`
 		} `json:"Environment"`
-		TracingConfig lambdaTracingConfig `json:"TracingConfig"`
+		TracingConfig    lambdaTracingConfig     `json:"TracingConfig"`
+		ImageConfig      *LambdaImageConfig      `json:"ImageConfig"`
+		EphemeralStorage *lambdaEphemeralStorage `json:"EphemeralStorage"`
+		LoggingConfig    *LambdaLoggingConfig    `json:"LoggingConfig"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, lambdaInvalidBody()
@@ -476,11 +513,28 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 	if awsErr := body.TracingConfig.validate(); awsErr != nil {
 		return nil, awsErr
 	}
+	ephemeral, awsErr := lambdaResolveEphemeralStorage(0, body.EphemeralStorage)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 
 	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
 	}
+	// Merged into what the function holds, so this check runs after the lookup.
+	logging, awsErr := lambdaResolveLoggingConfig(fn.LoggingConfig, body.LoggingConfig, fn.FunctionName)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	if body.EphemeralStorage != nil {
+		fn.EphemeralStorageSize = ephemeral
+	}
+	fn.LoggingConfig = logging
+	if fn.PackageType != "Image" && !body.ImageConfig.empty() {
+		return nil, lambdaImageConfigOnZip()
+	}
+	fn.ImageConfig = lambdaResolveImageConfig(fn.ImageConfig, body.ImageConfig)
 	if body.TracingConfig.Mode != "" {
 		fn.TracingMode = body.TracingConfig.Mode
 	}
@@ -979,37 +1033,6 @@ func (p *LambdaPlugin) getPolicy(ctx *RequestContext, req *AWSRequest, ref strin
 	return lambdaJSONResponse(http.StatusOK, map[string]string{"Policy": string(policyJSON)})
 }
 
-func (p *LambdaPlugin) putFunctionEventInvokeConfig(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	// Parsed before the lookup; see updateFunctionCode above.
-	var body struct {
-		MaximumRetryAttempts     int `json:"MaximumRetryAttempts"`
-		MaximumEventAgeInSeconds int `json:"MaximumEventAgeInSeconds"`
-	}
-	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, lambdaInvalidBody()
-	}
-
-	if _, err := p.loadFunction(ctx.AccountID, ctx.Region, name); err != nil {
-		return nil, err
-	}
-
-	cfg := LambdaEventInvokeConfig{
-		FunctionName:             name,
-		MaximumRetryAttempts:     body.MaximumRetryAttempts,
-		MaximumEventAgeInSeconds: body.MaximumEventAgeInSeconds,
-	}
-	data, marshalErr := json.Marshal(cfg)
-	if marshalErr != nil {
-		return nil, fmt.Errorf("lambda putFunctionEventInvokeConfig marshal: %w", marshalErr)
-	}
-	if putErr := p.state.Put(context.Background(), lambdaNamespace,
-		lambdaInvokeConfigStateKey(ctx.AccountID, ctx.Region, name), data); putErr != nil {
-		return nil, fmt.Errorf("lambda putFunctionEventInvokeConfig state.Put: %w", putErr)
-	}
-
-	return lambdaJSONResponse(http.StatusOK, cfg)
-}
-
 // --- Tagging operations ----------------------------------------------------
 
 // findFunctionByARN returns the LambdaFunction whose FunctionArn matches arn.
@@ -1054,6 +1077,9 @@ func (p *LambdaPlugin) tagResource(ctx *RequestContext, req *AWSRequest, arn str
 	if unmarshalErr := json.Unmarshal(req.Body, &body); unmarshalErr != nil {
 		return nil, lambdaInvalidBody()
 	}
+	if _, isESM := lambdaESMUUIDFromARN(arn); isESM {
+		return p.tagESM(ctx, arn, body.Tags)
+	}
 
 	if awsErr := lambdaCheckFunctionScope(ctx, arn, "lambda:TagResource"); awsErr != nil {
 		return nil, awsErr
@@ -1078,6 +1104,15 @@ func (p *LambdaPlugin) tagResource(ctx *RequestContext, req *AWSRequest, arn str
 }
 
 func (p *LambdaPlugin) untagResource(ctx *RequestContext, req *AWSRequest, arn string) (*AWSResponse, error) {
+	if _, isESM := lambdaESMUUIDFromARN(arn); isESM {
+		var keys []string
+		if raw, ok := req.Params["tagKeys"]; ok {
+			for _, k := range strings.Split(raw, ",") {
+				keys = append(keys, strings.TrimSpace(k))
+			}
+		}
+		return p.untagESM(ctx, arn, keys)
+	}
 	if awsErr := lambdaCheckFunctionScope(ctx, arn, "lambda:UntagResource"); awsErr != nil {
 		return nil, awsErr
 	}
@@ -1102,6 +1137,9 @@ func (p *LambdaPlugin) untagResource(ctx *RequestContext, req *AWSRequest, arn s
 }
 
 func (p *LambdaPlugin) listTags(ctx *RequestContext, arn string) (*AWSResponse, error) {
+	if _, isESM := lambdaESMUUIDFromARN(arn); isESM {
+		return p.listESMTags(ctx, arn)
+	}
 	if awsErr := lambdaCheckFunctionScope(ctx, arn, "lambda:ListTags"); awsErr != nil {
 		return nil, awsErr
 	}
@@ -1197,9 +1235,9 @@ func buildFunctionConfig(fn LambdaFunction) map[string]interface{} {
 			"Variables": fn.Environment,
 		}
 	}
-	if len(fn.Tags) > 0 {
-		cfg["Tags"] = fn.Tags
-	}
+	// No Tags: FunctionConfiguration has no such member, and GetFunction answers a function's tags
+	// beside Configuration rather than inside it (#1660).
+	renderLambdaFunctionFields(cfg, fn)
 	return cfg
 }
 
@@ -1334,6 +1372,19 @@ type ESMConfig struct {
 	// MaximumBatchingWindowInSeconds is the maximum time to gather records before
 	// invoking the function. Zero means no batching window.
 	MaximumBatchingWindowInSeconds int `json:"MaximumBatchingWindowInSeconds,omitempty"`
+
+	// FunctionResponseTypes is the response types the mapping applies, at most
+	// ReportBatchItemFailures. Recorded intent: a poll deletes the whole batch or none of it.
+	FunctionResponseTypes []string `json:"FunctionResponseTypes,omitempty"`
+
+	// ScalingConfig is the SQS mapping's concurrency limit; nil when it sets none. Recorded intent.
+	ScalingConfig *LambdaESMScalingConfig `json:"ScalingConfig,omitempty"`
+
+	// Tags are the mapping's tags, answered only by ListTags.
+	Tags map[string]string `json:"Tags,omitempty"`
+
+	// EverTagged records that this mapping has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
 func (p *LambdaPlugin) esmKey(uuid string) string {
@@ -1392,11 +1443,14 @@ func (p *LambdaPlugin) saveESMIDs(ctx context.Context, functionARN string, ids [
 
 func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		FunctionName     string `json:"FunctionName"`
-		EventSourceArn   string `json:"EventSourceArn"`
-		BatchSize        int    `json:"BatchSize"`
-		StartingPosition string `json:"StartingPosition"`
-		Enabled          *bool  `json:"Enabled"`
+		FunctionName          string                  `json:"FunctionName"`
+		EventSourceArn        string                  `json:"EventSourceArn"`
+		BatchSize             int                     `json:"BatchSize"`
+		StartingPosition      string                  `json:"StartingPosition"`
+		Enabled               *bool                   `json:"Enabled"`
+		FunctionResponseTypes []string                `json:"FunctionResponseTypes"`
+		ScalingConfig         *LambdaESMScalingConfig `json:"ScalingConfig"`
+		Tags                  map[string]string       `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, lambdaInvalidBody()
@@ -1404,10 +1458,27 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 	if input.FunctionName == "" || input.EventSourceArn == "" {
 		return nil, lambdaInvalidParameterValue("FunctionName and EventSourceArn are required")
 	}
+	isSQS := lambdaIsSQSSource(input.EventSourceArn)
+	if isSQS && input.StartingPosition != "" {
+		// The wording Lambda answers, observed in boto/boto3#1613 and
+		// hashicorp/terraform-provider-aws#5025; StartingPosition is "Required for Amazon Kinesis and
+		// Amazon DynamoDB Stream event sources" and an SQS queue has no position to start from.
+		return nil, lambdaInvalidParameterValue("StartingPosition is not valid for SQS event sources.")
+	}
+	if awsErr := lambdaValidateResponseTypes(input.FunctionResponseTypes); awsErr != nil {
+		return nil, awsErr
+	}
+	scaling, awsErr := lambdaValidateScalingConfig(input.ScalingConfig, input.EventSourceArn)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 
 	batchSize := input.BatchSize
 	if batchSize <= 0 {
-		batchSize = 100
+		batchSize = lambdaESMBatchSizeDefault
+		if isSQS {
+			batchSize = lambdaESMBatchSizeSQS
+		}
 	}
 
 	state := "Enabled"
@@ -1415,8 +1486,10 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 		state = "Disabled"
 	}
 
+	// A stream source starts from TRIM_HORIZON when the request names no position, which is
+	// substrate's default: AWS requires one for Kinesis and DynamoDB Streams.
 	startingPosition := input.StartingPosition
-	if startingPosition == "" {
+	if startingPosition == "" && !isSQS {
 		startingPosition = "TRIM_HORIZON"
 	}
 
@@ -1424,15 +1497,25 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 	if awsErr != nil {
 		return nil, awsErr
 	}
+	if isSQS {
+		if err := p.checkQueueVisibility(ctx, input.FunctionName, input.EventSourceArn); err != nil {
+			return nil, err
+		}
+	}
 
 	uuid := ctx.IDs.HexUUID()
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
 	esm := &ESMConfig{
-		UUID:             uuid,
-		FunctionARN:      functionARN,
-		EventSourceARN:   input.EventSourceArn,
-		BatchSize:        batchSize,
-		State:            state,
-		StartingPosition: startingPosition,
+		UUID:                  uuid,
+		FunctionARN:           functionARN,
+		EventSourceARN:        input.EventSourceArn,
+		BatchSize:             batchSize,
+		State:                 state,
+		StartingPosition:      startingPosition,
+		FunctionResponseTypes: input.FunctionResponseTypes,
+		ScalingConfig:         scaling,
+		Tags:                  input.Tags,
 	}
 
 	bgCtx := context.Background()
@@ -1456,7 +1539,7 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 		}
 	}
 
-	return lambdaJSONResponse(http.StatusCreated, esm)
+	return lambdaJSONResponse(http.StatusCreated, esm.wire())
 }
 
 // moveESMIndex moves mapping uuid from one function's mapping index to another's, for an update
@@ -1618,15 +1701,16 @@ func (p *LambdaPlugin) listEventSourceMappings(ctx *RequestContext, req *AWSRequ
 	// The page is cut after the whole answer is filtered, not during the scan, so which
 	// mappings EventSourceArn selects does not depend on the page a walk is on.
 	page, nextMarker := pageByOffsetToken(esms, offset, pageSize)
-	if page == nil {
-		page = []ESMConfig{}
-	}
 
 	type response struct {
-		EventSourceMappings []ESMConfig `json:"EventSourceMappings"`
-		NextMarker          string      `json:"NextMarker,omitempty"`
+		EventSourceMappings []lambdaESMWire `json:"EventSourceMappings"`
+		NextMarker          string          `json:"NextMarker,omitempty"`
 	}
-	return lambdaJSONResponse(http.StatusOK, response{EventSourceMappings: page, NextMarker: nextMarker})
+	out := response{EventSourceMappings: make([]lambdaESMWire, 0, len(page)), NextMarker: nextMarker}
+	for _, esm := range page {
+		out.EventSourceMappings = append(out.EventSourceMappings, esm.wire())
+	}
+	return lambdaJSONResponse(http.StatusOK, out)
 }
 
 // lambdaESMPageSize reads ListEventSourceMappings' MaxItems and returns the number of mappings
@@ -1661,13 +1745,9 @@ func (p *LambdaPlugin) getEventSourceMapping(_ *RequestContext, uuid string) (*A
 		return nil, err
 	}
 	if esm == nil {
-		return nil, &AWSError{
-			Code:       "ResourceNotFoundException",
-			Message:    "The event source mapping " + uuid + " was not found.",
-			HTTPStatus: http.StatusNotFound,
-		}
+		return nil, lambdaESMNotFound(uuid)
 	}
-	return lambdaJSONResponse(http.StatusOK, esm)
+	return lambdaJSONResponse(http.StatusOK, esm.wire())
 }
 
 func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSRequest, uuid string) (*AWSResponse, error) {
@@ -1678,10 +1758,19 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 		BatchSize    int    `json:"BatchSize"`
 		Enabled      *bool  `json:"Enabled"`
 		FunctionName string `json:"FunctionName"`
+		// A pointer, so an empty list clears the response types and an absent one keeps them.
+		FunctionResponseTypes *[]string `json:"FunctionResponseTypes"`
+		// "To remove the configuration, pass an empty value."
+		ScalingConfig *LambdaESMScalingConfig `json:"ScalingConfig"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, lambdaInvalidBody()
+		}
+	}
+	if input.FunctionResponseTypes != nil {
+		if awsErr := lambdaValidateResponseTypes(*input.FunctionResponseTypes); awsErr != nil {
+			return nil, awsErr
 		}
 	}
 	// FunctionName re-points the mapping, and is refused for another account's or Region's function
@@ -1695,24 +1784,40 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 		newFunctionARN = arn
 	}
 
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
 	esm, err := p.loadESM(context.Background(), uuid)
 	if err != nil {
 		return nil, err
 	}
 	if esm == nil {
-		return nil, &AWSError{
-			Code:       "ResourceNotFoundException",
-			Message:    "The event source mapping " + uuid + " was not found.",
-			HTTPStatus: http.StatusNotFound,
+		return nil, lambdaESMNotFound(uuid)
+	}
+	prev := *esm // the record as stored, restored if the index cannot follow a re-point
+	// Re-pointing an SQS mapping is checked against the new function's timeout, as a create is.
+	if newFunctionARN != "" && newFunctionARN != esm.FunctionARN && lambdaIsSQSSource(esm.EventSourceARN) {
+		if err := p.checkQueueVisibility(ctx, input.FunctionName, esm.EventSourceARN); err != nil {
+			return nil, err
+		}
+	}
+	if input.ScalingConfig != nil {
+		scaling, awsErr := lambdaValidateScalingConfig(input.ScalingConfig, esm.EventSourceARN)
+		if awsErr != nil {
+			return nil, awsErr
+		}
+		esm.ScalingConfig = scaling
+	}
+	if input.FunctionResponseTypes != nil {
+		esm.FunctionResponseTypes = *input.FunctionResponseTypes
+		if len(esm.FunctionResponseTypes) == 0 {
+			esm.FunctionResponseTypes = nil
 		}
 	}
 
 	prevState := esm.State
 
-	if newFunctionARN != "" && newFunctionARN != esm.FunctionARN {
-		if err := p.moveESMIndex(context.Background(), uuid, esm.FunctionARN, newFunctionARN); err != nil {
-			return nil, err
-		}
+	repointed := newFunctionARN != "" && newFunctionARN != esm.FunctionARN
+	if repointed {
 		esm.FunctionARN = newFunctionARN
 	}
 	if input.BatchSize > 0 {
@@ -1729,6 +1834,16 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 	if err := p.saveESM(context.Background(), esm); err != nil {
 		return nil, fmt.Errorf("lambda updateEventSourceMapping saveESM: %w", err)
 	}
+	// The index moves after the record is saved, and a failed move restores the record, so the
+	// record and the index never name different functions.
+	if repointed {
+		if err := p.moveESMIndex(context.Background(), uuid, prev.FunctionARN, newFunctionARN); err != nil {
+			if restoreErr := p.saveESM(context.Background(), &prev); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("lambda updateEventSourceMapping restore: %w", restoreErr))
+			}
+			return nil, err
+		}
+	}
 
 	// Polling follows the state transition: enabling starts the cadence again from now,
 	// disabling stops it.
@@ -1744,20 +1859,18 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 		}
 	}
 
-	return lambdaJSONResponse(http.StatusOK, esm)
+	return lambdaJSONResponse(http.StatusOK, esm.wire())
 }
 
 func (p *LambdaPlugin) deleteEventSourceMapping(_ *RequestContext, uuid string) (*AWSResponse, error) {
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
 	esm, err := p.loadESM(context.Background(), uuid)
 	if err != nil {
 		return nil, err
 	}
 	if esm == nil {
-		return nil, &AWSError{
-			Code:       "ResourceNotFoundException",
-			Message:    "The event source mapping " + uuid + " was not found.",
-			HTTPStatus: http.StatusNotFound,
-		}
+		return nil, lambdaESMNotFound(uuid)
 	}
 
 	if delErr := p.state.Delete(context.Background(), lambdaNamespace, p.esmKey(uuid)); delErr != nil {
@@ -1781,5 +1894,5 @@ func (p *LambdaPlugin) deleteEventSourceMapping(_ *RequestContext, uuid string) 
 	}
 	_ = p.saveESMIDs(context.Background(), esm.FunctionARN, filtered)
 
-	return lambdaJSONResponse(http.StatusOK, esm)
+	return lambdaJSONResponse(http.StatusOK, esm.wire())
 }

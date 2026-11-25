@@ -7,11 +7,11 @@
 
 | Operation | Notes |
 |-----------|-------|
-| CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package, and `TracingConfig.Mode` (`Active` or `PassThrough`) as recorded intent. `Publish: true` publishes version 1 and answers its configuration (#1613) |
-| GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image), and the function's `Tags` beside `Configuration`, which reports `TracingConfig.Mode` (#1519) and `LastUpdateStatus: Successful`, since every update completes within its request (#1660). Takes a [`Qualifier`](#versions-and-aliases), or a qualified `FunctionName` |
+| CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package, and `TracingConfig.Mode` (`Active` or `PassThrough`) as recorded intent. Also records [`ImageConfig`, `EphemeralStorage` and `LoggingConfig`](#imageconfig-ephemeralstorage-and-loggingconfig) (#1659). `Publish: true` publishes version 1 and answers its configuration (#1613) |
+| GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image), and the function's `Tags` beside `Configuration` and never inside it, which reports `TracingConfig.Mode` (#1519) and `LastUpdateStatus: Successful`, since every update completes within its request (#1660). Takes a [`Qualifier`](#versions-and-aliases), or a qualified `FunctionName` |
 | GetFunctionConfiguration | The `Configuration` member of `GetFunction`: `$LATEST`, or with a [`Qualifier`](#versions-and-aliases) the version's, or the version an alias points at, with the qualified `FunctionArn` (#1660) |
 | UpdateFunctionCode | Re-derives [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the new package; an update carrying no package changes neither. `Publish: true` publishes a version from the result |
-| UpdateFunctionConfiguration | Also updates `TracingConfig.Mode`. Changes `$LATEST` only; a published version keeps its configuration |
+| UpdateFunctionConfiguration | Also updates `TracingConfig.Mode`, `ImageConfig` (replaced whole), `EphemeralStorage` and `LoggingConfig` (merged member by member). Changes `$LATEST` only; a published version keeps its configuration |
 | DeleteFunction | Without a `Qualifier`, deletes the function with all its versions, aliases and their policies. With one, deletes that version; a version an alias routes to is `ResourceConflictException`/409, and an alias or `$LATEST` is `InvalidParameterValueException` |
 | ListFunctions | |
 | PublishVersion | Snapshots `$LATEST` as the next version number; numbers are never reused. Answers the newest version again when the code and configuration are unchanged since it was published. A stale `RevisionId` is `PreconditionFailedException`/412, and a stale `CodeSha256` `InvalidParameterValueException` (#1613) |
@@ -27,15 +27,19 @@
 | AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](/reference/concepts/errors#whether-a-body-is-parsed-before-the-resource-is-looked-up). `Principal` takes AddPermission's output forms — a service as `{"Service": …}`, an account ID as `{"AWS": "arn:aws:iam::{account}:root"}`, an ARN as `{"AWS": …}`, `*` as `"*"` — and `SourceArn`, `SourceAccount`, `PrincipalOrgID`, `EventSourceToken`, `FunctionUrlAuthType` and `InvokedViaFunctionUrl` become the statement's `Condition` with the keys the developer guide's resource-based policy examples use. A `Qualifier` must name an existing version or alias; the statement goes in that version's or alias's own policy, with the qualified ARN as its `Resource` (#1605, #1613) |
 | RemovePermission | Removes the statement by `StatementId`, from the qualifier's policy when a `Qualifier` is given; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
 | GetPolicy | Reports the stored policy as a JSON **string** in `Policy`, as published; with a `Qualifier`, the version's or alias's. A function with no policy is `ResourceNotFoundException`/404, not an empty document |
-| PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` and `MaximumEventAgeInSeconds` as intent; nothing retries, because nothing is invoked asynchronously. The body is parsed before the lookup. Published under [`2019-09-25`](#each-operation-is-published-under-its-own-api-version-date) |
-| CreateEventSourceMapping | |
-| GetEventSourceMapping | By UUID |
-| UpdateEventSourceMapping | `BatchSize` and `Enabled` only; both optional, so an **absent** body is a no-op update rather than a refusal and only a present-but-unparseable body is refused. Toggling `Enabled` starts or stops polling; re-enabling restarts the cadence from now (#1292) |
+| PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` (0–2), `MaximumEventAgeInSeconds` (60–21600) and `DestinationConfig` as intent, replacing any configuration the function, version or alias had; a setting left out is removed. Nothing retries and no destination receives a record, because nothing is invoked asynchronously. Answers the qualified `FunctionArn` (`:$LATEST` for the function) and `LastModified` from the simulated clock. The body is parsed before the lookup. Published under [`2019-09-25`](#each-operation-is-published-under-its-own-api-version-date), as the other four event-invoke operations are (#1685) |
+| UpdateFunctionEventInvokeConfig | Changes only the settings it names. A function, version or alias with no configuration is `ResourceNotFoundException`/404 |
+| GetFunctionEventInvokeConfig | The configuration of the function, or with a `Qualifier` or qualified `FunctionName` of that version or alias; none is `ResourceNotFoundException`/404, `The function … doesn't have an EventInvokeConfig`, the wording Lambda is observed to answer |
+| DeleteFunctionEventInvokeConfig | `204`; none to delete is the `ResourceNotFoundException` `GetFunctionEventInvokeConfig` answers. Deleting a version, an alias or the function deletes its configurations too |
+| ListFunctionEventInvokeConfigs | The function's own configuration first, then its versions' and aliases'. `MaxItems` 1–50, 50 when absent; a `Marker` substrate did not issue is refused |
+| CreateEventSourceMapping | `BatchSize` defaults to 10 for an SQS queue and 100 for every other source, as published. An SQS source refuses `StartingPosition`, and a queue whose `VisibilityTimeout` is lower than the function's `Timeout`, with the `InvalidParameterValueException` messages Lambda is observed to answer. Records `FunctionResponseTypes` (`ReportBatchItemFailures`), `ScalingConfig.MaximumConcurrency` (2–1000, SQS only) and `Tags` as intent, and answers `EventSourceMappingArn` (#1659, #1660) |
+| GetEventSourceMapping | By UUID. No `Tags`: `EventSourceMappingConfiguration` has no such member, so a mapping's tags are read with `ListTags` on its `EventSourceMappingArn` |
+| UpdateEventSourceMapping | `BatchSize`, `Enabled`, `FunctionName`, `FunctionResponseTypes` and `ScalingConfig`, an empty one of the last two clearing it. Re-pointing an SQS mapping at another function runs the visibility-timeout check again. All optional, so an **absent** body is a no-op update rather than a refusal and only a present-but-unparseable body is refused. Toggling `Enabled` starts or stops polling; re-enabling restarts the cadence from now (#1292) |
 | DeleteEventSourceMapping | |
 | ListEventSourceMappings | Paginates on `MaxItems`/`Marker`; an absent `MaxItems` answers the published per-response cap of 100, a value outside 1–10000 is refused, and a `Marker` substrate did not issue is refused with `InvalidParameterValueException` — see [Two more cursors published and unread](/reference/concepts/listing-order#two-more-cursors-published-and-unread-outside-ec2) |
-| TagResource | `204` with no body. Published under [`2017-03-31`](#each-operation-is-published-under-its-own-api-version-date), as the other two tag operations are |
+| TagResource | `204` with no body. Takes a function ARN or an event-source-mapping ARN (#1660). Published under [`2017-03-31`](#each-operation-is-published-under-its-own-api-version-date), as the other two tag operations are |
 | UntagResource | Takes `tagKeys` as repeated query parameters; `204` with no body |
-| ListTags | Reports `Tags` as a map, empty for an untagged function |
+| ListTags | Reports `Tags` as a map, empty for an untagged function or mapping |
 | PublishLayerVersion | `201` with the published shape; `Content` is a `ZipFile` or an `S3Bucket`/`S3Key`, sized and hashed like a function package. Version numbers start at 1 and are never reused after a delete. Published under `2018-10-31`, as every layer operation is |
 | ListLayerVersions | Newest first; filters on `CompatibleRuntime`/`CompatibleArchitecture`; `MaxItems` 1–50 and a `Marker` substrate issued. **Another account's layer is always `AccessDeniedException`**, since no layer policy can grant this action — see [Another account's layer](#another-account-s-layer) |
 | ListLayers | The caller's own layers in its Region, each with its latest version matching the filters; a layer with none matching is not listed |
@@ -53,6 +57,25 @@ eight operations the plugin actually routes had no row at all (#1015). Rows are 
 listed in the router's own order, which is the order a reader checking one against the
 other needs.
 
+## ImageConfig, EphemeralStorage and LoggingConfig
+
+`CreateFunction` and `UpdateFunctionConfiguration` record all three as intent, and every
+`FunctionConfiguration` (`GetFunction`, `GetFunctionConfiguration`, `ListFunctions`, versions and
+aliases) answers them back (#1659). Substrate runs no container, mounts no `/tmp` and writes no log.
+
+| Field | Answered as | Default | Refused |
+|---|---|---|---|
+| `ImageConfig` (`EntryPoint`, `Command`, `WorkingDirectory`) | `ImageConfigResponse.ImageConfig`, for a function with `PackageType: Image` | none | on a `Zip` function, `InvalidParameterValueException` with the message Lambda is observed to answer |
+| `EphemeralStorage.Size` | `EphemeralStorage.Size` | 512 | outside 512–10240, `InvalidParameterValueException` |
+| `LoggingConfig` | `LoggingConfig` | `LogFormat: Text`, `LogGroup: /aws/lambda/` followed by the function name; under `JSON`, both levels `INFO` | a value outside an enum, and either level under `Text`, `InvalidParameterValueException` |
+
+A level under `Text`, whether named or the default format, is refused with the message Lambda is
+observed to answer: `LogLevel is not supported when LogFormat is set to "Text". Remove LogLevel from
+your request or change the LogFormat to "JSON" and try again.` On an update, a `LoggingConfig`
+member the request names replaces the function's, and setting `LogFormat` to `Text` without a level
+drops the stored levels. Under `JSON`, a level of `INFO` is the default, the same function as an omitted level. A change to any of the three is a change `PublishVersion` publishes as a new
+version; an explicit default is the same function as an omitted one, so it is not.
+
 ## Versions and aliases
 
 `PublishVersion` stores an immutable snapshot of `$LATEST`'s code and configuration under the next
@@ -66,7 +89,8 @@ on every apply expects. `CreateFunction` and `UpdateFunctionCode` honour `Publis
 way.
 
 Every operation that takes a `Qualifier` (`GetFunction`, `GetFunctionConfiguration`, `Invoke`,
-`AddPermission`, `RemovePermission`, `GetPolicy`, `DeleteFunction`) also accepts the qualifier
+`AddPermission`, `RemovePermission`, `GetPolicy`, `DeleteFunction` and four of the event-invoke
+configuration operations) also accepts the qualifier
 appended to `FunctionName` (`my-fn:2`, or a full ARN ending `:live`); the two must agree, or the
 request is the `InvalidParameterValueException` the developer guide shows for that case. A number is
 a version, `$LATEST` the unpublished code, and any other name an alias, which resolves to its
@@ -75,9 +99,9 @@ Each version and alias has a resource policy of its own, separate from the funct
 are authorized against the same qualified ARN, so a policy on `function:my-fn:prod` governs
 `?Qualifier=prod` and `my-fn:prod` alike. That holds only for the operations that act on the version
 or alias a `Qualifier` names (`GetFunction`, `GetFunctionConfiguration`, `Invoke`, `DeleteFunction`
-and the three permission operations). Every other operation acts on the function and is authorized
-against it whatever `Qualifier` a request carries; `PutFunctionEventInvokeConfig`'s published
-`Qualifier` is not modelled. `PublishVersion`, `ListVersionsByFunction` and the alias operations
+the three permission operations, and Put, Update, Get and Delete `FunctionEventInvokeConfig`).
+Every other operation acts on the function and is authorized against it whatever `Qualifier` a
+request carries. `PublishVersion`, `ListVersionsByFunction` and the alias operations
 take the function itself, and refuse a qualified `FunctionName` with `InvalidParameterValueException`.
 
 **A function outside the caller's account and Region is not reached.** A full or partial ARN naming
@@ -175,7 +199,7 @@ substrate routes, each read from that operation's own published Request Syntax:
 | `2014-11-13` | `InvokeAsync` |
 | `2015-03-31` | the function CRUD, `Invoke`, the resource policy, the event source mappings |
 | `2017-03-31` | `TagResource`, `UntagResource`, `ListTags` |
-| `2019-09-25` | `PutFunctionEventInvokeConfig` |
+| `2019-09-25` | the five event-invoke configuration operations |
 | `2020-06-30` | `GetFunctionCodeSigningConfig` |
 
 Until #1142 substrate routed one of the four. The parser reached its arms by trimming the
