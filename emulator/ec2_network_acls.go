@@ -55,8 +55,8 @@ import (
 //     takes it before [EC2Plugin.tagMu] for an ID whose record other operations also rewrite
 //     under it ([ec2TagWriteTakesSGMu]), see [EC2Plugin.lockTagWrite].
 //
-// The order is igwMu, then defaultVPCMu, then sgMu, then tagMu, and nothing holding a later lock
-// takes an earlier one.
+// The order is igwMu, then defaultVPCMu, then sgMu, then addrMu (#1592, #1522), then tagMu, and
+// nothing holding a later lock takes an earlier one.
 
 // ec2NetworkACLDefaultRuleNumber is the rule number of the IPv4 catch-all deny every ACL ends
 // with — the rule the console shows as "*" and DescribeNetworkAcls renders as 32767 (AWS's
@@ -548,19 +548,28 @@ func ec2TagWriteTakesSGMu(id string) bool {
 }
 
 // lockTagWrite takes the locks a tag write naming ids needs — [EC2Plugin.sgMu] when any ID is
-// one [ec2TagWriteTakesSGMu] names, then [EC2Plugin.tagMu] — and returns the function that
-// releases them. sgMu is taken first, the order every holder of both follows.
+// one [ec2TagWriteTakesSGMu] names, [EC2Plugin.addrMu] when any is a network interface (#1522),
+// whose record every attachment and address change rewrites under it, then [EC2Plugin.tagMu] —
+// and returns the function that releases them. They are taken in that order, the one every holder
+// of more than one follows.
 func (p *EC2Plugin) lockTagWrite(ids []string) func() {
-	needSG := false
+	needSG, needAddr := false, false
 	for _, id := range ids {
 		needSG = needSG || ec2TagWriteTakesSGMu(id)
+		needAddr = needAddr || strings.HasPrefix(id, "eni-")
 	}
 	if needSG {
 		p.sgMu.Lock()
 	}
+	if needAddr {
+		p.addrMu.Lock()
+	}
 	p.tagMu.Lock()
 	return func() {
 		p.tagMu.Unlock()
+		if needAddr {
+			p.addrMu.Unlock()
+		}
 		if needSG {
 			p.sgMu.Unlock()
 		}

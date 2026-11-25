@@ -367,20 +367,26 @@ func TestEC2NetworkInterfaces_SingleInterfaceUnchanged(t *testing.T) {
 }
 
 // TestEC2NetworkInterfaces_NoInterfaceDeclared checks that a launch naming no
-// interface reports no interface set rather than a phantom one.
-//
-// Substrate does not create an ENI record for the interface every real instance has,
-// because it does not model ENIs as resources; reporting one here would be an
-// observation with nothing behind it.
+// interface still reports the primary interface every instance has (#1522), at device
+// index 0, deleted on termination, carrying the instance's address in the default subnet.
 func TestEC2NetworkInterfaces_NoInterfaceDeclared(t *testing.T) {
 	ts := newEC2TestServer(t)
 
 	instances := niRun(t, ts, map[string]string{"InstanceType": "t3.micro"})
 	require.Len(t, instances, 1)
-	assert.Empty(t, instances[0].Interfaces,
-		"a launch declaring no interface reports none")
-	assert.NotEmpty(t, instances[0].SubnetID,
-		"the default-VPC subnet still applies")
+	require.Len(t, instances[0].Interfaces, 1, "every instance has a primary interface")
+	primary := instances[0].Interfaces[0]
+	assert.Regexp(t, `^eni-[0-9a-f]{16}$`, primary.NetworkInterfaceID)
+	assert.Equal(t, 0, primary.Attachment.DeviceIndex)
+	assert.True(t, primary.Attachment.DeleteOnTermination)
+	assert.Equal(t, "in-use", primary.Status)
+	assert.Equal(t, instances[0].PrivateIPAddress, primary.PrivateIPAddress)
+	assert.Equal(t, instances[0].SubnetID, primary.SubnetID)
+	assert.Regexp(t, `^172\.31\.`, instances[0].PrivateIPAddress,
+		"a default-VPC launch is addressed inside 172.31.0.0/16")
+	assert.Equal(t, primary.NetworkInterfaceID,
+		niDescribe(t, ts, instances[0].InstanceID).Interfaces[0].NetworkInterfaceID,
+		"DescribeInstances reports the same interface")
 }
 
 // TestEC2NetworkInterfaces_MultiCountDistinctAddresses checks that two instances from
@@ -421,19 +427,26 @@ func TestEC2NetworkInterfaces_MultiCountDistinctAddresses(t *testing.T) {
 func TestEC2NetworkInterfaces_ExistingInterfaceAttached(t *testing.T) {
 	ts := newEC2TestServer(t)
 	subnetA, _, _, _ := niSubnets(t, ts)
+	eniID := niCreate(t, ts, map[string]string{
+		"Action": "CreateNetworkInterface", "SubnetId": subnetA,
+	}, "CreateNetworkInterfaceResponse", "networkInterface>networkInterfaceId")
 
 	instances := niRun(t, ts, map[string]string{
 		"NetworkInterface.1.DeviceIndex":        "0",
-		"NetworkInterface.1.NetworkInterfaceId": "eni-0abcdef01234567",
+		"NetworkInterface.1.NetworkInterfaceId": eniID,
 		"NetworkInterface.2.DeviceIndex":        "1",
 		"NetworkInterface.2.SubnetId":           subnetA,
 	})
 	require.Len(t, instances, 1)
 	require.Len(t, instances[0].Interfaces, 2)
+	assert.Equal(t, subnetA, instances[0].SubnetID,
+		"a launch naming only an interface lands in the interface's subnet")
 
 	attached := instances[0].Interfaces[0]
-	assert.Equal(t, "eni-0abcdef01234567", attached.NetworkInterfaceID,
+	assert.Equal(t, eniID, attached.NetworkInterfaceID,
 		"an attached interface keeps the ID the caller named")
+	assert.Equal(t, instances[0].PrivateIPAddress, attached.PrivateIPAddress,
+		"and the address it already had")
 	assert.False(t, attached.Attachment.DeleteOnTermination,
 		"an interface the launch did not create is not deleted with the instance")
 	assert.True(t, instances[0].Interfaces[1].Attachment.DeleteOnTermination,

@@ -156,6 +156,13 @@ type EC2Instance struct {
 	// a non-burstable launch, and for an instance from an event log predating the field, which
 	// reads back as its family's default; see [ec2InstanceCPUCredits].
 	CPUCredits string `json:"cpu_credits,omitempty"`
+
+	// InterfacesStandalone records that the instance's network interfaces are stored as
+	// records of their own (#1522), so its networkInterfaceSet is read from them and
+	// NetworkInterfaces above is empty. An instance from an event log predating it reads back
+	// false, and its interfaces are synthesized from what it recorded; see
+	// [ec2LegacyInterfaces].
+	InterfacesStandalone bool `json:"interfaces_standalone,omitempty"`
 }
 
 // EC2NetworkInterface is one interface attached to an instance at launch, from a
@@ -1069,10 +1076,16 @@ type EC2LaunchTemplateData struct {
 	// on every volume the launch materializes, including the root volume substrate
 	// synthesizes when no mapping declares one.
 	//
-	// AWS's LaunchTemplateTagSpecificationRequest also allows network-interface and
-	// spot-instances-request; those scopes are still recorded nowhere, because a
-	// recorded tag that no read surfaces is indistinguishable from a discarded one.
+	// AWS's LaunchTemplateTagSpecificationRequest also allows spot-instances-request; that
+	// scope is still recorded nowhere, because a recorded tag that no read surfaces is
+	// indistinguishable from a discarded one.
 	VolumeTagSpecifications []EC2Tag `json:"volumeTagSpecifications,omitempty"`
+
+	// NetworkInterfaceTagSpecifications is the template's network-interface-scoped
+	// tag-on-create tags, from LaunchTemplateData.TagSpecification.N with
+	// ResourceType=network-interface (#1522). They land on every interface the launch
+	// creates.
+	NetworkInterfaceTagSpecifications []EC2Tag `json:"networkInterfaceTagSpecifications,omitempty"`
 
 	// IamInstanceProfile is the instance profile the template names, stored as
 	// whichever of Name or Arn the request supplied — the same single-string shape

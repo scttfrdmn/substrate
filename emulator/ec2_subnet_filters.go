@@ -135,11 +135,11 @@ func ec2SubnetZone(region string, params map[string]string) (string, *AWSError) 
 // the one the describe reported.
 //
 // Member order follows AWS's sample responses, which are identical across both operations.
-// Five members those samples carry are deliberately absent: availableIpAddressCount,
-// availabilityZoneId, assignIpv6AddressOnCreation, ipv6CidrBlockAssociationSet and the
+// Four members those samples carry are deliberately absent: availabilityZoneId,
+// assignIpv6AddressOnCreation, ipv6CidrBlockAssociationSet and the
 // blockPublicAccessStates/privateDnsNameOptionsOnLaunch structures. Nothing in state backs
-// them, and deriving an available-address count from the CIDR would be fabrication — the
-// count depends on how many addresses AWS reserves and on every interface in the subnet.
+// them. availableIpAddressCount is the subnet's allocation record's (#1592): the block's
+// usable addresses, less the five AWS reserves, less every address held; see ec2_ip_alloc.go.
 //
 // tagSet is omitted entirely when the subnet has no tags, which is what both DescribeSubnets
 // samples show for an untagged subnet. That deliberately differs from describeSnapshots'
@@ -173,6 +173,9 @@ type ec2SubnetItem struct {
 	// CIDRBlock is the subnet's IPv4 CIDR block.
 	CIDRBlock string `xml:"cidrBlock"`
 
+	// AvailableIPAddressCount is "The number of unused private IPv4 addresses in the subnet."
+	AvailableIPAddressCount int `xml:"availableIpAddressCount"`
+
 	// AvailabilityZone is the zone the subnet was created in.
 	AvailabilityZone string `xml:"availabilityZone"`
 
@@ -190,7 +193,9 @@ type ec2SubnetItem struct {
 	Tags *ec2TagSetXML `xml:"tagSet,omitempty"`
 }
 
-// ec2SubnetXML renders one stored subnet as its response element.
+// ec2SubnetXML renders one stored subnet as its response element, with every usable address
+// available — which is what a subnet just created holds. [EC2Plugin.ec2SubnetItemFor] renders a
+// stored subnet with the count its allocation record gives.
 func ec2SubnetXML(subnet EC2Subnet) ec2SubnetItem {
 	item := ec2SubnetItem{
 		SubnetID:            subnet.SubnetID,
@@ -204,6 +209,7 @@ func ec2SubnetXML(subnet EC2Subnet) ec2SubnetItem {
 		DefaultForAz:        subnet.IsDefault,
 		MapPublicIPOnLaunch: subnet.MapPublicIPOnLaunch,
 	}
+	item.AvailableIPAddressCount = int(ec2ParseBlock(subnet.CIDRBlock).usable())
 	item.Tags = ec2TagSet(subnet.Tags)
 	return item
 }

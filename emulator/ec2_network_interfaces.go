@@ -82,90 +82,40 @@ func ec2ParseNetworkInterface(params map[string]string, p string) (EC2NetworkInt
 	return ifc, present
 }
 
-// ec2PrimaryInterface reports the interface an instance's top-level networking
-// describes: the one at DeviceIndex 0, or the lowest device index when a launch
-// declared no interface at index 0.
-//
-// The fallback matters because DeviceIndex defaults to 0 here rather than being
-// required, so "no interface at 0" means the caller numbered them from 1 — in which
-// case the lowest is the one attached first, which is what "primary" means.
+// ec2IsPrimaryPosition reports whether an interface at network card card and device index device
+// is an instance's primary interface. AWS fixes the position: "For the primary network interface,
+// specify NetworkCardIndex=0, DeviceIndex=0" (EC2 User Guide, "Maximize network bandwidth on
+// Amazon EC2 instances with multiple network cards"), and "The primary network interface must be
+// assigned to network card index 0" (AttachNetworkInterface). Every primary-interface decision —
+// a launch's top-level networking, DetachNetworkInterface's refusal, an instance's groupSet —
+// reads this one rule.
+func ec2IsPrimaryPosition(card, device int) bool {
+	return card == 0 && device == 0
+}
+
+// ec2PrimaryInterface reports the interface an instance's top-level networking describes: the
+// declared one at device index 0 on network card 0, or nil when none is. A launch declaring
+// interfaces but no primary is refused ([ec2NoPrimaryInterfaceError]).
 func ec2PrimaryInterface(interfaces []EC2NetworkInterface) *EC2NetworkInterface {
-	var primary *EC2NetworkInterface
 	for i := range interfaces {
-		if primary == nil || interfaces[i].DeviceIndex < primary.DeviceIndex {
-			primary = &interfaces[i]
+		if ec2IsPrimaryPosition(interfaces[i].NetworkCardIndex, interfaces[i].DeviceIndex) {
+			return &interfaces[i]
 		}
 	}
-	return primary
+	return nil
 }
 
-// ec2AttachInterfaces records the launch's interfaces on inst, filling in what the
-// request left to EC2: an interface ID, a private address, and a private DNS name.
+// ec2SortInterfacesByDeviceIndex orders declared interfaces by device index alone, keeping the
+// request's order among interfaces at one device index on different network cards.
 //
-// instanceIndex distinguishes the instances of a multi-count launch, so two instances
-// from one RunInstances call do not report the same secondary addresses. AWS refuses a
-// launch that names a PrivateIpAddress with a count above one for exactly this
-// reason; substrate does not refuse it, so it has to make the addresses differ.
+// This is the order a launch stores a template's interfaces in and draws the IDs of the declared
+// interfaces it left unnamed in, so it is the order event logs recorded those IDs under and does
+// not change: sorting by network card first would hand interfaces on two cards each other's IDs
+// on replay. Presentation and the primary rule read network card first instead; see
+// [ec2IsPrimaryPosition] and [EC2Plugin.planLaunchInterfaces].
 //
-// The primary interface takes the instance's own address and DNS name rather than a
-// separately generated one: they describe the same interface, and letting them differ
-// would mean an instance whose top-level privateIpAddress is not the address of any
-// interface it has.
-//
-// m mints the interface ids the request left unset, so a replayed launch reproduces
-// them (#856).
-func (p *EC2Plugin) ec2AttachInterfaces(
-	m *IDMint,
-	inst *EC2Instance,
-	declared []EC2NetworkInterface,
-	instanceIndex int,
-	region string,
-) {
-	if len(declared) == 0 {
-		return
-	}
-	interfaces := make([]EC2NetworkInterface, 0, len(declared))
-	primary := ec2PrimaryInterface(declared)
-	for n := range declared {
-		ifc := declared[n]
-		ifc.SecurityGroupIDs = filterEmpty(ifc.SecurityGroupIDs)
-		if ifc.NetworkInterfaceID == "" {
-			ifc.NetworkInterfaceID = generateENIID(m)
-		}
-		if ifc.InterfaceType == "" {
-			ifc.InterfaceType = "interface"
-		}
-		switch {
-		case primary != nil && ifc.DeviceIndex == primary.DeviceIndex:
-			ifc.SubnetID = inst.SubnetID
-			ifc.PrivateIPAddress = inst.PrivateIPAddress
-			ifc.PrivateDNSName = inst.PrivateDNSName
-			if len(ifc.SecurityGroupIDs) == 0 {
-				ifc.SecurityGroupIDs = inst.SecurityGroupIDs
-			}
-		case ifc.PrivateIPAddress == "":
-			// A secondary interface's address comes from the same 172.31.0.0/16 space
-			// the instance's does, offset by its device index so the addresses within
-			// one instance are distinct and stable across a replay.
-			ifc.PrivateIPAddress = fmt.Sprintf("172.31.%d.%d",
-				instanceIndex+1, 10+instanceIndex+ifc.DeviceIndex*10)
-		}
-		if ifc.PrivateDNSName == "" && ifc.PrivateIPAddress != "" {
-			ifc.PrivateDNSName = ec2PrivateDNSName(ifc.PrivateIPAddress, region)
-		}
-		interfaces = append(interfaces, ifc)
-	}
-	inst.NetworkInterfaces = interfaces
-}
-
-// ec2SortInterfacesByDeviceIndex orders interfaces by device index, which is the
-// order AWS reports them in and the order that puts the primary first.
-//
-// An insertion sort rather than sort.Slice: the list is at most a handful of entries,
-// and this keeps two interfaces declaring the same device index in the order the
-// request listed them. AWS rejects that duplicate; substrate does not, and a stable
-// order means a caller reading such a launch back sees something reproducible rather
-// than whichever order the sort happened to produce.
+// An insertion sort rather than sort.Slice, so the order among equal device indices is the
+// request's.
 func ec2SortInterfacesByDeviceIndex(interfaces []EC2NetworkInterface) {
 	for i := 1; i < len(interfaces); i++ {
 		for j := i; j > 0 && interfaces[j].DeviceIndex < interfaces[j-1].DeviceIndex; j-- {

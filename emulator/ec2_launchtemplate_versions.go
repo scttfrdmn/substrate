@@ -442,14 +442,17 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 		}
 	}
 	out.BlockDeviceMappings = ec2Items(ec2LTVersionBDMs(d.BlockDeviceMappings))
-	// The two stored scopes read back, instance then volume; see
-	// [EC2LaunchTemplateData.TagSpecifications] (#670, #1471). The other scopes the request
-	// shape allows are not stored, so they cannot read back.
+	// The three stored scopes read back, instance, volume, then network-interface; see
+	// [EC2LaunchTemplateData.TagSpecifications] (#670, #1471, #1522). The other scope the
+	// request shape allows is not stored, so it cannot read back.
 	var specs []ec2LTVersionTagSpecXML
 	for _, scope := range []struct {
 		resourceType string
 		tags         []EC2Tag
-	}{{"instance", d.TagSpecifications}, {"volume", d.VolumeTagSpecifications}} {
+	}{
+		{"instance", d.TagSpecifications}, {"volume", d.VolumeTagSpecifications},
+		{"network-interface", d.NetworkInterfaceTagSpecifications},
+	} {
 		if len(scope.tags) == 0 {
 			continue
 		}
@@ -688,6 +691,9 @@ func ec2OverlayTemplateData(src, overlay EC2LaunchTemplateData) EC2LaunchTemplat
 	// nothing rendered either member.
 	if len(overlay.VolumeTagSpecifications) > 0 {
 		out.VolumeTagSpecifications = overlay.VolumeTagSpecifications
+	}
+	if len(overlay.NetworkInterfaceTagSpecifications) > 0 {
+		out.NetworkInterfaceTagSpecifications = overlay.NetworkInterfaceTagSpecifications
 	}
 	if len(overlay.BlockDeviceMappings) > 0 {
 		out.BlockDeviceMappings = overlay.BlockDeviceMappings

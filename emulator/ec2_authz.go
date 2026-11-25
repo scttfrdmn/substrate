@@ -436,8 +436,8 @@ func ec2AuthzCreateTagsPass(state StateManager, reqCtx *RequestContext, req *AWS
 	}
 
 	// AWS: "The ec2:CreateTags action is also evaluated if tags are provided in a
-	// launch template." Only RunInstances reads a template, and only the two scopes
-	// substrate stores — the same two the launch itself applies.
+	// launch template." Only RunInstances reads a template, and only the three scopes
+	// substrate stores — the same three the launch itself applies.
 	if req.Operation == "RunInstances" {
 		if data := ec2AuthzTemplateData(state, reqCtx, req); data != nil {
 			// Each scope is gated on whether the request named that scope itself,
@@ -450,6 +450,9 @@ func ec2AuthzCreateTagsPass(state StateManager, reqCtx *RequestContext, req *AWS
 			}
 			if len(ec2LaunchTagsForResource(req.Params, "volume")) == 0 {
 				pass.addTemplateScope("volume", data.VolumeTagSpecifications)
+			}
+			if len(ec2LaunchTagsForResource(req.Params, "network-interface")) == 0 {
+				pass.addTemplateScope("network-interface", data.NetworkInterfaceTagSpecifications)
 			}
 		}
 	}

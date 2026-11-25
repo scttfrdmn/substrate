@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 71 plugins, 1307 routed operations.
+// 71 plugins, 1312 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -426,6 +426,7 @@ var routedOperations = map[string][]string{
 		"AssociateDhcpOptions",
 		"AssociateRouteTable",
 		"AttachInternetGateway",
+		"AttachNetworkInterface",
 		"AttachVolume",
 		"AuthorizeSecurityGroupEgress",
 		"AuthorizeSecurityGroupIngress",
@@ -446,6 +447,7 @@ var routedOperations = map[string][]string{
 		"CreateNatGateway",
 		"CreateNetworkAcl",
 		"CreateNetworkAclEntry",
+		"CreateNetworkInterface",
 		"CreatePlacementGroup",
 		"CreateRoute",
 		"CreateRouteTable",
@@ -466,6 +468,7 @@ var routedOperations = map[string][]string{
 		"DeleteNatGateway",
 		"DeleteNetworkAcl",
 		"DeleteNetworkAclEntry",
+		"DeleteNetworkInterface",
 		"DeletePlacementGroup",
 		"DeleteRoute",
 		"DeleteRouteTable",
@@ -511,6 +514,7 @@ var routedOperations = map[string][]string{
 		"DescribeVpcAttribute",
 		"DescribeVpcs",
 		"DetachInternetGateway",
+		"DetachNetworkInterface",
 		"DetachVolume",
 		"DisassociateAddress",
 		"DisassociateRouteTable",
@@ -522,6 +526,7 @@ var routedOperations = map[string][]string{
 		"ModifyInstanceCreditSpecification",
 		"ModifyInstanceMetadataOptions",
 		"ModifyLaunchTemplate",
+		"ModifyNetworkInterfaceAttribute",
 		"ModifySecurityGroupRules",
 		"ModifySnapshotAttribute",
 		"ModifySubnetAttribute",

@@ -178,6 +178,13 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 		"CreateNetworkAclEntry": {
 			"IcmpTypeCode": {Name: "Icmp"},
 		},
+		"CreateNetworkInterface": {
+			"Groups":                   {Name: "SecurityGroupId"},
+			"Ipv4Prefixes":             {Name: "Ipv4Prefix"},
+			"Ipv6Prefixes":             {Name: "Ipv6Prefix"},
+			"TagSpecifications":        {Name: "TagSpecification"},
+			"TagSpecifications[].Tags": {Name: "Tag"},
+		},
 		"CreatePlacementGroup": {
 			"TagSpecifications":        {Name: "TagSpecification"},
 			"TagSpecifications[].Tags": {Name: "Tag"},
@@ -419,6 +426,10 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 		},
 		"ModifyLaunchTemplate": {
 			"DefaultVersion": {Name: "SetDefaultVersion"},
+		},
+		"ModifyNetworkInterfaceAttribute": {
+			"AssociatedSubnetIds": {Name: "AssociatedSubnetId"},
+			"Groups":              {Name: "SecurityGroupId"},
 		},
 		"ModifySecurityGroupRules": {
 			"SecurityGroupRules": {Name: "SecurityGroupRule"},

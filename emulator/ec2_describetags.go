@@ -99,6 +99,7 @@ func ec2TagScanTargets() []ec2TagScanTarget {
 		{namespace: "lt", resourceType: "launch-template"},
 		{namespace: "nat", resourceType: "natgateway"},
 		{namespace: "acl", resourceType: "network-acl"},
+		{namespace: "eni", resourceType: "network-interface"},
 		{namespace: "placement_group", resourceType: "placement-group", idMember: "group_id"},
 		{namespace: "rtb", resourceType: "route-table"},
 		{namespace: "sg", resourceType: "security-group"},

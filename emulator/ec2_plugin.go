@@ -69,6 +69,12 @@ type EC2Plugin struct {
 	// [EC2Plugin.lockTagWrite]. ModifyInstanceCreditSpecification takes it around its instance
 	// writes.
 	tagMu sync.Mutex
+
+	// addrMu serializes every read-check-write of a subnet's address allocations and of a
+	// network interface's record (#1592, #1522); see [EC2Plugin.beginAddrTxn]. It sits after
+	// sgMu and before tagMu: where sgMu is held too, sgMu is taken first, and a tag write naming a
+	// network interface takes it before tagMu ([EC2Plugin.lockTagWrite]).
+	addrMu sync.Mutex
 }
 
 // Name returns the service name "ec2".
@@ -143,6 +149,16 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.createDefaultSubnet(ctx, req)
 	case "DescribeNetworkInterfaces":
 		return p.describeNetworkInterfaces(ctx, req)
+	case "CreateNetworkInterface":
+		return p.createNetworkInterface(ctx, req)
+	case "AttachNetworkInterface":
+		return p.attachNetworkInterface(ctx, req)
+	case "DetachNetworkInterface":
+		return p.detachNetworkInterface(ctx, req)
+	case "DeleteNetworkInterface":
+		return p.deleteNetworkInterface(ctx, req)
+	case "ModifyNetworkInterfaceAttribute":
+		return p.modifyNetworkInterfaceAttribute(ctx, req)
 	case "DescribeVpcs":
 		return p.describeVPCs(ctx, req)
 	case "DeleteVpc":
@@ -539,8 +555,8 @@ func (p *EC2Plugin) launchInstances(
 	//
 	// Every declared interface is parsed, not just index 1 (#455). The top-level
 	// fallbacks below read the *primary* interface, which is the one whose values
-	// real EC2 reports at the top level of an instance — see [ec2PrimaryInterface]
-	// for why that is the lowest device index rather than the first parameter index.
+	// real EC2 reports at the top level of an instance: the one at device index 0 on
+	// network card 0, whatever parameter index declares it — see [ec2PrimaryInterface].
 	networkInterfaces := ec2ParseNetworkInterfaces(req.Params, "")
 	ec2SortInterfacesByDeviceIndex(networkInterfaces)
 
@@ -554,6 +570,8 @@ func (p *EC2Plugin) launchInstances(
 	// substrate's fleet stamp is an instance tag with no volume-scoped counterpart, so
 	// there is nothing for the caller-named-tags rule to distinguish.
 	volumeTags := ec2LaunchTagsForResource(req.Params, "volume")
+	// And the interfaces it creates, scoped to "network-interface" (#1522), by the same rules.
+	interfaceTags := ec2LaunchTagsForResource(req.Params, "network-interface")
 	primaryIfc := ec2PrimaryInterface(networkInterfaces)
 	if subnetID == "" && primaryIfc != nil {
 		subnetID = primaryIfc.SubnetID
@@ -700,6 +718,9 @@ func (p *EC2Plugin) launchInstances(
 		if len(volumeTags) == 0 {
 			volumeTags = ltData.VolumeTagSpecifications
 		}
+		if len(interfaceTags) == 0 {
+			interfaceTags = ltData.NetworkInterfaceTagSpecifications
+		}
 	}
 
 	// The instance-type default is resolved last, so it applies only when neither the
@@ -817,6 +838,27 @@ func (p *EC2Plugin) launchInstances(
 	if awsErr := ec2CheckTagLimit(nil, volumeTags); awsErr != nil {
 		return nil, "", nil, awsErr
 	}
+	if awsErr := ec2CheckTagRules(interfaceTags); awsErr != nil {
+		return nil, "", nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, interfaceTags); awsErr != nil {
+		return nil, "", nil, awsErr
+	}
+
+	// A primary interface named by NetworkInterfaceId supplies the subnet and groups a launch
+	// naming neither lands with (#1522); see [EC2Plugin.ec2PrimaryFromExisting].
+	if primary := ec2PrimaryInterface(networkInterfaces); primary != nil && primary.NetworkInterfaceID != "" {
+		eniSubnet, eniGroups, eniErr := p.ec2PrimaryFromExisting(reqCtx, primary)
+		if eniErr != nil {
+			return nil, "", nil, eniErr
+		}
+		if subnetID == "" {
+			subnetID = eniSubnet
+		}
+		if len(securityGroupIDs) == 0 {
+			securityGroupIDs = eniGroups
+		}
+	}
 
 	// The groups the request or its template named are checked for existence here,
 	// before anything below is written (#673). The membership
@@ -856,6 +898,7 @@ func (p *EC2Plugin) launchInstances(
 	// sgMu — is InvalidSubnetID.NotFound, rather than an instance recorded in a subnet nothing
 	// holds.
 	var targetVPCID string
+	var targetSubnet EC2Subnet
 	if subnetID != "" {
 		subData, subErr := p.state.Get(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+subnetID)
 		if subErr != nil {
@@ -868,6 +911,7 @@ func (p *EC2Plugin) launchInstances(
 			var sub EC2Subnet
 			if json.Unmarshal(subData, &sub) == nil {
 				targetVPCID = sub.VPCID
+				targetSubnet = sub
 			}
 		}
 	}
@@ -898,8 +942,24 @@ func (p *EC2Plugin) launchInstances(
 		}
 	}
 
-	reservationID := generateReservationID(reqCtx.IDs)
 	now := p.tc.Now().UTC().Format(time.RFC3339)
+	// Every instance's interfaces and addresses are allocated here, after every other refusal
+	// and before the first write, so a launch that cannot have an address writes nothing
+	// (#1592, #1522); see ec2_eni_launch.go.
+	addrTxn := p.beginAddrTxn(reqCtx)
+	defer addrTxn.close()
+	interfacePlans, err := p.planLaunchInterfaces(reqCtx, addrTxn, ec2LaunchNetwork{
+		subnet:     targetSubnet,
+		groups:     filterEmpty(securityGroupIDs),
+		declared:   networkInterfaces,
+		primaryIP:  req.Params["PrivateIpAddress"],
+		launchTime: now,
+	}, maxCount)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	reservationID := generateReservationID(reqCtx.IDs)
 	var instances []EC2Instance
 	var spotRequests []EC2SpotInstanceRequest
 
@@ -911,7 +971,7 @@ func (p *EC2Plugin) launchInstances(
 			InstanceType:       instanceType,
 			State:              EC2InstanceState{Code: 16, Name: "running"},
 			SubnetID:           subnetID,
-			PrivateIPAddress:   fmt.Sprintf("172.31.%d.%d", i+1, i+10),
+			PrivateIPAddress:   interfacePlans[i][0].rec.PrivateIPAddress,
 			SecurityGroupIDs:   filterEmpty(securityGroupIDs),
 			LaunchTime:         now,
 			AccountID:          reqCtx.AccountID,
@@ -983,9 +1043,9 @@ func (p *EC2Plugin) launchInstances(
 			inst.AvailabilityZone = reqCtx.Region + "a"
 		}
 
-		// Record the interfaces last, since the primary's address and DNS name are
-		// the instance's own and those were only just resolved.
-		p.ec2AttachInterfaces(reqCtx.IDs, &inst, networkInterfaces, i, reqCtx.Region)
+		// The instance's networking is its primary interface's; the interface IDs a declared
+		// specification left unnamed are drawn here, from the request's own mint (#1522).
+		ec2ApplyPlanToInstance(reqCtx.IDs, &inst, interfacePlans[i])
 
 		data, err := json.Marshal(inst)
 		if err != nil {
@@ -1013,6 +1073,9 @@ func (p *EC2Plugin) launchInstances(
 			}
 			spotRequests = append(spotRequests, sir)
 		}
+	}
+	if err := p.finishLaunchInterfaces(reqCtx, addrTxn, instances, interfacePlans, interfaceTags); err != nil {
+		return nil, "", nil, err
 	}
 
 	return instances, reservationID, spotRequests, nil
@@ -1138,7 +1201,8 @@ type ec2InstanceItem struct {
 //
 // mappings is the instance's block device set, resolved by the caller: both callers
 // read every volume in the account and region once and bucket by instance, because a
-// per-instance read would turn one List into an instances × volumes scan.
+// per-instance read would turn one List into an instances × volumes scan. interfaces is
+// read the same way, through [EC2Plugin.ec2InterfacesByInstance].
 //
 // metadataState is the metadataOptions state to report. It is the one member the two
 // responses deliberately differ on: every example output on the CLI's run-instances page
@@ -1148,6 +1212,7 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 	reqCtx *RequestContext,
 	inst EC2Instance,
 	mappings []ec2BlockDeviceMappingItem,
+	interfaces *ec2InterfaceIndex,
 	metadataState string,
 ) ec2InstanceItem {
 	item := ec2InstanceItem{
@@ -1168,10 +1233,10 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 			GroupName:        inst.PlacementGroupName,
 			GroupID:          inst.PlacementGroupID,
 		},
-		Groups:              p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs),
+		Groups:              p.ec2GroupItems(reqCtx, ec2InstanceGroups(inst, interfaces)),
 		Architecture:        ec2InstanceArchitecture(inst),
 		BlockDeviceMappings: mappings,
-		NetworkInterfaces:   p.ec2NetworkInterfaceItems(reqCtx, inst),
+		NetworkInterfaces:   p.ec2NetworkInterfaceItems(reqCtx, ec2InstanceInterfaces(inst, interfaces)),
 
 		InstanceLifecycle:     inst.InstanceLifecycle,
 		SpotInstanceRequestID: inst.SpotInstanceRequestID,
@@ -1187,95 +1252,6 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 		item.Tags = append(item.Tags, ec2TagItem{Key: t.Key, Value: t.Value}) //nolint:staticcheck // XML tags differ from EC2Tag's JSON tags.
 	}
 	return item
-}
-
-// ec2NetworkInterfaceItem is one networkInterfaceSet>item, the shape both
-// RunInstances and DescribeInstances report an instance's interfaces in.
-//
-// Declared once at package level for the reason [ec2GroupItem] is: the two responses
-// carrying their own copies is what let their instance items drift apart before.
-// Only the members substrate records are emitted — see [EC2NetworkInterface].
-type ec2NetworkInterfaceItem struct {
-	NetworkInterfaceID string                    `xml:"networkInterfaceId"`
-	SubnetID           string                    `xml:"subnetId,omitempty"`
-	VpcID              string                    `xml:"vpcId,omitempty"`
-	Description        string                    `xml:"description,omitempty"`
-	OwnerID            string                    `xml:"ownerId"`
-	Status             string                    `xml:"status"`
-	PrivateIPAddress   string                    `xml:"privateIpAddress,omitempty"`
-	PrivateDNSName     string                    `xml:"privateDnsName,omitempty"`
-	Groups             []ec2GroupItem            `xml:"groupSet>item,omitempty"`
-	Attachment         ec2NetworkAttachmentItem  `xml:"attachment"`
-	InterfaceType      string                    `xml:"interfaceType,omitempty"`
-	PrivateIPAddresses []ec2NetworkPrivateIPItem `xml:"privateIpAddressesSet>item,omitempty"`
-}
-
-// ec2NetworkAttachmentItem is an interface's attachment element, which is where AWS
-// reports the device index rather than on the interface itself.
-//
-// InstanceID and InstanceOwnerID are members of DescribeNetworkInterfaces' attachment only;
-// an instance's own networkInterfaceSet leaves them empty, so they are omitted there.
-type ec2NetworkAttachmentItem struct {
-	InstanceID          string `xml:"instanceId,omitempty"`
-	InstanceOwnerID     string `xml:"instanceOwnerId,omitempty"`
-	DeviceIndex         int    `xml:"deviceIndex"`
-	Status              string `xml:"status"`
-	DeleteOnTermination bool   `xml:"deleteOnTermination"`
-	NetworkCardIndex    int    `xml:"networkCardIndex"`
-}
-
-// ec2NetworkPrivateIPItem is one entry in an interface's privateIpAddressesSet.
-//
-// Substrate records a single address per interface, so exactly one entry is emitted
-// and it is always primary. The set is still reported rather than omitted, because a
-// caller reading privateIpAddressesSet to find the primary address should find it
-// there rather than have to know substrate models no secondary addresses.
-type ec2NetworkPrivateIPItem struct {
-	PrivateIPAddress string `xml:"privateIpAddress"`
-	PrivateDNSName   string `xml:"privateDnsName,omitempty"`
-	Primary          bool   `xml:"primary"`
-}
-
-// ec2NetworkInterfaceItems builds the networkInterfaceSet entries for an instance.
-//
-// status is "in-use" and the attachment's is "attached" rather than the "attaching"
-// a real launch reports mid-attachment: substrate's instances are running by the time
-// RunInstances answers, so an interface still attaching would contradict the instance
-// state alongside it.
-func (p *EC2Plugin) ec2NetworkInterfaceItems(reqCtx *RequestContext, inst EC2Instance) []ec2NetworkInterfaceItem {
-	if len(inst.NetworkInterfaces) == 0 {
-		return nil
-	}
-	items := make([]ec2NetworkInterfaceItem, 0, len(inst.NetworkInterfaces))
-	for _, ifc := range inst.NetworkInterfaces {
-		item := ec2NetworkInterfaceItem{
-			NetworkInterfaceID: ifc.NetworkInterfaceID,
-			SubnetID:           ifc.SubnetID,
-			VpcID:              inst.VPCID,
-			Description:        ifc.Description,
-			OwnerID:            reqCtx.AccountID,
-			Status:             "in-use",
-			PrivateIPAddress:   ifc.PrivateIPAddress,
-			PrivateDNSName:     ifc.PrivateDNSName,
-			Groups:             p.ec2GroupItems(reqCtx, ifc.SecurityGroupIDs),
-			Attachment: ec2NetworkAttachmentItem{
-				DeviceIndex:         ifc.DeviceIndex,
-				Status:              "attached",
-				DeleteOnTermination: ifc.DeleteOnTermination,
-				NetworkCardIndex:    ifc.NetworkCardIndex,
-			},
-			InterfaceType: ifc.InterfaceType,
-		}
-		if ifc.PrivateIPAddress != "" {
-			item.PrivateIPAddresses = []ec2NetworkPrivateIPItem{{
-				PrivateIPAddress: ifc.PrivateIPAddress,
-				PrivateDNSName:   ifc.PrivateDNSName,
-				Primary:          true,
-			}}
-		}
-		items = append(items, item)
-	}
-	return items
 }
 
 // ec2GroupItems builds the groupSet entries for an instance's security groups.
@@ -1329,6 +1305,10 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 	if err != nil {
 		return nil, err
 	}
+	interfaces, err := p.ec2InterfacesByInstance(reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return nil, err
+	}
 
 	resp := response{
 		XMLNS:         "http://ec2.amazonaws.com/doc/2016-11-15/",
@@ -1343,7 +1323,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		// variable is a copy, so nothing here reaches state.
 		inst.State = ec2ReportedTransition(inst.State)
 		resp.Instances = append(resp.Instances,
-			p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID], ec2MetadataOptionsPending))
+			p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID], interfaces, ec2MetadataOptionsPending))
 	}
 
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -1513,6 +1493,10 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 	if err != nil {
 		return nil, err
 	}
+	interfaces, err := p.ec2InterfacesByInstance(reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return nil, err
+	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	resMap := make(map[string]*ec2ReservationItem)
@@ -1542,7 +1526,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			continue
 		}
 
-		item := p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID], ec2MetadataOptionsApplied)
+		item := p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID], interfaces, ec2MetadataOptionsApplied)
 
 		if _, ok := resMap[inst.ReservationID]; !ok {
 			resMap[inst.ReservationID] = &ec2ReservationItem{
@@ -1659,6 +1643,13 @@ func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, h
 		}
 		if err := p.state.Put(context.Background(), ec2Namespace, keys[i], newData); err != nil {
 			return nil, fmt.Errorf("ec2 terminateInstances state.Put: %w", err)
+		}
+		// Its interfaces are deleted or detached and its addresses released (#1522, #1592),
+		// once: an instance already terminated settled them the first time.
+		if prev.Name != ec2StateTerminated {
+			if err := p.settleInstanceInterfaces(reqCtx, inst); err != nil {
+				return nil, err
+			}
 		}
 		// Settle the instance's volumes: delete those whose attachment says to, and
 		// release the rest. A volume left in-use on a terminated instance would be a
@@ -2327,7 +2318,11 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 		if !ec2SubnetMatchesFilters(subnet, filters) {
 			continue
 		}
-		resp.Subnets = append(resp.Subnets, ec2SubnetXML(subnet))
+		item, itemErr := p.ec2SubnetItemFor(context.Background(), subnet)
+		if itemErr != nil {
+			return nil, itemErr
+		}
+		resp.Subnets = append(resp.Subnets, item)
 	}
 	if err := ids.unresolved(); err != nil {
 		return nil, err
@@ -2367,6 +2362,9 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("ec2 deleteSubnet: %w", err)
 	}
 	if err := p.deleteSubnetNetworkACLAssociation(context.Background(), reqCtx, subnetID); err != nil {
+		return nil, err
+	}
+	if err := p.deleteAddressBook(reqCtx, subnetID); err != nil {
 		return nil, err
 	}
 	type response struct {
@@ -3672,6 +3670,10 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := p.materializeTagTargets(reqCtx, resourceIDs, tags); err != nil {
 		return nil, err
 	}
+	// So is an older instance's network interface, by storing that instance's interfaces (#1522).
+	if err := p.materializeInterfaceTagTargets(reqCtx, resourceIDs); err != nil {
+		return nil, err
+	}
 	for _, id := range resourceIDs {
 		if err := ec2ApplyTagsToResource(p.state, reqCtx, id, tags, false); err != nil {
 			return nil, err
@@ -3891,6 +3893,10 @@ func ec2TaggableResource(state StateManager, reqCtx *RequestContext, id string) 
 		// elastic-ip, and the ARN carries the allocation ID — which is the ID CreateTags
 		// takes for an address, so no translation is needed here either.
 		return ec2Taggable{stateKey: "eip:" + scope + "/" + id, arnType: "elastic-ip", arnID: id}, true
+	case strings.HasPrefix(id, "eni-"):
+		// A network interface (#1522), under the ARN type the Service Authorization Reference
+		// publishes, network-interface.
+		return ec2Taggable{stateKey: ec2ENIKey(acct, region, id), arnType: "network-interface", arnID: id}, true
 	case strings.HasPrefix(id, "nat-"):
 		// natgateway, unhyphenated, alone among the fifteen.
 		return ec2Taggable{stateKey: "nat:" + scope + "/" + id, arnType: "natgateway", arnID: id}, true
@@ -6483,9 +6489,10 @@ func ec2NatClientTokenKey(accountID, region, token string) string {
 //
 // A named AllocationId that resolves to no Elastic IP is InvalidAllocationID.NotFound, from the
 // Common Error Types list the page links to (#1188; substrate's reading, #671), so a public
-// gateway is never built with no public IP. PrivateIpAddress is honored when given and must be
-// an IPv4 address inside the subnet's CIDR block, else InvalidParameterValue, also substrate's
-// reading; when absent the address is derived from the gateway ID.
+// gateway is never built with no public IP. PrivateIpAddress is honored when given, through the
+// subnet's address allocator (#1592), which refuses one outside the subnet's block or reserved
+// with InvalidParameterValue and one already held with InvalidIPAddress.InUse; when absent the
+// gateway takes the subnet's next free address.
 func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	subnetID := req.Params["SubnetId"]
 	allocationID := req.Params["AllocationId"]
@@ -6502,6 +6509,14 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		}
 	}
 	fingerprint := ec2RequestFingerprint(req.Params)
+
+	// Held from the client-token check through the address book's commit and the token's write,
+	// as a launch holds it from its checks through its writes: a concurrent DeleteSubnet — which
+	// holds it across its dependency check and delete — cannot remove the subnet this gateway is
+	// being given an address in (#1592), and two concurrent creates with one token cannot both
+	// find it unused and create two gateways.
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	if clientToken != "" {
 		resp, found, err := p.natGatewayForClientToken(reqCtx, clientToken, fingerprint)
 		if err != nil || found {
@@ -6540,21 +6555,25 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		}
 	}
 
-	privateIP := req.Params["PrivateIpAddress"]
-	if privateIP != "" {
-		if awsErr := ec2CheckAddressInSubnet(privateIP, subnet.CIDRBlock); awsErr != nil {
-			return nil, awsErr
-		}
+	tags := ec2LaunchTagsForResource(req.Params, "natgateway")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
+	}
+
+	// The gateway's address comes from its subnet (#1592): the one PrivateIpAddress names, or the
+	// subnet's next free one. See ec2_ip_alloc.go.
+	addrTxn := p.beginAddrTxn(reqCtx)
+	defer addrTxn.close()
+	privateIP, err := addrTxn.allocate(subnet, req.Params["PrivateIpAddress"], "")
+	if err != nil {
+		return nil, err
 	}
 
 	natID := generateNATGatewayID(reqCtx.IDs)
-	if privateIP == "" {
-		// Compute a stable private IP using FNV hash on the NAT gateway ID.
-		h := fnv.New32a()
-		h.Write([]byte(natID))
-		n := h.Sum32()
-		privateIP = fmt.Sprintf("10.0.%d.%d", (n>>8)&0xFF, n&0xFF)
-	}
+	addrTxn.setHolder(subnetID, privateIP, natID)
 
 	gw := EC2NATGateway{
 		NatGatewayID:     natID,
@@ -6572,13 +6591,7 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		gw.PublicIP = eip.PublicIP
 	}
 
-	gw.Tags = ec2LaunchTagsForResource(req.Params, "natgateway")
-	if awsErr := ec2CheckTagRules(gw.Tags); awsErr != nil {
-		return nil, awsErr
-	}
-	if awsErr := ec2CheckTagLimit(nil, gw.Tags); awsErr != nil {
-		return nil, awsErr
-	}
+	gw.Tags = tags
 
 	data, marshalErr := json.Marshal(gw)
 	if marshalErr != nil {
@@ -6589,6 +6602,9 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("ec2 createNatGateway put: %w", err)
 	}
 	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "nat_ids", natID); err != nil {
+		return nil, err
+	}
+	if err := addrTxn.commit(); err != nil {
 		return nil, err
 	}
 	if clientToken != "" {
@@ -6696,29 +6712,6 @@ func ec2RequestFingerprint(params map[string]string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// ec2CheckAddressInSubnet refuses a PrivateIpAddress that is not an IPv4 address inside the
-// subnet's CIDR block. The page publishes no code, so InvalidParameterValue is substrate's reading
-// of the Common Error Types list.
-func ec2CheckAddressInSubnet(address, cidr string) *AWSError {
-	invalid := func(why string) *AWSError {
-		return &AWSError{
-			Code:       "InvalidParameterValue",
-			Message:    "Value (" + address + ") for parameter PrivateIpAddress is invalid. " + why,
-			HTTPStatus: http.StatusBadRequest,
-		}
-	}
-	ip := net.ParseIP(address)
-	if ip == nil || ip.To4() == nil {
-		return invalid("It is not an IPv4 address.")
-	}
-	// A subnet with no parseable CIDR block constrains nothing substrate can check, so only a
-	// parsed block can refuse.
-	if _, network, err := net.ParseCIDR(cidr); err == nil && !network.Contains(ip) {
-		return invalid("It is not in the subnet's CIDR block " + cidr + ".")
-	}
-	return nil
-}
-
 // describeNatGateways reports the NAT gateways the account holds in the region, narrowed by
 // NatGatewayId.N and by the filters [ec2NatGatewayFilterSpec] evaluates, one page at a time.
 //
@@ -6808,6 +6801,18 @@ func (p *EC2Plugin) deleteNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 	var gw EC2NATGateway
 	if unmarshalErr := json.Unmarshal(data, &gw); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 deleteNatGateway unmarshal: %w", unmarshalErr)
+	}
+	// A deleted gateway no longer holds its address (#1592).
+	if gw.State != "deleted" {
+		addrTxn := p.beginAddrTxn(reqCtx)
+		releaseErr := addrTxn.release(gw.SubnetID, []string{gw.PrivateIP}, gw.NatGatewayID)
+		if releaseErr == nil {
+			releaseErr = addrTxn.commit()
+		}
+		addrTxn.close()
+		if releaseErr != nil {
+			return nil, releaseErr
+		}
 	}
 	gw.State = "deleted"
 	newData, err := json.Marshal(gw)
@@ -7359,13 +7364,14 @@ func parseLaunchTemplateData(params map[string]string) (EC2LaunchTemplateData, *
 		// One parse per scope, into a field per scope. The instance scope keeps the
 		// original field because widening it would break replay; see
 		// [EC2LaunchTemplateData.TagSpecifications] (#670).
-		TagSpecifications:       ec2TagSpecificationTags(params, ltPrefix, "instance"),
-		VolumeTagSpecifications: ec2TagSpecificationTags(params, ltPrefix, "volume"),
-		NetworkInterfaces:       interfaces,
-		BlockDeviceMappings:     ec2ParseBlockDeviceMappings(params, ltPrefix),
-		SecurityGroupIDs:        indexedParams(params, ltPrefix+"SecurityGroupId.%d"),
-		DisableAPITermination:   disableAPITermination,
-		CPUCredits:              cpuCredits,
+		TagSpecifications:                 ec2TagSpecificationTags(params, ltPrefix, "instance"),
+		VolumeTagSpecifications:           ec2TagSpecificationTags(params, ltPrefix, "volume"),
+		NetworkInterfaceTagSpecifications: ec2TagSpecificationTags(params, ltPrefix, "network-interface"),
+		NetworkInterfaces:                 interfaces,
+		BlockDeviceMappings:               ec2ParseBlockDeviceMappings(params, ltPrefix),
+		SecurityGroupIDs:                  indexedParams(params, ltPrefix+"SecurityGroupId.%d"),
+		DisableAPITermination:             disableAPITermination,
+		CPUCredits:                        cpuCredits,
 	}
 	if !metadata.empty() {
 		data.MetadataOptions = &metadata

@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -11,20 +10,19 @@ import (
 	"strings"
 )
 
-// DescribeNetworkInterfaces (#1519).
+// DescribeNetworkInterfaces (#1519, #1522).
 //
 // The Terraform AWS provider lists the network interfaces in a subnet, or using a security
 // group, before it deletes either, so that it can detach and delete any a Lambda function or a
-// load balancer left behind. The call was unrouted, so `terraform destroy` of any configuration
-// holding a subnet or a security group failed.
+// load balancer left behind; aws_network_interface and aws_network_interface_attachment read
+// their state through it.
 //
-// The interfaces reported are the ones substrate holds: those RunInstances recorded on an
-// instance from its NetworkInterface.N specifications ([EC2Plugin.ec2AttachInterfaces]), for every
-// instance not yet terminated. Substrate mints no interface for an instance launched without one,
-// for a Lambda function or for a load balancer, so those have none to report. An ID the caller
-// names that no instance holds is the InvalidNetworkInterfaceID.NotFound the EC2 error reference
-// publishes, through [ec2NetworkInterfaceIDKind]. MaxResults and NextToken follow every paginated
-// describe (#917): the published range is 5 to 1000.
+// The interfaces reported are every stored one (ec2_eni.go), available or attached, and, for an
+// instance written before interfaces were stored, the ones [ec2LegacyInterfaces] synthesizes for
+// it. Substrate mints no interface for a Lambda function or a load balancer, so those have none
+// to report. An ID the caller names that nothing holds is the InvalidNetworkInterfaceID.NotFound
+// the EC2 error reference publishes, through [ec2NetworkInterfaceIDKind]. MaxResults and
+// NextToken follow every paginated describe (#917): the published range is 5 to 1000.
 
 // ec2NetworkInterfaceIDKind is the eni- family, with both codes from the EC2 error reference.
 var ec2NetworkInterfaceIDKind = ec2IDKind{
@@ -34,84 +32,119 @@ var ec2NetworkInterfaceIDKind = ec2IDKind{
 
 // ec2NetworkInterfaceFilterSpec is DescribeNetworkInterfaces' filter set, from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeNetworkInterfaces.html.
-// The evaluated names are the members an instance's recorded interface carries; the rest name
-// state substrate does not keep (addresses, associations, attachment times) and are inert.
+// The evaluated names are the members a stored interface carries; the rest name state substrate
+// does not keep (associations, IPv6 addresses, MAC addresses, requesters) and are inert.
 func ec2NetworkInterfaceFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
 		tagValueFilter: true,
 		evaluated: []string{
+			"addresses.primary", "addresses.private-ip-address",
+			"attachment.attach-time", "attachment.attachment-id", "attachment.delete-on-termination",
 			"attachment.device-index", "attachment.instance-id", "attachment.instance-owner-id",
-			"attachment.status", "availability-zone", "description", "group-id",
+			"attachment.status", "availability-zone", "description", "group-id", "group-name",
 			"interface-type", "network-interface-id", "owner-id", "private-dns-name",
-			"private-ip-address", "status", "subnet-id", "tag-key", "vpc-id",
+			"private-ip-address", "requester-managed", "source-dest-check", "status", "subnet-id",
+			"tag-key", "vpc-id",
 		},
 		accepted: []string{
-			"addresses.association.owner-id", "addresses.association.public-ip", "addresses.primary",
-			"addresses.private-ip-address", "association.allocation-id", "association.association-id",
+			"addresses.association.owner-id", "addresses.association.public-ip",
+			"association.allocation-id", "association.association-id",
 			"association.ip-owner-id", "association.public-dns-name", "association.public-ip",
-			"attachment.attach-time", "attachment.attachment-id", "attachment.delete-on-termination",
-			"group-name", "ipv6-addresses.ipv6-address", "mac-address", "requester-id",
-			"requester-managed", "source-dest-check",
+			"ipv6-addresses.ipv6-address", "mac-address", "requester-id",
 		},
 	}
 }
 
-// ec2NetworkInterfaceRecord is one interface and the instance it is attached to.
-type ec2NetworkInterfaceRecord struct {
-	ifc  EC2NetworkInterface
-	inst EC2Instance
-	item ec2NetworkInterfaceItem
+// ec2AnyAccepted reports whether the filter accepts any of candidates.
+func ec2AnyAccepted(values, candidates []string) bool {
+	for _, c := range candidates {
+		if ec2FilterAccepts(values, c) {
+			return true
+		}
+	}
+	return false
 }
 
-// matches reports whether the record satisfies one evaluated filter. Interfaces carry no tags
-// of their own, so a tag filter selects nothing.
-func (r ec2NetworkInterfaceRecord) matches(name string, values []string) bool {
-	switch name {
-	case "attachment.device-index":
-		return ec2FilterAccepts(values, strconv.Itoa(r.ifc.DeviceIndex))
-	case "attachment.instance-id":
-		return ec2FilterAccepts(values, r.inst.InstanceID)
-	case "attachment.instance-owner-id", "owner-id":
-		return ec2FilterAccepts(values, r.inst.AccountID)
-	case "attachment.status":
-		return ec2FilterAccepts(values, "attached")
-	case "availability-zone":
-		return ec2FilterAccepts(values, r.inst.AvailabilityZone)
-	case "description":
-		return ec2FilterAccepts(values, r.ifc.Description)
-	case "group-id":
-		for _, g := range r.ifc.SecurityGroupIDs {
-			if ec2FilterAccepts(values, g) {
+// ec2NetworkInterfaceAttachmentValues are the attachment members the attachment.* filters
+// compare, keyed by filter name. Every attachment.* name the filter set accepts is evaluated.
+func ec2NetworkInterfaceAttachmentValues(rec EC2NetworkInterfaceRecord) map[string]string {
+	a := rec.Attachment
+	return map[string]string{
+		"attachment.attach-time":           a.AttachTime,
+		"attachment.attachment-id":         a.AttachmentID,
+		"attachment.delete-on-termination": strconv.FormatBool(a.DeleteOnTermination),
+		"attachment.device-index":          strconv.Itoa(a.DeviceIndex),
+		"attachment.instance-id":           a.InstanceID,
+		"attachment.instance-owner-id":     rec.AccountID,
+		"attachment.status":                ec2AttachmentStatus(a),
+	}
+}
+
+// ec2NetworkInterfaceMatches reports whether rec satisfies one evaluated filter. groupNames are
+// the names of the interface's groups, for group-name.
+func ec2NetworkInterfaceMatches(rec EC2NetworkInterfaceRecord, groupNames []string, name string, values []string) bool {
+	if strings.HasPrefix(name, "attachment.") {
+		if rec.Attachment == nil {
+			return false
+		}
+		return ec2FilterAccepts(values, ec2NetworkInterfaceAttachmentValues(rec)[name])
+	}
+	if key, ok := strings.CutPrefix(name, "tag:"); ok {
+		for _, t := range rec.Tags {
+			if t.Key == key && ec2FilterAccepts(values, t.Value) {
 				return true
 			}
 		}
 		return false
-	case "interface-type":
-		return ec2FilterAccepts(values, r.ifc.InterfaceType)
-	case "network-interface-id":
-		return ec2FilterAccepts(values, r.ifc.NetworkInterfaceID)
-	case "private-dns-name":
-		return ec2FilterAccepts(values, r.ifc.PrivateDNSName)
-	case "private-ip-address":
-		return ec2FilterAccepts(values, r.ifc.PrivateIPAddress)
-	case "status":
-		return ec2FilterAccepts(values, "in-use")
-	case "subnet-id":
-		return ec2FilterAccepts(values, r.ifc.SubnetID)
-	case "vpc-id":
-		return ec2FilterAccepts(values, r.inst.VPCID)
-	case "tag-key":
-		return false
 	}
-	if strings.HasPrefix(name, "tag:") {
-		return false
+	interfaceType := rec.InterfaceType
+	if interfaceType == "" {
+		interfaceType = "interface"
+	}
+	var primaryFlags []string
+	if rec.PrivateIPAddress != "" {
+		primaryFlags = append(primaryFlags, "true")
+	}
+	if len(rec.SecondaryPrivateIPAddresses) > 0 {
+		primaryFlags = append(primaryFlags, "false")
+	}
+	var tagKeys []string
+	for _, t := range rec.Tags {
+		tagKeys = append(tagKeys, t.Key)
+	}
+	single := map[string]string{
+		"availability-zone":    rec.AvailabilityZone,
+		"description":          rec.Description,
+		"interface-type":       interfaceType,
+		"network-interface-id": rec.NetworkInterfaceID,
+		"owner-id":             rec.AccountID,
+		"private-dns-name":     rec.PrivateDNSName,
+		"private-ip-address":   rec.PrivateIPAddress,
+		"requester-managed":    "false",
+		"source-dest-check":    strconv.FormatBool(!rec.SourceDestCheckDisabled),
+		"status":               rec.Status,
+		"subnet-id":            rec.SubnetID,
+		"vpc-id":               rec.VPCID,
+	}
+	if v, ok := single[name]; ok {
+		return ec2FilterAccepts(values, v)
+	}
+	multi := map[string][]string{
+		"addresses.private-ip-address": rec.addresses(),
+		"addresses.primary":            primaryFlags,
+		"group-id":                     rec.SecurityGroupIDs,
+		"group-name":                   groupNames,
+		"tag-key":                      tagKeys,
+	}
+	if v, ok := multi[name]; ok {
+		return ec2AnyAccepted(values, v)
 	}
 	// An accepted, inert name selects every interface.
 	return true
 }
 
-// describeNetworkInterfaces reports the interfaces the account's live instances hold in the
-// region, narrowed by NetworkInterfaceId.N and Filter.N, one page at a time.
+// describeNetworkInterfaces reports the account's interfaces in the region, narrowed by
+// NetworkInterfaceId.N and Filter.N, one page at a time.
 func (p *EC2Plugin) describeNetworkInterfaces(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	ifcIDs := extractIndexedParams(req.Params, "NetworkInterfaceId")
 	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "NetworkInterfaceId", ifcIDs); awsErr != nil {
@@ -134,50 +167,28 @@ func (p *EC2Plugin) describeNetworkInterfaces(reqCtx *RequestContext, req *AWSRe
 	}
 	filters := extractEC2Filters(req.Params)
 
-	keys, err := p.state.List(context.Background(), ec2Namespace,
-		"instance:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	// The older instances' state — markers first — is read before the records, the reverse of
+	// the order storing them writes in, and a stored record wins over a synthesized one with its
+	// ID, so a describe racing a store reports each interface once (see ec2_eni_legacy.go).
+	ctx := context.Background()
+	legacy, err := p.ec2LegacyStateFor(ctx, reqCtx.AccountID, reqCtx.Region)
 	if err != nil {
-		return nil, fmt.Errorf("ec2 describeNetworkInterfaces list instances: %w", err)
-	}
-	var records []ec2NetworkInterfaceRecord
-	for _, k := range keys {
-		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var inst EC2Instance
-		if json.Unmarshal(data, &inst) != nil || inst.State.Name == ec2StateTerminated {
-			continue
-		}
-		// The element is the one RunInstances and DescribeInstances render for the same
-		// interface, with the attachment's instance named, which only this response carries.
-		items := p.ec2NetworkInterfaceItems(reqCtx, inst)
-		for i, ifc := range inst.NetworkInterfaces {
-			item := items[i]
-			item.Attachment.InstanceID = inst.InstanceID
-			item.Attachment.InstanceOwnerID = inst.AccountID
-			rec := ec2NetworkInterfaceRecord{ifc: ifc, inst: inst, item: item}
-			if !ids.match(ifc.NetworkInterfaceID) {
-				continue
-			}
-			selected := true
-			for name, values := range filters {
-				if !rec.matches(name, values) {
-					selected = false
-					break
-				}
-			}
-			if selected {
-				records = append(records, rec)
-			}
-		}
-	}
-	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	records, err := p.ec2NetworkInterfaces(ctx, reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return nil, err
+	}
+	var synthesized []EC2NetworkInterfaceRecord
+	if err := ec2ScanRecords(ctx, p.state, "instance:"+reqCtx.AccountID+"/"+reqCtx.Region+"/", func(_ string, inst EC2Instance) {
+		synthesized = append(synthesized, ec2LegacyUnstored(inst, legacy)...)
+	}); err != nil {
+		return nil, fmt.Errorf("ec2 describeNetworkInterfaces instances: %w", err)
+	}
+	records = ec2MergeSynthesized(records, synthesized)
 	// Ordered by ID, so a page boundary names the same interface on every call.
 	sort.Slice(records, func(i, j int) bool {
-		return records[i].ifc.NetworkInterfaceID < records[j].ifc.NetworkInterfaceID
+		return records[i].NetworkInterfaceID < records[j].NetworkInterfaceID
 	})
 
 	type response struct {
@@ -187,8 +198,28 @@ func (p *EC2Plugin) describeNetworkInterfaces(reqCtx *RequestContext, req *AWSRe
 		NextToken         string                    `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
-	for _, r := range records {
-		resp.NetworkInterfaces = append(resp.NetworkInterfaces, r.item)
+	for _, rec := range records {
+		if !ids.match(rec.NetworkInterfaceID) {
+			continue
+		}
+		item := p.ec2NetworkInterfaceItemFor(reqCtx, rec, false)
+		var groupNames []string
+		for _, g := range item.Groups {
+			groupNames = append(groupNames, g.GroupName)
+		}
+		selected := true
+		for name, values := range filters {
+			if !ec2NetworkInterfaceMatches(rec, groupNames, name, values) {
+				selected = false
+				break
+			}
+		}
+		if selected {
+			resp.NetworkInterfaces = append(resp.NetworkInterfaces, item)
+		}
+	}
+	if err := ids.unresolved(); err != nil {
+		return nil, err
 	}
 	resp.NetworkInterfaces, resp.NextToken = ec2Page(resp.NetworkInterfaces, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
