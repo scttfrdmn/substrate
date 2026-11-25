@@ -681,11 +681,15 @@ func TestAutoScaling_InstanceRequirementsMatching(t *testing.T) {
 		{"burstable included", emulator.AutoScalingInstanceRequirements{
 			VCpuCount: emulator.AutoScalingRange{Min: f(2), Max: f(2)}, MemoryMiB: emulator.AutoScalingRange{Min: f(4096), Max: f(4096)},
 			BurstablePerformance: "included",
-		}, []string{"c5.large", "c5a.large", "t3.medium", "t3a.medium"}},
+		}, []string{"c5.large", "c5a.large", "t2.medium", "t3.medium", "t3a.medium"}},
 		{"burstable required", emulator.AutoScalingInstanceRequirements{
 			VCpuCount: emulator.AutoScalingRange{Min: f(2), Max: f(2)}, MemoryMiB: emulator.AutoScalingRange{Min: f(512), Max: f(1024)},
 			BurstablePerformance: "required", CPUManufacturers: []string{"amd"},
 		}, []string{"t3a.nano", "t3a.micro"}},
+		{"burstable required, intel", emulator.AutoScalingInstanceRequirements{
+			VCpuCount: emulator.AutoScalingRange{Min: f(1), Max: f(1)}, MemoryMiB: emulator.AutoScalingRange{Min: f(512), Max: f(2048)},
+			BurstablePerformance: "required", CPUManufacturers: []string{"intel"},
+		}, []string{"t2.nano", "t2.micro", "t2.small"}},
 		{"allowed with wildcard", emulator.AutoScalingInstanceRequirements{
 			VCpuCount: emulator.AutoScalingRange{Min: f(2)}, MemoryMiB: emulator.AutoScalingRange{Min: f(8192), Max: f(16384)},
 			AllowedInstanceTypes: []string{"m5*"},

@@ -235,6 +235,11 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		return nil
 	}
 	resources := a.buildResourceARNs(reqCtx, req)
+	for _, r := range resources {
+		if r.ReadErr != nil {
+			return fmt.Errorf("authz: read the tags of %s: %w", r.ARN, r.ReadErr)
+		}
+	}
 	now, haveClock := a.now()
 
 	goCtx := context.Background()
@@ -1069,6 +1074,11 @@ type authzResource struct {
 	// request-level ones. Auto Scaling's tagging actions are the one user: a request tagging
 	// several groups reports each group's own aws:TagKeys (#1460). Nil everywhere else.
 	Multi map[string][]string
+
+	// ReadErr is a failure to read the resource's tags. A request naming such a resource is
+	// refused with the error rather than decided against tags substrate could not read, so a
+	// tag-conditioned Deny cannot fail open. Only an EC2 security group rule sets it (#1490).
+	ReadErr error
 }
 
 // buildResourceARNs returns every resource the request names, each paired with

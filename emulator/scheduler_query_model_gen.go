@@ -267,6 +267,11 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 			"ImageIds":         {Name: "ImageId"},
 			"Owners":           {Name: "Owner"},
 		},
+		"DescribeInstanceCreditSpecifications": {
+			"Filters":          {Name: "Filter"},
+			"Filters[].Values": {Name: "Value"},
+			"InstanceIds":      {Name: "InstanceId"},
+		},
 		"DescribeInstanceStatus": {
 			"Filters":          {Name: "Filter"},
 			"Filters[].Values": {Name: "Value"},
@@ -338,6 +343,11 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 			"Filters[].Values": {Name: "Value"},
 			"RouteTableIds":    {Name: "RouteTableId"},
 		},
+		"DescribeSecurityGroupRules": {
+			"Filters":              {Name: "Filter"},
+			"Filters[].Values":     {Name: "Value"},
+			"SecurityGroupRuleIds": {Name: "SecurityGroupRuleId"},
+		},
 		"DescribeSecurityGroups": {
 			"Filters":          {Name: "Filter"},
 			"Filters[].Values": {Name: "Value"},
@@ -404,8 +414,14 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 			"BlockDeviceMappings": {Name: "BlockDeviceMapping"},
 			"Groups":              {Name: "GroupId"},
 		},
+		"ModifyInstanceCreditSpecification": {
+			"InstanceCreditSpecifications": {Name: "InstanceCreditSpecification"},
+		},
 		"ModifyLaunchTemplate": {
 			"DefaultVersion": {Name: "SetDefaultVersion"},
+		},
+		"ModifySecurityGroupRules": {
+			"SecurityGroupRules": {Name: "SecurityGroupRule"},
 		},
 		"ModifySnapshotAttribute": {
 			"GroupNames": {Name: "UserGroup"},

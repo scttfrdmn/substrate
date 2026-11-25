@@ -5,7 +5,7 @@
 
 ## Supported operations
 
-**All 114 operations the EC2 plugin routes have a row below.** The table and the plugin's dispatch
+**All 120 operations the EC2 plugin routes have a row below.** The table and the plugin's dispatch
 switch agree in both directions — no row names an action the switch does not handle, and no action
 the switch handles is missing a row. Thirty-six of the rows were added by
 [#1094](https://github.com/scttfrdmn/substrate/issues/1094), which is also where the count came
@@ -24,6 +24,10 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids); three of eighteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `availabilityZone`, and a [seeded transient state](#seeding-an-instance-state-progression) both in `instanceState` and to its own `instance-state-name` filter. Paginates on `MaxResults`/`NextToken`, with no published range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
+| DescribeInstanceCreditSpecifications | With `InstanceId.N`, each instance's `standard` or `unlimited` option (`standard` for a non-burstable type); without, the instances whose option is `unlimited`. `instance-id` filter; pages on `MaxResults` (5–1000) — see [Burstable credit specifications](#burstable-credit-specifications) |
+| ModifyInstanceCreditSpecification | Per-instance success or failure, with `InstanceCreditSpecification.NotSupported` for a non-burstable instance; `InvalidCpuCredits` and a duplicate instance refuse the request — see [Burstable credit specifications](#burstable-credit-specifications) |
+| GetDefaultCreditSpecification | The account's default option for a burstable family in the Region; `InvalidInstanceFamily` for any other family |
+| ModifyDefaultCreditSpecification | Sets that default for later launches, at once and without the five-minute limit AWS publishes — see [Burstable credit specifications](#burstable-credit-specifications) |
 | ModifyInstanceMetadataOptions | Each of the five options named replaces the instance's and the rest are kept, validated against the published values (`InvalidParameterValue`). The response's `instanceMetadataOptions` reports `pending` and every later `DescribeInstances` `applied`. A `terminated` instance is `IncorrectInstanceState`. See [Instance metadata options](#instance-metadata-options) |
 | CreateVpc | Stores `TagSpecification.N` scoped to `vpc` and `InstanceTenancy` (`default` or `dedicated`; anything else, `host` included, is `InvalidParameterValue`, since API_CreateVpc says host "cannot be used with this parameter"), both dropped before #1519. Renders the same VPC `DescribeVpcs` does, `ownerId`, `instanceTenancy` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters). Creates the VPC's main route table and, as of [#1492](https://github.com/scttfrdmn/substrate/issues/1492), its security group named `default` — the self-referencing all-traffic ingress rule and the all-traffic egress rule to `0.0.0.0/0` — see [A VPC's dependents](#a-vpc-s-dependents). As of [#1614](https://github.com/scttfrdmn/substrate/issues/1614) it also creates the VPC's default network ACL and associates the VPC with the Region's default DHCP option set — see [Network ACLs, DHCP option sets and flow logs](#network-acls-dhcp-option-sets-and-flow-logs) |
 | CreateDefaultVpc | Creates the [default VPC](#the-default-vpc) and everything AWS creates with one; `DefaultVpcAlreadyExists` when the Region has one. Clears the tombstone a deleted default VPC leaves |
@@ -33,8 +37,8 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | ModifyVpcAttribute | `VpcId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `EnableDnsSupport.Value`, `EnableDnsHostnames.Value` and `EnableNetworkAddressUsageMetrics.Value` are read under the spellings the page publishes, and each is readable back through `DescribeVpcAttribute` ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then the first two were read as `EnableDNSSupport.Value`/`EnableDNSHostnames.Value`, which no SDK sends, and every modify was discarded). One attribute per request, and hostnames only where DNS support is enabled ([#1554](https://github.com/scttfrdmn/substrate/issues/1554)) — see [VPC attributes and internet gateways](#vpc-attributes-and-internet-gateways) |
 | DescribeVpcAttribute | `VpcId` and `Attribute` are required; `Attribute` is one of `enableDnsSupport`, `enableDnsHostnames` and `enableNetworkAddressUsageMetrics` (`InvalidParameterValue` otherwise), and the response carries `vpcId` and that one attribute as `value` — the shape of the page's samples. A new VPC answers DNS support on and hostnames off; the [default VPC](#the-default-vpc) has both on. Network Address Usage metrics is a recorded flag: no metric is produced |
 | DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Refused with `DependencyViolation` while the VPC holds a subnet, an attached internet gateway, a security group other than `default`, a route table other than its main one, a network ACL other than its default one, a NAT gateway not yet `deleted`, or an instance not yet `terminated`, and nothing is written; otherwise its `default` security group, main route table, default network ACL and flow logs go with it — see [A VPC's dependents](#a-vpc-s-dependents). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again |
-| CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them). The subnet is associated with its VPC's default network ACL ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)) |
-| DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| CreateSubnet | `AvailabilityZoneId` is accepted in place of `AvailabilityZone` and resolved to the zone's name; both is `InvalidParameterCombination`, an ID of no zone `InvalidParameterValue`. `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them). The subnet is associated with its VPC's default network ACL ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)) |
+| DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); reports `availabilityZoneId`; sixteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifySubnetAttribute | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `MapPublicIpOnLaunch` is the one modelled attribute — it decides whether a launch into the subnet gets a public IPv4 address, and it is readable back through [`DescribeSubnets`](#a-subnet-reports-its-tags-and-filters-on-them) — and the other ten published parameters are unread. It is read as `MapPublicIpOnLaunch.Value`, the page's own spelling ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then it was read as `MapPublicIPOnLaunch.Value` and every SDK's modify was discarded). AWS's *"You can only modify one attribute at a time"* is not enforced, which is inert while one attribute is modelled |
 | DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids). A subnet still holding an instance that is not terminated, or a NAT gateway not yet `deleted`, is `DependencyViolation` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) — see [What a delete refuses on](#what-a-delete-refuses-on). A deleted subnet's network ACL association goes with it |
 | CreateSecurityGroup | `TagSpecification.N` scoped to `security-group`, answered in `tagSet`; an absent `VpcId` places the group in the [default VPC](#the-default-vpc), or is `VPCIdNotSpecified` without one; the name `default` is reserved (`InvalidParameterValue`), and a name another group in the same VPC holds, compared case-insensitively, is `InvalidGroup.Duplicate` ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)); a `VpcId` naming no VPC is `InvalidVpcID.NotFound` — see [Security group tags and rules](#security-group-tags-and-rules) |
@@ -43,7 +47,9 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules. A source the group already allows for the same protocol and ports is `InvalidPermission.Duplicate`, checked per source, and nothing is written ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)). IPv4 and IPv6 CIDRs are [canonicalised](#security-group-tags-and-rules) before they are compared or stored, an unparseable one is `InvalidParameterValue`, and `GroupName` names a group in the [default VPC](#the-default-vpc) ([#1553](https://github.com/scttfrdmn/substrate/issues/1553)) |
 | AuthorizeSecurityGroupEgress | Supports destination security groups. A duplicate is refused as for `AuthorizeSecurityGroupIngress` — including the all-traffic `0.0.0.0/0` rule every new group carries — and CIDRs and `GroupName` are read as there |
 | RevokeSecurityGroupIngress | Matches on protocol, ports, **and** source, and removes [each named source on its own](#security-group-tags-and-rules), not the permission it was authorized in; a rule the group does not hold is `InvalidPermission.NotFound` outside the default VPC and `unknownIpPermissionSet` inside it. `SecurityGroupRuleId.N` is unread. CIDRs are canonicalised and `GroupName` is read as for `AuthorizeSecurityGroupIngress`, and a rule stored before canonicalisation still matches |
-| RevokeSecurityGroupEgress | As `RevokeSecurityGroupIngress` |
+| RevokeSecurityGroupEgress | As `RevokeSecurityGroupIngress`, including outside the default VPC: a rule the group does not hold is `InvalidPermission.NotFound` — see [Security group rule IDs](#security-group-rule-ids) |
+| DescribeSecurityGroupRules | One rule per source, under a derived `sgr-` ID — see [Security group rule IDs](#security-group-rule-ids). `SecurityGroupRuleId.N` asserts existence (`InvalidSecurityGroupRuleId.NotFound`/`.Malformed`); filters `group-id`, `security-group-rule-id` and `tag:<key>`; pages on `MaxResults` (5–1000) with a cursor token |
+| ModifySecurityGroupRules | Replaces each named rule's protocol, ports, single source and description, keeping its ID and tags; a rule another already holds is `InvalidPermission.Duplicate`, and a refusal of any update writes nothing — see [Security group rule IDs](#security-group-rule-ids) |
 | CreateInternetGateway | Renders the same gateway `DescribeInternetGateways` does — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
 | AttachInternetGateway | `InternetGatewayId` and `VpcId` are both required and resolved ([Explicit resource IDs](#explicit-resource-ids)). A gateway already attached — to this VPC or another — is `Resource.AlreadyAssociated`, whose client-error-table entry reads *"You also cannot attach an internet gateway to more than one VPC at a time"* ([#1194](https://github.com/scttfrdmn/substrate/issues/1194)). A VPC that already has a gateway attached is `InvalidParameterValue` ([#1554](https://github.com/scttfrdmn/substrate/issues/1554)) — see [VPC attributes and internet gateways](#vpc-attributes-and-internet-gateways) |
 | DetachInternetGateway | `InternetGatewayId` and `VpcId` are both required ([#1194](https://github.com/scttfrdmn/substrate/issues/1194)), and the named VPC is removed from the gateway's `attachmentSet`, so the detach is visible through `DescribeInternetGateways`. A VPC the gateway is not attached to — including a gateway attached to nothing — is `Gateway.NotAttached`, the code the client-error table gives for *"If you are trying to detach an internet gateway, ensure that you specify the correct VPC"*; the page itself publishes none. AWS's precondition — *"The VPC must not contain any running instances with Elastic IP addresses or public IPv4 addresses"* — is **not enforced**, because the page states it with no code |
@@ -51,8 +57,8 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids). A gateway still attached is `DependencyViolation` — *"You must detach the internet gateway from the VPC before you can delete it"* ([#1492](https://github.com/scttfrdmn/substrate/issues/1492)) |
 | DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog). `ZoneName.N`, `ZoneId.N`, and four of eleven filters. `zoneId` takes AWS's published shape (`use1-az1`) and always maps zone `a` to `-az1` — see [Zone IDs](#zone-ids-take-aws-s-published-shape-and-always-map-zone-a-to-az1) |
 | DescribeRegions | **All three** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). `AllRegions` is accepted and inert — every seeded region is `opt-in-not-required`, so it is already in the answer |
-| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Six of fifty-six filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–**100** range, and `InstanceType.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range and counting offerings rather than types — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Reports `burstablePerformanceSupported`. Seven of fifty-six filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–**100** range, and `InstanceType.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error. A zone may [offer fewer types](#a-zone-may-offer-fewer-types) than the catalog. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range and counting offerings rather than types — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog). `ProductDescription.N` is read at every index, and five of six filters. Paginates on `MaxResults`/`NextToken`, with no published range and no `InvalidParameterCombination` — one of the three converted describes with no ID-list parameter, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | GetSpotPlacementScores | Scores the three seeded regions, or their nine zones under `SingleAvailabilityZone=true`, by AZ **ID**. `TargetCapacity` is required and range-checked; `InstanceType.N` and `RegionName.N` are **singular**; `MaxResults` floors at **10**, which is this operation's own published range. The score itself is [seeded, not computed](#seeding-a-spot-placement-score) |
 | RequestSpotInstances | Launches `InstanceCount` Spot Instances from `LaunchSpecification`, one request per instance, active/`fulfilled` at once — see [Spot Instance requests](#spot-instance-requests). `TagSpecification.N` must be `spot-instances-request` |
@@ -195,8 +201,10 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribeImages | `architecture`, `block-device-mapping.snapshot-id`, `description`, `hypervisor`, `image-id`, `image-type`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`, `public-ssm-parameter-name`, `root-device-name`, `root-device-type`, `state`, `tag-key`, `tag:<key>`, `virtualization-type` | the other 25 — the `block-device-mapping.*` (bar `snapshot-id`), `image-watermark.*`, `product-code*`, `source-image*` and `state-reason-*` families, plus `creation-date`, the ENA/sriov and kernel/ramdisk names, the Allowed-AMIs and Free-Tier markers and the rest |
 | DescribeVolumes | `attachment.delete-on-termination`, `attachment.device`, `attachment.instance-id`, `availability-zone`, `size`, `snapshot-id`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-type` | `attachment.attach-time`, `attachment.status`, `availability-zone-id`, `create-time`, `encrypted`, `fast-restored`, `multi-attach-enabled`, `operator.managed`, `operator.principal` |
 | DescribeSnapshots | `description`, `encrypted`, `owner-id`, `progress`, `snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-size` | `owner-alias`, `storage-tier`, `transfer-type` |
-| DescribeSubnets | `availability-zone`, `cidr-block`, `default-for-az`, `map-public-ip-on-launch`, `owner-id`, `state`, `subnet-arn`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id`, plus AWS's four alias spellings `availabilityZone`, `cidr`, `cidrBlock` and `defaultForAz` | `availability-zone-id`/`availabilityZoneId`, `available-ip-address-count`, `customer-owned-ipv4-pool`, `enable-dns64`, `enable-lni-at-device-index`, `ipv6-native`, `map-customer-owned-ip-on-launch`, `outpost-arn`, and the three `ipv6-cidr-block-association.*` and three `private-dns-name-options-on-launch.*` filters |
+| DescribeSubnets | `availability-zone`, `availability-zone-id`, `cidr-block`, `default-for-az`, `map-public-ip-on-launch`, `owner-id`, `state`, `subnet-arn`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id`, plus AWS's five alias spellings `availabilityZone`, `availabilityZoneId`, `cidr`, `cidrBlock` and `defaultForAz` | `available-ip-address-count`, `customer-owned-ipv4-pool`, `enable-dns64`, `enable-lni-at-device-index`, `ipv6-native`, `map-customer-owned-ip-on-launch`, `outpost-arn`, and the three `ipv6-cidr-block-association.*` and three `private-dns-name-options-on-launch.*` filters |
 | DescribeSecurityGroups | `description`, `group-id`, `group-name`, `owner-id`, `tag-key`, `tag:<key>`, `vpc-id`, and the twenty `ip-permission.*`/`egress.ip-permission.*` rule filters — **all of them** (#1440) | — |
+| DescribeSecurityGroupRules | `group-id`, `security-group-rule-id`, `tag:<key>` — **all three** | — |
+| DescribeInstanceCreditSpecifications | `instance-id` — the one it documents | — |
 | DescribeSpotInstanceRequests | `availability-zone-group`, `create-time`, `fault-code`, `fault-message`, `instance-id`, `launch-group`, `launch.group-id`, `launch.image-id`, `launch.instance-type`, `launch.key-name`, `launched-availability-zone`, `network-interface.subnet-id`, `product-description`, `spot-instance-request-id`, `spot-price`, `state`, `status-code`, `status-message`, `tag-key`, `tag:<key>`, `type`, `valid-until` | the five `launch.block-device-mapping.*` filters, `launch.group-name`, `launch.kernel-id`, `launch.monitoring-enabled`, `launch.ramdisk-id`, `launched-availability-zone-id`, the other seven `network-interface.*` filters, and `valid-from` |
 | DescribeRouteTables | `association.route-table-id`, `association.subnet-id`, `vpc-id` | `association.gateway-id`, `association.main`, `association.route-table-association-id`, `owner-id`, `route-table-id`, `tag-key`, `tag:<key>`, and the eleven `route.*` filters |
 | DescribeNatGateways | `state`, `vpc-id` | `nat-gateway-id`, `subnet-id`, `tag-key`, `tag:<key>` |
@@ -215,16 +223,17 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribePlacementGroups | `group-arn`, `group-name`, `state`, `strategy`, `tag-key`, `tag:<key>` | `spread-level` |
 | DescribeAddresses | `allocation-id`, `association-id`, `instance-id`, `network-interface-id`, `private-ip-address`, `public-ip`, `tag-key`, `tag:<key>` | `network-border-group`, `network-interface-owner-id` |
 | DescribeRegions | `endpoint`, `opt-in-status`, `region-name` — **all three** | — |
-| DescribeInstanceTypes | `current-generation`, `instance-type`, `memory-info.size-in-mib`, `processor-info.supported-architecture`, `supported-usage-class`, `vcpu-info.default-vcpus` | the other fifty — the `ebs-info.*`, `network-info.*`, `instance-storage-info.*`, `nitro-tpm-info.*`, `vcpu-info.*` (bar `default-vcpus`) and `processor-info.*` (bar `supported-architecture`) families, plus `auto-recovery-supported`, `bare-metal`, `burstable-performance-supported`, `dedicated-hosts-supported`, `free-tier-eligible`, `hibernation-supported`, `hypervisor`, `instance-storage-supported`, `nitro-enclaves-support`, `nitro-tpm-support`, `reboot-migration-support`, `supported-boot-mode`, `supported-root-device-type` and `supported-virtualization-type` |
+| DescribeInstanceTypes | `burstable-performance-supported`, `current-generation`, `instance-type`, `memory-info.size-in-mib`, `processor-info.supported-architecture`, `supported-usage-class`, `vcpu-info.default-vcpus` | the other fifty — the `ebs-info.*`, `network-info.*`, `instance-storage-info.*`, `nitro-tpm-info.*`, `vcpu-info.*` (bar `default-vcpus`) and `processor-info.*` (bar `supported-architecture`) families, plus `auto-recovery-supported`, `bare-metal`, `dedicated-hosts-supported`, `free-tier-eligible`, `hibernation-supported`, `hypervisor`, `instance-storage-supported`, `nitro-enclaves-support`, `nitro-tpm-support`, `reboot-migration-support`, `supported-boot-mode`, `supported-root-device-type` and `supported-virtualization-type` |
 | DescribeSpotPriceHistory | `availability-zone`, `instance-type`, `product-description`, `spot-price`, `timestamp` | `availability-zone-id` |
 | DescribeLaunchTemplates | `create-time`, `launch-template-name`, `tag-key`, `tag:<key>` — **all four** | — |
 | DescribeLaunchTemplateVersions | `create-time`, `image-id`, `instance-type`, `is-default-version` | `host-resource-group-arn`, `iam-instance-profile`, `kernel-id`, `license-configuration-arn`, `network-card-index`, `ram-disk-id`, and the four `ebs-optimized`/`http-*` metadata filters |
 
-`tag:<key>` is refused on **nine operations that document no tag filter at all** — neither
+`tag:<key>` is refused on **ten operations that document no tag filter at all** — neither
 `tag:<key>` nor `tag-key`: `DescribeFleets`, `DescribeInstanceTypeOfferings`,
 `DescribeInstanceStatus`, `DescribeAvailabilityZones`, `DescribeRegions`,
-`DescribeInstanceTypes`, `DescribeSpotPriceHistory`, `DescribeLaunchTemplateVersions` and
-`DescribeCapacityReservations`. Some
+`DescribeInstanceTypes`, `DescribeSpotPriceHistory`, `DescribeLaunchTemplateVersions`,
+`DescribeCapacityReservations` and `DescribeInstanceCreditSpecifications`.
+`DescribeSecurityGroupRules` documents `tag:<key>` but not `tag-key`, so it refuses the latter. Some
 of those describe resources that plainly carry tags — a fleet and a Capacity Reservation each
 carry tags and `DescribeFleets` and `DescribeCapacityReservations` render them, and `DescribeLaunchTemplates` documents both tag filters while
 `DescribeLaunchTemplateVersions`, next to it in the same family, documents neither. That is
@@ -1078,6 +1087,41 @@ Account-level IMDS defaults (`ModifyInstanceMetadataDefaults`) and IMDSv2 enforc
 modelled. What the options *do* inside an instance — refusing a request without a token, how far
 a PUT response travels — is resource-internal and out of scope.
 
+## Burstable credit specifications
+
+A T instance's credit option, `standard` or `unlimited`, is recorded at launch and reported by
+`DescribeInstanceCreditSpecifications` ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)).
+It is a value, not a balance: substrate runs no workload, so no credit accrues or is spent.
+
+**A launch takes** `CreditSpecification.CpuCredits`, else its launch template's
+`CreditSpecification.CpuCredits`, else the account's default for the family in the Region, else the
+family's published default — "T9g, T8i, T4g, T3a, and T3 instances launch as `unlimited`" and "T2
+instances launch as `standard`" (EC2 User Guide, *Configure burstable performance instances*). A value
+other than `standard` or `unlimited` is `InvalidCpuCredits`. A non-burstable type ignores a stated
+option rather than refusing it — no AWS source publishes a refusal, and the Terraform AWS provider
+drops the option client-side for such a type — and reads `standard`, as the operation's page says a
+non-burstable instance ID does. The catalog carries `t2`, `t3`, `t3a` and `t4g`; `t8i` and `t9g`
+have a default here but no catalog entry.
+
+**`DescribeInstanceCreditSpecifications`** with `InstanceId.N` reports each named instance;
+without it, every instance whose option is `unlimited`, and no terminated instance. An instance
+resized onto a non-burstable type reports `standard`, as the page says of a non-burstable ID, so it
+is not in the unfiltered list, where the page says AWS would list it; it keeps the option it carried
+for a resize back. One resized onto a burstable type from a non-burstable one takes the account's
+default for the new family. `DescribeInstanceTypes`
+reports `burstablePerformanceSupported`, which is what the Terraform provider reads before it asks.
+
+**`ModifyInstanceCreditSpecification`** answers each instance in
+`successfulInstanceCreditSpecificationSet` or `unsuccessfulInstanceCreditSpecificationSet`, with the
+four codes `UnsuccessfulInstanceCreditSpecificationErrorCode` publishes: `InvalidInstanceID.Malformed`,
+`InvalidInstanceID.NotFound`, `InstanceCreditSpecification.NotSupported` for a non-burstable instance,
+and `IncorrectInstanceState` for one neither running nor stopped (that message is substrate's own).
+
+**`ModifyDefaultCreditSpecification`** applies at once. AWS describes it as asynchronous
+(`CreditSpecificationUpdateInProgress`) and limited to once per five minutes (`UpdateLimitExceeded`);
+substrate models neither, so a test can set a default and launch against it immediately. Instances
+already launched keep their option.
+
 ## The default VPC
 
 **Every account has a default VPC in each Region, seeded on its first EC2 request**
@@ -1568,9 +1612,8 @@ A revoke naming a rule the group does not hold is answered the way
 | a non-default VPC | `InvalidPermission.NotFound` / "The specified rule does not exist in this security group.", HTTP 400 — and **no rules are revoked**, including any the same request did match |
 | the default VPC | `return=true`, the matched sources revoked, and the rest reported in `unknownIpPermissionSet` |
 
-Before it, both answered `return=true` having removed nothing. `SecurityGroupRuleId.N` is not
-read, because substrate assigns no `sgr-` rule IDs; a revoke naming rules only by ID still answers
-`MissingParameter`. A revoke permission naming no source at all keeps its old meaning — it removes
+Before it, both answered `return=true` having removed nothing. A revoke may also name rules by
+`SecurityGroupRuleId.N`; see [Security group rule IDs](#security-group-rule-ids). A revoke permission naming no source at all keeps its old meaning — it removes
 the first stored permission on its protocol and ports — because AWS describes no such rule.
 
 **A referenced group is stored by ID.** A `Groups.M` source named by `GroupName` alone — the
@@ -1649,6 +1692,49 @@ lock, so a group cannot be created in a VPC a concurrent `DeleteVpc` has just fo
 **Compatibility.** A duplicate authorize, a duplicate group name in one VPC, and a describe by name of
 a group outside the default VPC all answered differently before: the first two succeeded, and the
 third selected the group.
+
+## Security group rule IDs
+
+Each rule has its own `sgr-` ID ([#1490](https://github.com/scttfrdmn/substrate/issues/1490)), as
+`API_RevokeSecurityGroupIngress` describes a rule: "Each rule has a protocol, from and to ports, and
+source (CIDR range, security group, or prefix list)". An `IpPermission` naming several sources is
+several rules, one per source, and `AuthorizeSecurityGroupIngress`/`Egress` answer the rules they
+added in `securityGroupRuleSet`.
+
+**An ID is derived from the rule's content, not minted.** It is `sgr-` and 17 hex digits of a hash of
+the group, the direction, the protocol and port range (compared as a revoke compares them, so `tcp`
+and `6` are one rule), and the one source. Nothing is stored for it, so a group written by an older
+build has IDs the first time it is read, and a replayed log yields the same IDs because it yields
+the same rules. Revoking a rule and authorizing the same content again yields the same ID, where AWS
+would mint a new one.
+
+**`ModifySecurityGroupRules` keeps the ID.** Changing a rule's content would change the derived ID,
+so the rule's old ID is recorded beside it once it is modified, and every later read uses the
+recorded one. A rule later authorized with the old content takes the next derivation instead of
+colliding, and that ID is recorded too. A modify replaces the protocol, ports, source and description
+whole — the request is a full `SecurityGroupRuleRequest` naming exactly one of `CidrIpv4`,
+`CidrIpv6`, `PrefixListId` and `ReferencedGroupId` — and keeps the rule's tags.
+
+| Operation | What it does with rule IDs |
+|---|---|
+| `AuthorizeSecurityGroupIngress`/`Egress` | Answers `securityGroupRuleSet`; records `IpRanges.N.Description`, `Ipv6Ranges.N.Description` and `PrefixListIds.N.Description` (a referenced group's rides on its pair), and the tags of a `TagSpecification.N` whose `ResourceType` is `security-group-rule`. A referenced group of the account that does not exist is `InvalidGroup.NotFound`, EC2's observed answer (hashicorp/terraform-provider-aws#39473) |
+| `RevokeSecurityGroupIngress`/`Egress` | Accepts `SecurityGroupRuleId.N` as well as `IpPermissions.N`, and answers `revokedSecurityGroupRuleSet`, the rules removed. An ID naming no rule of the group in the request's direction is `InvalidSecurityGroupRuleId.NotFound`, and nothing is revoked |
+| `DescribeSecurityGroupRules` | Every rule of the account's groups, in group-then-ID order, with `groupOwnerId`, `isEgress`, the source, `description`, `tagSet` and `securityGroupRuleArn` |
+| `ModifySecurityGroupRules` | As above. The rule ID is checked first. A port that is not an integer is `InvalidParameterValue`, and a `ReferencedGroupId` naming no group of the account `InvalidGroup.NotFound`, as on authorize. The messages for a request naming no source or two, and the port refusal's reason, are substrate's own |
+| `CreateTags`/`DeleteTags` | Take an `sgr-` ID; an ID naming no rule is a no-op, as for any absent resource |
+
+`DescribeSecurityGroups` renders an IPv4, IPv6 or prefix-list rule's description where AWS's
+`IpRange`, `Ipv6Range` and `PrefixListId` carry one. `DescribeTags` does not yet list a rule's tags.
+
+**Revoking a rule the group does not hold** is answered by VPC, as the table under
+[Security group tags and rules](#security-group-tags-and-rules) shows, for egress as for ingress
+([#1658](https://github.com/scttfrdmn/substrate/issues/1658)). `API_RevokeSecurityGroupEgress`
+publishes only the default-VPC half; outside the default VPC the answer is
+`InvalidPermission.NotFound`, which is what the Terraform AWS provider tolerates when it revokes a new
+group's `::/0` egress rule in a VPC with no IPv6 range — "If we have a NotFound or
+InvalidParameterValue, then we are trying to remove the default IPv6 egress of a non-IPv6 enabled
+SG". Substrate models no VPC IPv6 range, so a new group holds the IPv4 all-traffic egress rule alone
+and that revoke is always refused, as AWS refuses it for such a VPC.
 
 ## Launch-time storage
 
@@ -2895,7 +2981,7 @@ exhaustive** — EC2 offers some 800 types — but it is **complete per family**
 
 | Family | Sizes |
 |---|---|
-| `t3`, `t3a` | `nano`, `micro`, `small`, `medium`, `large`, `xlarge`, `2xlarge` |
+| `t2`, `t3`, `t3a` | `nano`, `micro`, `small`, `medium`, `large`, `xlarge`, `2xlarge` |
 | `m5`, `m5a`, `r5`, `c5a` | `large`, `xlarge`, `2xlarge`, `4xlarge`, `8xlarge`, `12xlarge`, `16xlarge`, `24xlarge` |
 | `c5` | `large`, `xlarge`, `2xlarge`, `4xlarge`, `9xlarge`, `12xlarge`, `18xlarge`, `24xlarge` — note the ladder is **not** the same as `c5a`'s |
 | `p3` | `2xlarge`, `8xlarge`, `16xlarge` |
@@ -2914,7 +3000,7 @@ exhaustive** — EC2 offers some 800 types — but it is **complete per family**
 | `m8gd`, `c8gd`, `r8gd`, `m9gd`, `c9gd`, `r9gd`, `c8gn` | `medium`, `large`, `xlarge`, `2xlarge`, `4xlarge`, `8xlarge`, `12xlarge`, `16xlarge`, `24xlarge`, `48xlarge` — Graviton4 and Graviton5 |
 | `g5g` | `xlarge`, `2xlarge`, `4xlarge`, `8xlarge` (one NVIDIA T4G each), `16xlarge` (two) — AWS Graviton2 |
 
-That is 349 types in forty-seven families. **The twenty-nine Graviton families report `arm64`** in
+That is 356 types in forty-eight families. **The twenty-nine Graviton families report `arm64`** in
 `processorInfo.supportedArchitectures`, and every other type `x86_64`, so the
 `processor-info.supported-architecture` filter selects one set or the other
 ([#1497](https://github.com/scttfrdmn/substrate/issues/1497)). Auto Scaling attributes them to the
@@ -3126,6 +3212,20 @@ Outpost ARNs is what a caller matching the two would silently mis-read.
 The three zones `DescribeAvailabilityZones` reports are the same three the
 offerings and spot-price operations use, so filtering an offerings query by a zone
 you just enumerated always returns an answer.
+
+#### A zone may offer fewer types
+
+Offerings by zone are not uniform ([#1621](https://github.com/scttfrdmn/substrate/issues/1621)). A
+small table in `emulator/ec2_instancetypes.go` removes the types a zone is known not to offer, keyed
+by AZ ID so it holds in every account. It has one row: **`use1-az3` offers no AWS Graviton (`arm64`)
+type**, us-east-1's oldest zone, reported by aws-elastic-globus-compute in #1621 and widely noted by
+operators. Because substrate maps zone `c` to `-az3`, `us-east-1c` is that zone. The `region` location
+still offers every type. Only `DescribeInstanceTypeOfferings` reads the table; `RunInstances` does not
+refuse a Graviton launch into `us-east-1c`.
+
+A subnet reports `availabilityZoneId`, derived from its zone's name, and `DescribeSubnets` evaluates
+the `availability-zone-id` filter, so a caller can match a subnet to the zones an offerings query
+named.
 
 #### Zone IDs take AWS's published shape, and always map zone `a` to `-az1`
 

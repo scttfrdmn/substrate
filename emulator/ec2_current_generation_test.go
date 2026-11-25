@@ -45,10 +45,10 @@ type ec2GenerationType struct {
 // one request carries every type and the count below is the catalog's own rather than a page's.
 //
 // The total is asserted as well as the exceptions, because a per-type loop alone would pass
-// against a constant false as readily as against the fix. The total (349 since #1509) is hard-coded rather than
-// derived so that widening the catalog has to come past this test: a family added without a
-// generation decision changes the total and fails here, which is the point of classifying by
-// family name instead of by a p3 special case.
+// against a constant false as readily as against a per-family derivation. The total, 356, is
+// hard-coded rather than derived so that widening the catalog has to come past this test: a
+// family added without a generation decision changes the total and fails here, which is the
+// point of classifying by family name instead of by a p3 special case (#1614).
 func TestEC2_CurrentGenerationIsPerFamily(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
@@ -57,7 +57,7 @@ func TestEC2_CurrentGenerationIsPerFamily(t *testing.T) {
 		Items []ec2GenerationType `xml:"instanceTypeSet>item"`
 	}
 	ec2DescribeXML(t, ts, map[string]string{"Action": "DescribeInstanceTypes"}, &doc)
-	require.Len(t, doc.Items, 349, "the seeded catalog is 349 types across forty-seven families")
+	require.Len(t, doc.Items, 356, "the seeded catalog is 356 types across forty-eight families")
 
 	var previous []string
 	for _, it := range doc.Items {
@@ -69,10 +69,10 @@ func TestEC2_CurrentGenerationIsPerFamily(t *testing.T) {
 		"p3 is the one cataloged family on AWS's previous-generation page, and it has three sizes")
 }
 
-// TestEC2_CurrentGenerationByFamily states the answer for each of the forty-seven cataloged
+// TestEC2_CurrentGenerationByFamily states the answer for each of the forty-eight cataloged
 // families, which is the granularity AWS publishes the property at.
 //
-// Only these forty-seven are asserted, and the fourteen further names in AWS's table are not: a1, c1,
+// Only these forty-eight are asserted, and the fourteen further names in AWS's table are not: a1, c1,
 // c3, c4, g3, i2, m1, m2, m3, m4, p3dn, r3, r4 and t1 are families the catalog does not carry, so
 // DescribeInstanceTypes has nothing to report for them and an assertion would be reading
 // substrate's own copy of the table back to itself. They are transcribed in the source for the
@@ -95,7 +95,7 @@ func TestEC2_CurrentGenerationByFamily(t *testing.T) {
 		"inf1": true, "inf2": true, "m5": true, "m5a": true,
 		"p3":  false,
 		"p4d": true, "p4de": true, "p5": true, "r5": true,
-		"t3": true, "t3a": true, "trn1": true, "trn2": true,
+		"t2": true, "t3": true, "t3a": true, "trn1": true, "trn2": true,
 		"t4g": true, "m6g": true, "m7g": true, "m8g": true, "m9g": true,
 		"c6g": true, "c7g": true, "c8g": true, "c9g": true,
 		"r6g": true, "r7g": true, "r8g": true, "r9g": true,

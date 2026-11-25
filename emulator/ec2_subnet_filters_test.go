@@ -222,7 +222,7 @@ func TestEC2_DescribeSubnets_FiltersAND(t *testing.T) {
 	}), "no subnet in the created VPC is a default subnet, so the AND is empty")
 }
 
-// TestEC2_DescribeSubnets_InertFiltersReturnEverything pins the fourteen names AWS
+// TestEC2_DescribeSubnets_InertFiltersReturnEverything pins the thirteen names AWS
 // documents that substrate accepts and cannot answer — sampled here, listed in full in
 // docs/reference/ec2.md. They constrain nothing rather than being refused, because refusing a
 // filter real EC2 accepts would be a false deny.
@@ -233,7 +233,6 @@ func TestEC2_DescribeSubnets_InertFiltersReturnEverything(t *testing.T) {
 	want := append([]string{f.alpha, f.beta}, f.defaultSubnets...)
 
 	for name, value := range map[string]string{
-		"availability-zone-id":       "use1-az1",
 		"available-ip-address-count": "251",
 		"ipv6-native":                "false",
 		"outpost-arn":                "arn:aws:outposts:us-east-1:1:outpost/op-1",

@@ -122,7 +122,7 @@ func TestEC2_Graviton_ArchitectureFilterSelectsExactlyTheGravitonFamilies(t *tes
 	x86 := describeGravitonTypes(t, map[string]string{
 		"Filter.1.Name": "processor-info.supported-architecture", "Filter.1.Value.1": "x86_64",
 	})
-	assert.Len(t, x86, 349-254, "the x86 families and the x86 accelerated ones")
+	assert.Len(t, x86, 356-254, "the x86 families and the x86 accelerated ones")
 }
 
 // TestEC2_Graviton_OfferingsAndSpotPrices pins that the Graviton types reach the other two
@@ -133,7 +133,10 @@ func TestEC2_Graviton_OfferingsAndSpotPrices(t *testing.T) {
 	offerings := ec2Offerings(t, ts, map[string]string{
 		"Filter.1.Name": "instance-type", "Filter.1.Value.1": "c8g.large",
 	})
-	assert.Len(t, offerings, 3, "one per seeded zone")
+	require.Len(t, offerings, 2, "one per seeded zone but use1-az3, which offers no Graviton type (#1621)")
+	for _, o := range offerings {
+		assert.NotEqual(t, "us-east-1c", o.Location)
+	}
 
 	var prices struct {
 		Items []struct {

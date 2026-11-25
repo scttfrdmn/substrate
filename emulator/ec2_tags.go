@@ -626,6 +626,10 @@ func (p *EC2Plugin) applyTagsByID(reqCtx *RequestContext, id string, tags []EC2T
 
 // ec2ApplyTagsThroughOwner applies tags to the EC2 resource id through the EC2 plugin registered in
 // owners, under its tag lock, or on state directly when owners holds none.
+//
+// The direct path takes no lock, so it does not serialize with EC2 handlers: a security group
+// record it rewrites can race an authorize, revoke or rule modify. It is reached only when no EC2
+// plugin is registered, in which case no EC2 handler runs to race it.
 func ec2ApplyTagsThroughOwner(
 	owners *PluginRegistry, state StateManager, reqCtx *RequestContext, id string, tags []EC2Tag, remove bool,
 ) error {

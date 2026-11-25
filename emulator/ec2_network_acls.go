@@ -530,7 +530,8 @@ func (p *EC2Plugin) syntheticNetworkACLs(reqCtx *RequestContext, ids []string) (
 // ec2TagWriteTakesSGMu reports whether id names a record that operations other than tagging
 // rewrite or delete under [EC2Plugin.sgMu]: a VPC (AssociateDhcpOptions, ModifyVpcAttribute,
 // DeleteVpc), a subnet (DeleteSubnet), a security group (its rule changes and delete), a network
-// ACL (its entries and delete), a DHCP option set and a flow log (their deletes). A tag write
+// ACL (its entries and delete), a DHCP option set and a flow log (their deletes), and a security
+// group rule, whose tags live in its group's record (#1490). A tag write
 // naming one takes sgMu as well, so neither write can overwrite the other's change with a stale
 // copy, and a tag write cannot write back a record a delete has just removed.
 func ec2TagWriteTakesSGMu(id string) bool {
@@ -539,7 +540,7 @@ func ec2TagWriteTakesSGMu(id string) bool {
 		return false
 	}
 	switch prefix {
-	case "vpc", "subnet", "sg", "acl", "dopt", "fl":
+	case "vpc", "subnet", "sg", "sgr", "acl", "dopt", "fl":
 		return true
 	default:
 		return false

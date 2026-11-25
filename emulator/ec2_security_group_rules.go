@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -516,18 +517,24 @@ func ec2PermissionNotFoundError() *AWSError {
 type ec2IPRangeItem struct {
 	// CidrIP is the IPv4 range.
 	CidrIP string `xml:"cidrIp"` //nolint:revive
+	// Description is the rule's description.
+	Description string `xml:"description,omitempty"`
 }
 
 // ec2IPv6RangeItem is one ipv6Ranges>item, AWS's Ipv6Range.
 type ec2IPv6RangeItem struct {
 	// CidrIPv6 is the IPv6 range.
 	CidrIPv6 string `xml:"cidrIpv6"` //nolint:revive
+	// Description is the rule's description.
+	Description string `xml:"description,omitempty"`
 }
 
 // ec2PrefixListItem is one prefixListIds>item, AWS's PrefixListId.
 type ec2PrefixListItem struct {
 	// PrefixListID is the prefix list's ID.
 	PrefixListID string `xml:"prefixListId"`
+	// Description is the rule's description.
+	Description string `xml:"description,omitempty"`
 }
 
 // ec2GroupPairItem is one groups>item, AWS's UserIdGroupPair.
@@ -571,6 +578,29 @@ func ec2IPPermissionXML(rule EC2IPPermission) ec2IPPermissionItem {
 			GroupName:   pair.GroupName,
 			Description: pair.Description,
 		})
+	}
+	return item
+}
+
+// ec2DescribedPermissionXML renders one stored permission of sg with the description each of
+// its IPv4, IPv6 and prefix-list sources carries in the group's [EC2SecurityGroup.RuleMeta]
+// (#1490), as DescribeSecurityGroups' IpRange, Ipv6Range and PrefixListId shapes publish one.
+func ec2DescribedPermissionXML(sg EC2SecurityGroup, rule EC2IPPermission, egress bool) ec2IPPermissionItem {
+	item := ec2IPPermissionXML(rule)
+	if len(sg.RuleMeta) == 0 {
+		return item
+	}
+	describe := func(kind, value string) string {
+		return sg.RuleMeta[ec2SGRuleKey(egress, rule, kind, value)].Description
+	}
+	for i := range item.IPRanges {
+		item.IPRanges[i].Description = describe(ec2SGRuleSourceCIDR, ec2SGRuleSourceValue(rule.IPRanges[i]))
+	}
+	for i := range item.IPv6Ranges {
+		item.IPv6Ranges[i].Description = describe(ec2SGRuleSourceIPv6, ec2SGRuleSourceValue(rule.IPv6Ranges[i]))
+	}
+	for i := range item.PrefixListIDs {
+		item.PrefixListIDs[i].Description = describe(ec2SGRuleSourcePrefixList, rule.PrefixListIDs[i])
 	}
 	return item
 }
@@ -674,4 +704,289 @@ func ec2RuleMatchesFilter(rule EC2IPPermission, field string, values []string) b
 	default:
 		return true
 	}
+}
+
+// modifySGRules applies an Authorize/RevokeSecurityGroupIngress/Egress request.
+//
+// A revoke removes each named source on its own (#1453) — see [ec2RevokePermissions] — and
+// answers a source that matched nothing the way API_RevokeSecurityGroupIngress says it is
+// answered, which depends on the group's VPC: "For a default VPC, if the values you specify
+// do not match the existing rule's values, no error is returned, and the output describes the
+// security group rules that were not revoked. For a non-default VPC ... an
+// InvalidPermission.NotFound client error is returned, and no rules are revoked." The
+// default-VPC half renders unknownIpPermissionSet; the other refuses before anything is
+// written. API_RevokeSecurityGroupEgress publishes only the default-VPC sentence; the
+// non-default refusal is applied to egress too, because it is what EC2 answers there: the
+// Terraform AWS provider revokes a new group's ::/0 egress rule unconditionally and tolerates
+// exactly InvalidPermission.NotFound for a VPC with no IPv6 range (resourceSecurityGroupCreate,
+// "If we have a NotFound or InvalidParameterValue, then we are trying to remove the default
+// IPv6 egress of a non-IPv6 enabled SG") (#1658).
+//
+// A revoke may name rules by SecurityGroupRuleId.N instead of, or as well as, by IpPermissions.N
+// (#1490). Each ID must name a rule of the group in the request's direction; one that does not
+// is InvalidSecurityGroupRuleId.NotFound, and nothing is revoked. The response carries
+// revokedSecurityGroupRuleSet, the rules the call removed, as API_RevokedSecurityGroupRule
+// shapes them, and an authorize carries securityGroupRuleSet, the rules it added. See
+// [ec2SecurityGroupRules] for how a rule and its sgr- ID are derived.
+//
+// An authorize naming a source the group already allows for the same protocol and ports is
+// InvalidPermission.Duplicate, and nothing is written (#1491); the check is per source, the
+// granularity the revoke above works at — see [ec2AuthorizeDuplicates]. An authorize records
+// the IpRanges, Ipv6Ranges and PrefixListIds descriptions it carries, and the tags of a
+// TagSpecification.N whose ResourceType is security-group-rule, on every rule it adds.
+//
+// Every IPv4 and IPv6 range is canonicalised before it is compared or stored (#1553), as the
+// operation pages publish: "AWS canonicalizes IPv4 and IPv6 CIDRs" — see
+// [ec2CanonicalizePermissions]. So 100.68.0.18/18 is stored and described as 100.68.0.0/18, and
+// authorizing it beside a stored 100.68.0.0/18 is a duplicate.
+//
+// GroupName is read as both pages publish it — "[Default VPC] The name of the security group.
+// For security groups for a default VPC you can specify either the ID or the name of the
+// security group" — and resolved among the default VPC's groups by
+// [EC2Plugin.defaultVPCGroupByName], the rule DeleteSecurityGroup follows (#1491). GroupId wins
+// when both are sent.
+func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direction string, add bool) (*AWSResponse, error) {
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
+	egress := direction == "egress"
+	sgID := req.Params["GroupId"]
+	if sgID == "" && req.Params["GroupName"] != "" {
+		resolved, resolveErr := p.defaultVPCGroupByName(reqCtx, req.Params["GroupName"])
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		sgID = resolved
+	}
+	key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 modifySGRules get: %w", err)
+	}
+	if reqErr := ec2RequireNamedResource(ec2SecurityGroupIDKind, "GroupId", sgID, data != nil); reqErr != nil {
+		return nil, reqErr
+	}
+	var sg EC2SecurityGroup
+	if unmarshalErr := json.Unmarshal(data, &sg); unmarshalErr != nil {
+		return nil, fmt.Errorf("ec2 modifySGRules unmarshal: %w", unmarshalErr)
+	}
+
+	perms := parseSGPermissions(req.Params, reqCtx.AccountID)
+	var ruleIDs []string
+	if !add {
+		ruleIDs = extractIndexedParams(req.Params, "SecurityGroupRuleId")
+	}
+	if len(perms) == 0 && len(ruleIDs) == 0 {
+		return nil, &AWSError{
+			Code:       "MissingParameter",
+			Message:    "No permissions specified",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	rules := &sg.IngressRules
+	if egress {
+		rules = &sg.EgressRules
+	}
+	// A revoke may name a malformed range an earlier substrate stored verbatim; see
+	// [ec2CanonicalizePermissions].
+	var held []EC2IPPermission
+	if !add {
+		held = *rules
+	}
+	if err := ec2CanonicalizePermissions(perms, held); err != nil {
+		return nil, err
+	}
+	// A group named rather than identified is resolved to its ID within the group's VPC, on
+	// authorize and revoke alike, so the two forms address one rule.
+	if err := p.resolveGroupPairNames(reqCtx, sg.VPCID, perms); err != nil {
+		return nil, err
+	}
+	if add {
+		if err := p.requireReferencedGroups(reqCtx, sg.VPCID, perms); err != nil {
+			return nil, err
+		}
+	}
+
+	before := ec2SecurityGroupRules(sg)
+	var unknown []EC2IPPermission
+	if add {
+		if ec2AuthorizeDuplicates(*rules, perms) {
+			return nil, ec2PermissionDuplicateError()
+		}
+		tags := ec2TagSpecificationTags(req.Params, "", "security-group-rule")
+		if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+			return nil, awsErr
+		}
+		if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+			return nil, awsErr
+		}
+		descriptions := ec2RuleDescriptions(req.Params, perms, egress)
+		*rules = append(*rules, perms...)
+		ec2RecordAddedRules(&sg, ec2SGRuleMetaKeys(before), descriptions, tags)
+	} else {
+		sourced, sourceless, awsErr := ec2RuleIDTargets(before, ruleIDs, egress, perms)
+		if awsErr != nil {
+			return nil, awsErr
+		}
+		// The rules named by ID go first: each names one stored rule exactly, so none can be
+		// missed, and no permission the request names can take it away from them first.
+		for _, target := range sourceless {
+			*rules, _ = ec2DropSourcelessPermission(*rules, target)
+		}
+		*rules, _ = ec2RevokePermissions(*rules, sourced)
+		// A permission naming no source removes a stored permission naming none when the group
+		// holds one, so it cannot take a sourced rule on the same ports; only when it holds none
+		// does it keep the reading [ec2RevokePermissions] gives it.
+		var rest []EC2IPPermission
+		for _, perm := range perms {
+			if !ec2PermHasSource(perm) {
+				if next, dropped := ec2DropSourcelessPermission(*rules, perm); dropped {
+					*rules = next
+					continue
+				}
+			}
+			rest = append(rest, perm)
+		}
+		*rules, unknown = ec2RevokePermissions(*rules, rest)
+		if len(unknown) > 0 {
+			inDefault, lookupErr := p.ec2VPCIsDefault(reqCtx, sg.VPCID)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			if !inDefault {
+				return nil, ec2PermissionNotFoundError()
+			}
+		}
+	}
+	after := ec2SecurityGroupRules(sg)
+	ec2PruneRuleMeta(&sg)
+
+	newData, err := json.Marshal(sg)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 modifySGRules marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 modifySGRules state.Put: %w", err)
+	}
+
+	opName := "AuthorizeSecurityGroupIngressResponse"
+	if egress && add {
+		opName = "AuthorizeSecurityGroupEgressResponse"
+	} else if !egress && !add {
+		opName = "RevokeSecurityGroupIngressResponse"
+	} else if egress && !add {
+		opName = "RevokeSecurityGroupEgressResponse"
+	}
+	type response struct {
+		XMLName xml.Name
+		XMLNS   string                 `xml:"xmlns,attr"`
+		Return  bool                   `xml:"return"`
+		Unknown []ec2IPPermissionItem  `xml:"unknownIpPermissionSet>item,omitempty"`
+		Added   []ec2SGRuleItem        `xml:"securityGroupRuleSet>item,omitempty"`
+		Revoked []ec2RevokedSGRuleItem `xml:"revokedSecurityGroupRuleSet>item,omitempty"`
+	}
+	resp := response{
+		XMLName: xml.Name{Local: opName},
+		XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
+		Return:  true,
+	}
+	for _, perm := range unknown {
+		resp.Unknown = append(resp.Unknown, ec2IPPermissionXML(perm))
+	}
+	if add {
+		had := ec2SGRuleMetaKeys(before)
+		for _, r := range after {
+			if r.Egress == egress && !had[r.Key] {
+				resp.Added = append(resp.Added, ec2SGRuleXML(r, reqCtx.Region))
+			}
+		}
+	} else {
+		remain := ec2SGRuleMetaKeys(after)
+		for _, r := range before {
+			if r.Egress == egress && !remain[r.Key] {
+				resp.Revoked = append(resp.Revoked, ec2RevokedSGRuleXML(r))
+			}
+		}
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// ec2RecordAddedRules writes the metadata of the rules an authorize added: every rule of sg
+// whose key had is missing. A description is recorded for an IPv4, IPv6 or prefix-list rule
+// (a referenced group's rides on its pair), and tags for every one. A rule whose ID is not the
+// unsalted derivation of [ec2DerivedSGRuleID] has that ID recorded too, so it does not move
+// when the rule holding the unsalted one is later revoked.
+func ec2RecordAddedRules(sg *EC2SecurityGroup, had map[string]bool, descriptions map[string]string, tags []EC2Tag) {
+	for _, r := range ec2SecurityGroupRules(*sg) {
+		if had[r.Key] {
+			continue
+		}
+		description := descriptions[r.Key]
+		pinned := r.ID != ec2DerivedSGRuleID(sg.GroupID, r.Key, 0)
+		if description == "" && len(tags) == 0 && !pinned {
+			continue
+		}
+		ec2SetRuleMeta(sg, r.Key, func(m *EC2SecurityGroupRuleMeta) {
+			if r.Kind != ec2SGRuleSourceGroup {
+				m.Description = description
+			}
+			m.Tags = slices.Clone(tags)
+			if pinned {
+				m.ID = r.ID
+			}
+		})
+	}
+}
+
+// ec2RuleIDTargets resolves a revoke's SecurityGroupRuleId.N to the permissions that revoke the
+// named rules: sourced holds the single-source permissions [ec2RevokePermissions] removes, and
+// sourceless the rules naming no source, which [ec2DropSourcelessPermission] removes, because a
+// sourceless target given to the former drops whichever stored permission first shares its
+// ports. An ID that is not of the sgr- form is InvalidSecurityGroupRuleId.Malformed; one naming
+// no rule of the group in the request's direction is InvalidSecurityGroupRuleId.NotFound.
+//
+// A rule the request also names in perms is left out, so naming one rule both ways revokes it
+// once rather than reporting the second removal as unknown.
+func ec2RuleIDTargets(
+	rules []ec2SGRule, ids []string, egress bool, perms []EC2IPPermission,
+) (sourced, sourceless []EC2IPPermission, err error) {
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+	filter := newEC2IDFilter(ids, ec2SecurityGroupRuleIDKind)
+	if err := filter.validate(); err != nil {
+		return nil, nil, err
+	}
+	named := map[string]bool{}
+	for _, perm := range perms {
+		for _, r := range ec2SplitPermission(egress, perm) {
+			named[r.Key] = true
+		}
+	}
+	for _, r := range rules {
+		if r.Egress != egress || !filter.match(r.ID) || named[r.Key] {
+			continue
+		}
+		named[r.Key] = true
+		if r.Kind == ec2SGRuleSourceNone {
+			sourceless = append(sourceless, r.Perm)
+		} else {
+			sourced = append(sourced, r.Perm)
+		}
+	}
+	if err := filter.unresolved(); err != nil {
+		return nil, nil, err
+	}
+	return sourced, sourceless, nil
+}
+
+// ec2DropSourcelessPermission removes from stored the first permission that names no source and
+// shares target's protocol and port range — the stored permission a sourceless rule is, and no
+// other — and reports whether one was removed.
+func ec2DropSourcelessPermission(stored []EC2IPPermission, target EC2IPPermission) ([]EC2IPPermission, bool) {
+	for i, perm := range stored {
+		if !ec2PermHasSource(perm) && ec2SamePortRange(perm, target) {
+			return slices.Delete(slices.Clone(stored), i, i+1), true
+		}
+	}
+	return stored, false
 }

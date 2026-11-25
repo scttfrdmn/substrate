@@ -65,8 +65,9 @@ type EC2Plugin struct {
 	// through [EC2Plugin.tagRecord], and CloudFormation's stamps and stack-tag propagation through
 	// [EC2Plugin.applyTagsByID] (#1609). It orders only those. Another operation that rewrites the
 	// same record, such as an instance state change, does not take it — except that a tag write
-	// naming a VPC, network ACL, DHCP option set or flow log also takes sgMu, first; see
-	// [EC2Plugin.lockTagWrite].
+	// naming a record [ec2TagWriteTakesSGMu] lists also takes sgMu, first; see
+	// [EC2Plugin.lockTagWrite]. ModifyInstanceCreditSpecification takes it around its instance
+	// writes.
 	tagMu sync.Mutex
 }
 
@@ -166,6 +167,10 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.authorizeSecurityGroupEgress(ctx, req)
 	case "RevokeSecurityGroupEgress":
 		return p.revokeSecurityGroupEgress(ctx, req)
+	case "DescribeSecurityGroupRules":
+		return p.describeSecurityGroupRules(ctx, req)
+	case "ModifySecurityGroupRules":
+		return p.modifySecurityGroupRules(ctx, req)
 	case "CreateInternetGateway":
 		return p.createInternetGateway(ctx, req)
 	case "DescribeInternetGateways":
@@ -207,6 +212,14 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.modifyInstanceAttribute(ctx, req)
 	case "DescribeInstanceAttribute":
 		return p.describeInstanceAttribute(ctx, req)
+	case "DescribeInstanceCreditSpecifications":
+		return p.describeInstanceCreditSpecifications(ctx, req)
+	case "ModifyInstanceCreditSpecification":
+		return p.modifyInstanceCreditSpecification(ctx, req)
+	case "GetDefaultCreditSpecification":
+		return p.getDefaultCreditSpecification(ctx, req)
+	case "ModifyDefaultCreditSpecification":
+		return p.modifyDefaultCreditSpecification(ctx, req)
 	case "ModifyInstanceMetadataOptions":
 		return p.modifyInstanceMetadataOptions(ctx, req)
 	// Key pair operations
@@ -585,6 +598,7 @@ func (p *EC2Plugin) launchInstances(
 	ltID := req.Params["LaunchTemplate.LaunchTemplateId"]
 	ltName := req.Params["LaunchTemplate.LaunchTemplateName"]
 	var lt *EC2LaunchTemplate
+	var templateCPUCredits string
 	if ltID != "" || ltName != "" {
 		// A named template that does not exist is refused rather than skipped (#1469). It
 		// was skipped, so the launch went on without the template and failed — when it
@@ -648,6 +662,7 @@ func (p *EC2Plugin) launchInstances(
 		if !disableAPITerminationStated && ltData.DisableAPITermination != "" {
 			disableAPITermination = ltData.DisableAPITermination == "true"
 		}
+		templateCPUCredits = ltData.CPUCredits
 		if ltData.MetadataOptions != nil {
 			metadataOptions = ltData.MetadataOptions.overlay(metadataOptions)
 		}
@@ -691,6 +706,13 @@ func (p *EC2Plugin) launchInstances(
 	// request nor the template named one.
 	if instanceType == "" {
 		instanceType = "t3.micro"
+	}
+	// The credit option of a burstable launch: the request's, the template's, or the account's
+	// default for the family (#1614); see [ec2LaunchCPUCredits].
+	cpuCredits, err := ec2LaunchCPUCredits(p.state, reqCtx, instanceType,
+		req.Params["CreditSpecification.CpuCredits"], templateCPUCredits)
+	if err != nil {
+		return nil, "", nil, err
 	}
 
 	associatePublicIP := strings.EqualFold(publicIPPref, "true")
@@ -901,6 +923,7 @@ func (p *EC2Plugin) launchInstances(
 
 			DisableAPITermination: disableAPITermination,
 			AvailabilityZone:      placementAZ,
+			CPUCredits:            cpuCredits,
 
 			// The image's architecture, which is what API_Instance reports (#1525); an image
 			// that states none falls back to the type's — see [ec2InstanceArchitecture].
@@ -2199,9 +2222,9 @@ func (p *EC2Plugin) deleteVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	vpcID := req.Params["VpcId"]
 	cidr := req.Params["CidrBlock"]
-	az := req.Params["AvailabilityZone"]
-	if az == "" {
-		az = reqCtx.Region + "a"
+	az, awsErr := ec2SubnetZone(reqCtx.Region, req.Params)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 	tags := ec2TagSpecificationTags(req.Params, "", "subnet")
 	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
@@ -2580,10 +2603,10 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 			Description: sg.Description, VpcID: sg.VPCID, Tags: ec2TagSet(sg.Tags),
 		}
 		for _, rule := range sg.IngressRules {
-			item.IPPermissions = append(item.IPPermissions, ec2IPPermissionXML(rule))
+			item.IPPermissions = append(item.IPPermissions, ec2DescribedPermissionXML(sg, rule, false))
 		}
 		for _, rule := range sg.EgressRules {
-			item.IPPermissionsE = append(item.IPPermissionsE, ec2IPPermissionXML(rule))
+			item.IPPermissionsE = append(item.IPPermissionsE, ec2DescribedPermissionXML(sg, rule, true))
 		}
 		resp.Groups = append(resp.Groups, item)
 	}
@@ -2672,137 +2695,6 @@ func (p *EC2Plugin) authorizeSecurityGroupEgress(reqCtx *RequestContext, req *AW
 
 func (p *EC2Plugin) revokeSecurityGroupEgress(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	return p.modifySGRules(reqCtx, req, "egress", false)
-}
-
-// modifySGRules applies an Authorize/RevokeSecurityGroupIngress/Egress request.
-//
-// A revoke removes each named source on its own (#1453) — see [ec2RevokePermissions] — and
-// answers a source that matched nothing the way API_RevokeSecurityGroupIngress says it is
-// answered, which depends on the group's VPC: "For a default VPC, if the values you specify
-// do not match the existing rule's values, no error is returned, and the output describes the
-// security group rules that were not revoked. For a non-default VPC ... an
-// InvalidPermission.NotFound client error is returned, and no rules are revoked." The
-// default-VPC half renders unknownIpPermissionSet; the other refuses before anything is
-// written.
-//
-// SecurityGroupRuleId.N is not read: substrate assigns no sgr- rule IDs, so a revoke naming
-// rules only by ID still answers MissingParameter.
-//
-// An authorize naming a source the group already allows for the same protocol and ports is
-// InvalidPermission.Duplicate, and nothing is written (#1491); the check is per source, the
-// granularity the revoke above works at — see [ec2AuthorizeDuplicates].
-//
-// Every IPv4 and IPv6 range is canonicalised before it is compared or stored (#1553), as the
-// operation pages publish: "AWS canonicalizes IPv4 and IPv6 CIDRs" — see
-// [ec2CanonicalizePermissions]. So 100.68.0.18/18 is stored and described as 100.68.0.0/18, and
-// authorizing it beside a stored 100.68.0.0/18 is a duplicate.
-//
-// GroupName is read as both pages publish it — "[Default VPC] The name of the security group.
-// For security groups for a default VPC you can specify either the ID or the name of the
-// security group" — and resolved among the default VPC's groups by
-// [EC2Plugin.defaultVPCGroupByName], the rule DeleteSecurityGroup follows (#1491). GroupId wins
-// when both are sent.
-func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direction string, add bool) (*AWSResponse, error) {
-	p.sgMu.Lock()
-	defer p.sgMu.Unlock()
-	sgID := req.Params["GroupId"]
-	if sgID == "" && req.Params["GroupName"] != "" {
-		resolved, resolveErr := p.defaultVPCGroupByName(reqCtx, req.Params["GroupName"])
-		if resolveErr != nil {
-			return nil, resolveErr
-		}
-		sgID = resolved
-	}
-	key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
-	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil {
-		return nil, fmt.Errorf("ec2 modifySGRules get: %w", err)
-	}
-	if reqErr := ec2RequireNamedResource(ec2SecurityGroupIDKind, "GroupId", sgID, data != nil); reqErr != nil {
-		return nil, reqErr
-	}
-	var sg EC2SecurityGroup
-	if unmarshalErr := json.Unmarshal(data, &sg); unmarshalErr != nil {
-		return nil, fmt.Errorf("ec2 modifySGRules unmarshal: %w", unmarshalErr)
-	}
-
-	perms := parseSGPermissions(req.Params, reqCtx.AccountID)
-	if len(perms) == 0 {
-		return nil, &AWSError{
-			Code:       "MissingParameter",
-			Message:    "No permissions specified",
-			HTTPStatus: http.StatusBadRequest,
-		}
-	}
-	rules := &sg.IngressRules
-	if direction == "egress" {
-		rules = &sg.EgressRules
-	}
-	// A revoke may name a malformed range an earlier substrate stored verbatim; see
-	// [ec2CanonicalizePermissions].
-	var held []EC2IPPermission
-	if !add {
-		held = *rules
-	}
-	if err := ec2CanonicalizePermissions(perms, held); err != nil {
-		return nil, err
-	}
-	// A group named rather than identified is resolved to its ID within the group's VPC, on
-	// authorize and revoke alike, so the two forms address one rule.
-	if err := p.resolveGroupPairNames(reqCtx, sg.VPCID, perms); err != nil {
-		return nil, err
-	}
-
-	var unknown []EC2IPPermission
-	if add {
-		if ec2AuthorizeDuplicates(*rules, perms) {
-			return nil, ec2PermissionDuplicateError()
-		}
-		*rules = append(*rules, perms...)
-	} else {
-		*rules, unknown = ec2RevokePermissions(*rules, perms)
-		if len(unknown) > 0 {
-			inDefault, lookupErr := p.ec2VPCIsDefault(reqCtx, sg.VPCID)
-			if lookupErr != nil {
-				return nil, lookupErr
-			}
-			if !inDefault {
-				return nil, ec2PermissionNotFoundError()
-			}
-		}
-	}
-
-	newData, err := json.Marshal(sg)
-	if err != nil {
-		return nil, fmt.Errorf("ec2 modifySGRules marshal: %w", err)
-	}
-	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
-		return nil, fmt.Errorf("ec2 modifySGRules state.Put: %w", err)
-	}
-
-	opName := "AuthorizeSecurityGroupIngressResponse"
-	if direction == "egress" && add {
-		opName = "AuthorizeSecurityGroupEgressResponse"
-	} else if direction == "ingress" && !add {
-		opName = "RevokeSecurityGroupIngressResponse"
-	} else if direction == "egress" && !add {
-		opName = "RevokeSecurityGroupEgressResponse"
-	}
-	type response struct {
-		XMLName xml.Name
-		XMLNS   string                `xml:"xmlns,attr"`
-		Return  bool                  `xml:"return"`
-		Unknown []ec2IPPermissionItem `xml:"unknownIpPermissionSet>item,omitempty"`
-	}
-	resp := response{
-		XMLName: xml.Name{Local: opName},
-		XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
-		Return:  true,
-	}
-	for _, perm := range unknown {
-		resp.Unknown = append(resp.Unknown, ec2IPPermissionXML(perm))
-	}
-	return ec2XMLResponse(http.StatusOK, resp)
 }
 
 // ec2VPCIsDefault reports whether vpcID names the account's default VPC in the region.
@@ -3859,7 +3751,11 @@ func (p *EC2Plugin) modifyInstanceAttribute(reqCtx *RequestContext, req *AWSRequ
 
 	// Apply supported attribute modifications.
 	if v := req.Params["InstanceType.Value"]; v != "" {
+		oldType := inst.InstanceType
 		inst.InstanceType = v
+		if err := ec2ResizeCPUCredits(p.state, reqCtx, inst, oldType); err != nil {
+			return nil, err
+		}
 	}
 	// UserData.Value is read with a presence check rather than a non-empty one, so
 	// clearing an instance's user data is expressible: AWS's SecureBlobAttributeValue
@@ -3925,6 +3821,14 @@ type ec2Taggable struct {
 
 	// accountLess reports that AWS's ARN format for this type has an empty account field.
 	accountLess bool
+
+	// sgRuleID is set for a security group rule, whose tags live in its group's record at
+	// stateKey rather than in a record of its own; see [ec2SGRuleTaggable].
+	sgRuleID string
+
+	// lookupErr is a failure to resolve the ID, which the tag readers and writers return rather
+	// than treating the resource as absent.
+	lookupErr error
 }
 
 // resolved reports whether a record was found for the ID.
@@ -3971,6 +3875,8 @@ func ec2TaggableResource(state StateManager, reqCtx *RequestContext, id string) 
 		return ec2Taggable{stateKey: "subnet:" + scope + "/" + id, arnType: "subnet", arnID: id}, true
 	case strings.HasPrefix(id, "sg-"):
 		return ec2Taggable{stateKey: "sg:" + scope + "/" + id, arnType: "security-group", arnID: id}, true
+	case strings.HasPrefix(id, "sgr-"):
+		return ec2SGRuleTaggable(state, acct, region, id), true
 	case strings.HasPrefix(id, "igw-"):
 		return ec2Taggable{stateKey: "igw:" + scope + "/" + id, arnType: "internet-gateway", arnID: id}, true
 	case strings.HasPrefix(id, "rtb-"):
@@ -4154,8 +4060,14 @@ func ec2CheckTagResourceIDs(state StateManager, reqCtx *RequestContext, ids []st
 // [StateManager]. Nothing about reading a record's tags needs the plugin.
 func ec2ResourceTags(state StateManager, reqCtx *RequestContext, id string) ([]EC2Tag, bool, error) {
 	target, ok := ec2TaggableResource(state, reqCtx, id)
+	if ok && target.lookupErr != nil {
+		return nil, false, target.lookupErr
+	}
 	if !ok || !target.resolved() {
 		return nil, false, nil
+	}
+	if target.sgRuleID != "" {
+		return ec2SGRuleTags(state, target.stateKey, target.sgRuleID)
 	}
 	data, err := state.Get(context.Background(), ec2Namespace, target.stateKey)
 	if err != nil || data == nil {
@@ -4199,8 +4111,14 @@ func ec2ApplyTagsToResource(
 	if !ok {
 		return ec2InvalidTagResourceID(id)
 	}
+	if target.lookupErr != nil {
+		return target.lookupErr
+	}
 	if !target.resolved() {
 		return nil
+	}
+	if target.sgRuleID != "" {
+		return ec2ApplySGRuleTags(state, target.stateKey, target.sgRuleID, tags, remove)
 	}
 	stateKey := target.stateKey
 
@@ -7055,6 +6973,7 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 	type instanceTypeItem struct {
 		InstanceType          string           `xml:"instanceType"`
 		CurrentGeneration     bool             `xml:"currentGeneration"`
+		BurstablePerformance  bool             `xml:"burstablePerformanceSupported"`
 		VCpuInfo              vcpuInfo         `xml:"vCpuInfo"`
 		MemoryInfo            memoryInfo       `xml:"memoryInfo"`
 		ProcessorInfo         processorInfo    `xml:"processorInfo"`
@@ -7084,10 +7003,11 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 			// carries no omitempty for that reason — a false currentGeneration is an
 			// answer, and dropping the element would make it indistinguishable from a
 			// type substrate declined to classify.
-			CurrentGeneration: info.CurrentGeneration,
-			VCpuInfo:          vcpuInfo{DefaultVCpus: info.VCpus},
-			MemoryInfo:        memoryInfo{SizeInMiB: info.MemoryMiB},
-			ProcessorInfo:     processorInfo{SupportedArchitectures: info.SupportedArchs},
+			CurrentGeneration:    info.CurrentGeneration,
+			BurstablePerformance: ec2BurstableFamily(info.InstanceType),
+			VCpuInfo:             vcpuInfo{DefaultVCpus: info.VCpus},
+			MemoryInfo:           memoryInfo{SizeInMiB: info.MemoryMiB},
+			ProcessorInfo:        processorInfo{SupportedArchitectures: info.SupportedArchs},
 		}
 		for _, uc := range info.SupportedUsageClasses {
 			item.SupportedUsageClasses = append(item.SupportedUsageClasses, usageClassItem{Value: uc})
@@ -7169,15 +7089,19 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 	if locationType == "" {
 		locationType = "availability-zone"
 	}
-	var locations []string
+	// zoneIDs holds each zone location's ID, parallel to locations, for the per-zone exclusions
+	// of [ec2ZoneOffers] (#1621); it is empty for the region location.
+	var locations, zoneIDs []string
 	switch locationType {
 	case "availability-zone":
 		for _, az := range ec2SeededZones(reqCtx.Region) {
 			locations = append(locations, az.ZoneName)
+			zoneIDs = append(zoneIDs, az.ZoneID)
 		}
 	case "availability-zone-id":
 		for _, az := range ec2SeededZones(reqCtx.Region) {
 			locations = append(locations, az.ZoneID)
+			zoneIDs = append(zoneIDs, az.ZoneID)
 		}
 	case "region":
 		locations = []string{reqCtx.Region}
@@ -7211,8 +7135,11 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 		if filterByType && !ec2FilterAccepts(wantTypes, info.InstanceType) {
 			continue
 		}
-		for _, loc := range locations {
+		for i, loc := range locations {
 			if filterByLocation && !ec2FilterAccepts(wantLocations, loc) {
+				continue
+			}
+			if i < len(zoneIDs) && !ec2ZoneOffers(zoneIDs[i], info) {
 				continue
 			}
 			resp.InstanceTypeOfferings = append(resp.InstanceTypeOfferings, offeringItem{
@@ -7405,6 +7332,10 @@ func parseLaunchTemplateData(params map[string]string) (EC2LaunchTemplateData, *
 	if awsErr != nil {
 		return EC2LaunchTemplateData{}, awsErr
 	}
+	cpuCredits := params[ltPrefix+"CreditSpecification.CpuCredits"]
+	if awsErr := ec2CheckCPUCredits(cpuCredits); awsErr != nil {
+		return EC2LaunchTemplateData{}, awsErr
+	}
 	disableAPITermination := params[ltPrefix+"DisableApiTermination"]
 	switch {
 	case disableAPITermination == "":
@@ -7434,6 +7365,7 @@ func parseLaunchTemplateData(params map[string]string) (EC2LaunchTemplateData, *
 		BlockDeviceMappings:     ec2ParseBlockDeviceMappings(params, ltPrefix),
 		SecurityGroupIDs:        indexedParams(params, ltPrefix+"SecurityGroupId.%d"),
 		DisableAPITermination:   disableAPITermination,
+		CPUCredits:              cpuCredits,
 	}
 	if !metadata.empty() {
 		data.MetadataOptions = &metadata

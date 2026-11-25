@@ -213,15 +213,23 @@ func ec2AuthzTagResources(state StateManager, reqCtx *RequestContext, req *AWSRe
 	var out []authzResource
 	for _, id := range extractIndexedParams(req.Params, "ResourceId") {
 		target, ok := ec2TaggableResource(state, reqCtx, id)
+		if ok && target.lookupErr != nil {
+			out = append(out, authzResource{ARN: target.arn(region, acct), ReadErr: target.lookupErr})
+			continue
+		}
 		if !ok || !target.resolved() {
 			continue
 		}
-		out = append(out, authzResource{
-			ARN: target.arn(region, acct),
-			// The same state key the handler will read and write, so the tags a
-			// condition is evaluated against are the ones the call is about to change.
-			Tags: ec2AuthzTagsFor(state, target.stateKey),
-		})
+		// The same state key the handler will read and write, so the tags a condition is
+		// evaluated against are the ones the call is about to change. A security group
+		// rule's record is its group's, so its tags are the rule's own, read from the
+		// group's rule metadata rather than the group's tag set (#1490).
+		resource := authzResource{ARN: target.arn(region, acct), Tags: ec2AuthzTagsFor(state, target.stateKey)}
+		if target.sgRuleID != "" {
+			ruleTags, _, err := ec2SGRuleTags(state, target.stateKey, target.sgRuleID)
+			resource.Tags, resource.ReadErr = ec2TagsToMap(ruleTags), err
+		}
+		out = append(out, resource)
 	}
 	return out
 }
