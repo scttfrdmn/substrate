@@ -348,9 +348,11 @@ func (p *ServiceDiscoveryPlugin) createNamespace(ctx *RequestContext, req *AWSRe
 		return nil, err
 	}
 	for _, ns := range all {
-		// A private namespace's name is unique within its VPC, as a private hosted zone's is; an
-		// HTTP or public namespace's within the account and Region.
-		if ns.Name != in.Name || (typ == sdTypeDNSPrivate && ns.Type == sdTypeDNSPrivate && ns.Vpc != in.Vpc) {
+		// A namespace's name is unique within the account and Region, whatever its type or VPC:
+		// every namespace's HttpProperties.HttpName is its name, and DiscoverInstances finds the
+		// namespace by that name alone, which a second namespace of the same name would make
+		// ambiguous. The reasoning is substrate's; no page states the rule.
+		if ns.Name != in.Name {
 			continue
 		}
 		if in.CreatorRequestID != "" && ns.CreatorRequestID == in.CreatorRequestID && ns.CreateOperationID != "" {
@@ -368,7 +370,7 @@ func (p *ServiceDiscoveryPlugin) createNamespace(ctx *RequestContext, req *AWSRe
 	if op.Status == sdOpSuccess {
 		// The operation is stored before the namespace, so a CreatorRequestId retry never answers an
 		// OperationId GetOperation cannot find, and a later failure undoes what this request made.
-		if err := p.saveOperation(ctx, op); err != nil {
+		if err := p.saveOperation(ctx, &op); err != nil {
 			return nil, err
 		}
 		ns := sdNamespace{
@@ -391,6 +393,7 @@ func (p *ServiceDiscoveryPlugin) createNamespace(ctx *RequestContext, req *AWSRe
 			case errors.As(zoneErr, &awsErr):
 				op.fail("CANNOT_CREATE_HOSTED_ZONE", awsErr.Message)
 			case zoneErr != nil:
+				p.undoHostedZone(ctx, zoneID)
 				p.dropOperation(ctx, op)
 				return nil, zoneErr
 			}
@@ -405,7 +408,9 @@ func (p *ServiceDiscoveryPlugin) createNamespace(ctx *RequestContext, req *AWSRe
 			return sdOperationAnswer(op)
 		}
 	}
-	if err := p.saveOperation(ctx, op); err != nil {
+	if err := p.saveOperation(ctx, &op); err != nil {
+		// A SUCCESS stored before the effect failed must not outlive this request.
+		p.dropOperation(ctx, op)
 		return nil, err
 	}
 	return sdOperationAnswer(op)
@@ -423,7 +428,9 @@ func (p *ServiceDiscoveryPlugin) undoHostedZone(ctx *RequestContext, zoneID stri
 // createHostedZone creates a DNS namespace's hosted zone with Route 53's CreateHostedZone and
 // returns its ID. A private namespace's zone is private and names the namespace's VPC. The caller
 // reference is the operation ID, which is unique per request. Without a registry or a Route 53
-// plugin no zone is created and the namespace reports none.
+// plugin no zone is created and the namespace reports none. When the zone was created but its
+// answer cannot be decoded, the ID is still returned, read from the answer's text, beside the
+// error, so the caller can undo it.
 func (p *ServiceDiscoveryPlugin) createHostedZone(ctx *RequestContext, ns *sdNamespace, callerRef string) (string, error) {
 	if p.registry == nil {
 		return "", nil
@@ -457,10 +464,17 @@ func (p *ServiceDiscoveryPlugin) createHostedZone(ctx *RequestContext, ns *sdNam
 		ID string `xml:"HostedZone>Id"`
 	}
 	if err := xml.Unmarshal(resp.Body, &out); err != nil {
-		return "", fmt.Errorf("servicediscovery decode CreateHostedZone: %w", err)
+		zoneID := ""
+		if m := sdZoneIDPattern.FindSubmatch(resp.Body); m != nil {
+			zoneID = string(m[1])
+		}
+		return zoneID, fmt.Errorf("servicediscovery decode CreateHostedZone: %w", err)
 	}
 	return strings.TrimPrefix(out.ID, "/hostedzone/"), nil
 }
+
+// sdZoneIDPattern finds a hosted zone ID in a CreateHostedZone answer that does not decode.
+var sdZoneIDPattern = regexp.MustCompile(`/hostedzone/([A-Za-z0-9]+)`)
 
 // deleteHostedZone deletes a namespace's hosted zone with Route 53's DeleteHostedZone. A zone
 // already gone is not an error.
@@ -613,7 +627,7 @@ func (p *ServiceDiscoveryPlugin) deleteNamespace(ctx *RequestContext, req *AWSRe
 	if op.Status == sdOpSuccess {
 		// The operation is stored, then the namespace record removed, then the zone deleted, so a
 		// store failure leaves the zone, and a zone Route 53 refuses to delete restores the record.
-		if err := p.saveOperation(ctx, op); err != nil {
+		if err := p.saveOperation(ctx, &op); err != nil {
 			return nil, err
 		}
 		key := sdNamespaceKey(ctx, ns.ID)
@@ -625,8 +639,9 @@ func (p *ServiceDiscoveryPlugin) deleteNamespace(ctx *RequestContext, req *AWSRe
 		if zoneErr == nil {
 			return sdOperationAnswer(op)
 		}
-		if err := p.put(key, ns); err != nil && p.logger != nil {
-			p.logger.Warn("servicediscovery: restore namespace", "namespace", ns.ID, "error", err)
+		if err := p.put(key, ns); err != nil {
+			p.dropOperation(ctx, op)
+			return nil, fmt.Errorf("servicediscovery restore namespace %s after %v: %w", ns.ID, zoneErr, err)
 		}
 		var awsErr *AWSError
 		if !errors.As(zoneErr, &awsErr) {
@@ -635,7 +650,9 @@ func (p *ServiceDiscoveryPlugin) deleteNamespace(ctx *RequestContext, req *AWSRe
 		}
 		op.fail(awsErr.Code, awsErr.Message)
 	}
-	if err := p.saveOperation(ctx, op); err != nil {
+	if err := p.saveOperation(ctx, &op); err != nil {
+		// A SUCCESS stored before the effect failed must not outlive this request.
+		p.dropOperation(ctx, op)
 		return nil, err
 	}
 	return sdOperationAnswer(op)
@@ -685,7 +702,7 @@ func (p *ServiceDiscoveryPlugin) updateNamespace(ctx *RequestContext, req *AWSRe
 			return nil, err
 		}
 	}
-	if err := p.saveOperation(ctx, op); err != nil {
+	if err := p.saveOperation(ctx, &op); err != nil {
 		return nil, err
 	}
 	return sdOperationAnswer(op)

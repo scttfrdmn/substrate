@@ -360,7 +360,7 @@ func (p *ServiceDiscoveryPlugin) updateService(ctx *RequestContext, req *AWSRequ
 			return nil, err
 		}
 	}
-	if err := p.saveOperation(ctx, op); err != nil {
+	if err := p.saveOperation(ctx, &op); err != nil {
 		return nil, err
 	}
 	return sdOperationAnswer(op)
@@ -529,7 +529,7 @@ func (p *ServiceDiscoveryPlugin) registerInstance(ctx *RequestContext, req *AWSR
 			return nil, err
 		}
 	}
-	if err := p.saveOperation(ctx, op); err != nil {
+	if err := p.saveOperation(ctx, &op); err != nil {
 		return nil, err
 	}
 	return sdOperationAnswer(op)
@@ -579,7 +579,7 @@ func (p *ServiceDiscoveryPlugin) deregisterInstance(ctx *RequestContext, req *AW
 			return nil, err
 		}
 	}
-	if err := p.saveOperation(ctx, op); err != nil {
+	if err := p.saveOperation(ctx, &op); err != nil {
 		return nil, err
 	}
 	return sdOperationAnswer(op)

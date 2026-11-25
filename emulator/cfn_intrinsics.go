@@ -72,11 +72,6 @@ func cfnRefValue(dr DeployedResource, cctx *cfnContext) (string, bool) {
 
 	// ----- Ref is a value recorded at deploy time --------------------------------------
 
-	case "AWS::ServiceDiscovery::Instance":
-		// "Ref returns the value of Id for the instance"; the physical ID also names the service
-		// (see deployServiceDiscoveryInstance).
-		return cfnRefMetadata(dr, "InstanceId"), true
-
 	case "AWS::EC2::SubnetRouteTableAssociation":
 		// The live association ID, which an in-place move to another table changes while the
 		// physical ID stays (#1605; see deployEC2SubnetRouteTableAssociation).

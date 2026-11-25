@@ -396,7 +396,20 @@ func (p cfnResourcePlan) replacedBy(dr DeployedResource) bool {
 	if p.prior.Type != dr.Type {
 		return true
 	}
+	for _, key := range cfnIdentityMetadata[dr.Type] {
+		if cfnRefMetadata(dr, key) != cfnRefMetadata(p.prior, key) {
+			return true
+		}
+	}
 	return dr.PhysicalID != "" && p.prior.PhysicalID != "" && dr.PhysicalID != p.prior.PhysicalID
+}
+
+// cfnIdentityMetadata names, for the types whose physical ID does not identify the resource alone,
+// the recorded metadata that does with it. A Cloud Map instance's physical ID is its InstanceId,
+// which is unique only within its service, so a ServiceId change keeps the physical ID and is still
+// a different instance (#1614).
+var cfnIdentityMetadata = map[string][]string{ //nolint:gochecknoglobals // immutable lookup table
+	"AWS::ServiceDiscovery::Instance": {"ServiceId"},
 }
 
 // cfnHasRealDelete reports whether a sweep deletes resType through a request, rather than by

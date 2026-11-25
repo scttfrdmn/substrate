@@ -7,8 +7,8 @@
 
 | Operation | Notes |
 |-----------|-------|
-| CreateHttpNamespace | Asynchronous (see below). A name already in use is `NamespaceAlreadyExists`/400, except a retry with the same `CreatorRequestId`, which answers the original `OperationId` |
-| CreatePrivateDnsNamespace | As above; `Vpc` is required, and the name need only be unique within the VPC. Creates a private Route 53 hosted zone of the same name |
+| CreateHttpNamespace | Asynchronous (see below). A name already in use in the account and Region, by a namespace of any type, is `NamespaceAlreadyExists`/400, except a retry with the same `CreatorRequestId`, which answers the original `OperationId`. The uniqueness is substrate's reading: every namespace's `HttpName` is its name, and `DiscoverInstances` finds a namespace by that name alone |
+| CreatePrivateDnsNamespace | As above; `Vpc` is required. Creates a private Route 53 hosted zone of the same name |
 | CreatePublicDnsNamespace | As above; creates a public hosted zone |
 | GetNamespace | `Id` or ARN. `Properties.DnsProperties.HostedZoneId` for a DNS namespace, `SOA` when one was set, and `HttpProperties.HttpName` for every namespace |
 | ListNamespaces | `Filters` on `TYPE`, `NAME`, `HTTP_NAME` (`EQ`, `BEGINS_WITH`, and `IN` for `TYPE`) and `RESOURCE_OWNER`. Name order; pages on `NextToken`/`MaxResults` (1–100, default 100) |
@@ -144,6 +144,11 @@ v1.50 and later prefer CBOR, which this plugin does not answer yet
 | AWS::ServiceDiscovery::Instance | the `InstanceId` (the logical ID when absent) | Registers and waits on the operation; changed `InstanceAttributes` re-register it in place, and a new `ServiceId` or `InstanceId` replaces it |
 
 A namespace's or instance's delete waits on its operation, so a `FAIL` (seeded, or a hosted zone
-Route 53 refuses to delete) fails the resource rather than reading as deleted. Each namespace
-create carries a fresh `CreatorRequestId`, so a replacement — a `PrivateDnsNamespace` moved to
-another `Vpc` — creates a new namespace before the old one is deleted.
+Route 53 refuses to delete) fails the resource rather than reading as deleted. A namespace create's
+`CreatorRequestId` is derived from the stack, the logical ID, the type, the `Name` and the `Vpc`, so
+a retry is idempotent and a replacement is never answered with the namespace it replaces. A
+replacement that keeps its `Name` — a `PrivateDnsNamespace` moved to another `Vpc` — is therefore
+refused as `NamespaceAlreadyExists` and the update rolls back, as CloudFormation's does: "If you
+specify a name, you cannot perform updates that require replacement of this resource." A new `Name`
+replaces it. An instance's physical ID is its `InstanceId`; a `ServiceId` change replaces it in the
+new service and deregisters it from the old one.

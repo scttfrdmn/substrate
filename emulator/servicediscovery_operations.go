@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"time"
 )
 
 // Cloud Map's asynchronous operations (#1614).
@@ -97,25 +98,16 @@ var sdOperationProgressions = newProgression[sdOperationStatusSeed](serviceDisco
 func sdOperationSeqKey(ctx *RequestContext) string { return "opseq:" + sdScope(ctx) }
 
 // newOperation mints an operation of typ on targets and decides its settled status from the seed
-// in force, without storing it. The caller holds [ServiceDiscoveryPlugin.mu], applies the effect only
-// when the status is SUCCESS, and may fail the operation itself (see [sdOperation]) before or after
-// it calls [ServiceDiscoveryPlugin.saveOperation].
+// in force, without storing anything. The caller holds [ServiceDiscoveryPlugin.mu], applies the
+// effect only when the status is SUCCESS, and may fail the operation itself (see [sdOperation])
+// before or after it calls [ServiceDiscoveryPlugin.saveOperation].
 func (p *ServiceDiscoveryPlugin) newOperation(ctx *RequestContext, typ string, targets map[string]string) (sdOperation, error) {
-	var seq int64
-	if _, err := p.get(sdOperationSeqKey(ctx), &seq); err != nil {
-		return sdOperation{}, err
-	}
-	seq++
-	if err := p.put(sdOperationSeqKey(ctx), seq); err != nil {
-		return sdOperation{}, err
-	}
 	op := sdOperation{
 		ID:         ctx.IDs.Chars(32, sdIDAlphabet) + "-" + ctx.IDs.Chars(9, sdIDAlphabet),
 		Type:       typ,
 		Status:     sdOpSuccess,
 		CreateDate: p.tc.Now().UTC(),
 		Targets:    targets,
-		Seq:        seq,
 	}
 	seed, err := sdOperationProgressions.resolve(context.Background(), p.state, op.ID)
 	if err != nil {
@@ -132,17 +124,41 @@ func (op *sdOperation) fail(code, message string) {
 	op.Status, op.ErrorCode, op.ErrorMessage = sdOpFail, code, message
 }
 
-// saveOperation stores op.
-func (p *ServiceDiscoveryPlugin) saveOperation(ctx *RequestContext, op sdOperation) error {
+// saveOperation stores op. Its first save numbers it from the caller's operation counter, so a
+// request that fails before saving its operation writes nothing.
+func (p *ServiceDiscoveryPlugin) saveOperation(ctx *RequestContext, op *sdOperation) error {
+	if op.Seq == 0 {
+		var seq int64
+		if _, err := p.get(sdOperationSeqKey(ctx), &seq); err != nil {
+			return err
+		}
+		if err := p.put(sdOperationSeqKey(ctx), seq+1); err != nil {
+			return err
+		}
+		op.Seq = seq + 1
+	}
 	return p.put(sdOperationKey(ctx, op.ID), op)
 }
 
 // dropOperation removes a stored operation whose effect could not be applied, so no answer names
-// it. A failure to remove it is logged: the request is already failing with the error that caused it.
+// it, and returns the counter its save advanced. A failure is logged: the request is already
+// failing with the error that caused the drop.
 func (p *ServiceDiscoveryPlugin) dropOperation(ctx *RequestContext, op sdOperation) {
 	if err := p.del(sdOperationKey(ctx, op.ID)); err != nil && p.logger != nil {
 		p.logger.Warn("servicediscovery: drop operation", "operation", op.ID, "error", err)
 	}
+	var seq int64
+	if _, err := p.get(sdOperationSeqKey(ctx), &seq); err == nil && op.Seq != 0 && seq == op.Seq {
+		if err := p.put(sdOperationSeqKey(ctx), seq-1); err != nil && p.logger != nil {
+			p.logger.Warn("servicediscovery: restore operation counter", "error", err)
+		}
+	}
+}
+
+// sdTimeKey renders t as a fixed-width string that sorts as t does, for any t: the seconds are
+// offset by 2^63 so a negative one sorts first, and the nanoseconds follow.
+func sdTimeKey(t time.Time) string {
+	return fmt.Sprintf("%020d.%09d", uint64(t.Unix())^(1<<63), t.Nanosecond())
 }
 
 // sdOperationAnswer is the {"OperationId"} an asynchronous operation answers.
@@ -330,7 +346,7 @@ func (p *ServiceDiscoveryPlugin) listOperations(ctx *RequestContext, req *AWSReq
 		}
 	}
 	res, err := page(matched, func(s summary) cursorKey {
-		return cursorKey{Sort: fmt.Sprintf("%020d", s.op.CreateDate.UnixNano()), Tie: fmt.Sprintf("%020d/%s", s.op.Seq, s.op.ID)}
+		return cursorKey{Sort: sdTimeKey(s.op.CreateDate), Tie: fmt.Sprintf("%020d/%s", s.op.Seq, s.op.ID)}
 	}, preq)
 	if err != nil {
 		return nil, sdInvalid("The NextToken is not valid for this request.")

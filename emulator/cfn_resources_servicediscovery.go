@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,17 +96,31 @@ var cfnSDNamespaceOperations = map[string]struct{ create, update string }{ //nol
 	"AWS::ServiceDiscovery::PublicDnsNamespace":  {"CreatePublicDnsNamespace", "UpdatePublicDnsNamespace"},
 }
 
+// cfnSDCreatorRequestID derives a namespace create's CreatorRequestId from its inputs: "cfn-" and the
+// FNV-64a hash of the account, Region, stack, logical ID, type, Name and Vpc.
+func cfnSDCreatorRequestID(cctx *cfnContext, logicalID string, parts ...string) string {
+	h := fnv.New64a()
+	// Errors are impossible: hash.Hash.Write never returns one.
+	_, _ = h.Write([]byte(strings.Join(append([]string{cctx.accountID, cctx.region, cctx.stackName, logicalID}, parts...), "\x00")))
+	return fmt.Sprintf("cfn-%016x", h.Sum64())
+}
+
 // cfnDeployServiceDiscoveryNamespace is the deploy helper for the three namespace types: it creates
 // the namespace, waits for the operation, and reads the namespace back for its ARN and hosted zone.
-// Each create carries a fresh CreatorRequestId, so a replacement that keeps its Name is refused as
-// a duplicate rather than answered with the namespace it replaces, which the update then deletes.
+// The CreatorRequestId is derived from the stack, the logical ID and the declaration's identity
+// (type, Name and Vpc), so a retry of the same declaration is idempotent and a replacement — which
+// changes one of them — is never answered with the namespace it replaces. A replacement that keeps
+// its Name is then refused as a duplicate, as CloudFormation's own is: "If you specify a name, you
+// cannot perform updates that require replacement of this resource" (the CloudFormation user
+// guide's Name type). It draws nothing from the deployer's mint.
 func cfnDeployServiceDiscoveryNamespace(typ string) cfnDeployFunc {
 	return func(d *StackDeployer, ctx context.Context, logicalID string, props map[string]interface{},
 		streamID string, cctx *cfnContext) (DeployedResource, float64, error) {
 		dr := DeployedResource{LogicalID: logicalID, Type: typ}
 		body := map[string]interface{}{
-			"Name":             resolveStringProp(props, "Name", "", cctx),
-			"CreatorRequestId": d.internalRequestID(),
+			"Name": resolveStringProp(props, "Name", "", cctx),
+			"CreatorRequestId": cfnSDCreatorRequestID(cctx, logicalID, typ, resolveStringProp(props, "Name", "", cctx),
+				resolveStringProp(props, "Vpc", "", cctx)),
 		}
 		if v := resolveStringProp(props, "Description", "", cctx); v != "" {
 			body["Description"] = v
@@ -336,17 +351,16 @@ func (d *StackDeployer) updateServiceDiscoveryService(
 // operation. An absent InstanceId is the logical ID. RegisterInstance updates an instance it already
 // holds, so a re-deploy of changed InstanceAttributes updates it in place.
 //
-// The physical ID is "{ServiceId}/{InstanceId}", because an instance is identified by both: a
-// ServiceId change keeps the InstanceId, and a physical ID of the InstanceId alone would read as the
-// same resource, so the update would never deregister the old one. Ref returns the InstanceId, as
-// the type's page publishes ([cfnRefValue]).
+// The physical ID is the InstanceId, which Ref returns as the type's page publishes. A ServiceId
+// change is a replacement that keeps the InstanceId, so the instance's ServiceId is part of its
+// identity ([cfnIdentityMetadata]) and the update deregisters the old one.
 func (d *StackDeployer) deployServiceDiscoveryInstance(
 	ctx context.Context, logicalID string, props map[string]interface{}, streamID string, cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	serviceID := resolveStringProp(props, "ServiceId", "", cctx)
 	instanceID := resolveStringProp(props, "InstanceId", logicalID, cctx)
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::ServiceDiscovery::Instance",
-		PhysicalID: serviceID + "/" + instanceID, Metadata: map[string]interface{}{"ServiceId": serviceID, "InstanceId": instanceID}}
+		PhysicalID: instanceID, Metadata: map[string]interface{}{"ServiceId": serviceID, "InstanceId": instanceID}}
 	attrs := map[string]string{}
 	if m, ok := cfnResolveStructured(props["InstanceAttributes"], cctx).(map[string]interface{}); ok {
 		for k, v := range m {
@@ -374,6 +388,9 @@ func (d *StackDeployer) deployServiceDiscoveryInstance(
 // [cfnDeleteServiceDiscoveryInstance] dispatches and waits on.
 func cfnServiceDiscoveryInstanceDeleter(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {
 	serviceID, instanceID := cfnRefMetadata(dr, "ServiceId"), cfnRefMetadata(dr, "InstanceId")
+	if instanceID == "" {
+		instanceID = dr.PhysicalID
+	}
 	if serviceID == "" || instanceID == "" {
 		return nil
 	}
@@ -413,6 +430,9 @@ func cfnDeleteServiceDiscoveryAsync(build cfnDeleteRequestFunc) func(context.Con
 			if err := json.Unmarshal(resp.Body, &out); err != nil {
 				return failed(fmt.Errorf("cfn servicediscovery delete decode: %w", err))
 			}
+		}
+		if out.OperationID == "" {
+			return failed(fmt.Errorf("%s answered no OperationId to wait on", req.Operation))
 		}
 		if _, _, err := d.cfnSDWait(ctx, out.OperationID, streamID); err != nil {
 			return failed(err)

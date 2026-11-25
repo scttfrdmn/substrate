@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -130,34 +131,52 @@ func TestServiceDiscovery_FailSeedNeedsAnErrorCode(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
-// TestCFN_ServiceDiscoveryNamespaceReplacementAndFailedDeletes pins a PrivateDnsNamespace replaced
-// by a Vpc change — a new namespace, the old one deleted — and a stack delete whose namespace
-// delete fails reporting the failure.
+// TestCFN_ServiceDiscoveryNamespaceReplacementAndFailedDeletes pins a PrivateDnsNamespace
+// replacement — refused while the Name is unchanged, carried out with a new Name, the instance
+// replaced through its ServiceId — and a stack delete whose instance delete fails reporting it.
 func TestCFN_ServiceDiscoveryNamespaceReplacementAndFailedDeletes(t *testing.T) {
 	ts := emulator.StartTestServer(t)
-	tmpl := func(vpc string) string {
+	tmpl := func(name, vpc string) string {
 		return `{"Resources":{
 			"A":{"Type":"AWS::EC2::VPC","Properties":{"CidrBlock":"10.30.0.0/16"}},
 			"B":{"Type":"AWS::EC2::VPC","Properties":{"CidrBlock":"10.31.0.0/16"}},
-			"Ns":{"Type":"AWS::ServiceDiscovery::PrivateDnsNamespace","Properties":{"Name":"moving.internal","Vpc":{"Ref":"` + vpc + `"}}},
+			"Ns":{"Type":"AWS::ServiceDiscovery::PrivateDnsNamespace","Properties":{"Name":"` + name + `","Vpc":{"Ref":"` + vpc + `"}}},
 			"Svc":{"Type":"AWS::ServiceDiscovery::Service","Properties":{"Name":"api","NamespaceId":{"Ref":"Ns"},
 				"DnsConfig":{"DnsRecords":[{"Type":"A","TTL":10}]}}},
 			"Node":{"Type":"AWS::ServiceDiscovery::Instance","Properties":{"ServiceId":{"Ref":"Svc"},
 				"InstanceAttributes":{"AWS_INSTANCE_IPV4":"10.30.0.1"}}}},
-			"Outputs":{"NsId":{"Value":{"Ref":"Ns"}}}}`
+			"Outputs":{"NsId":{"Value":{"Ref":"Ns"}},"Node":{"Value":{"Ref":"Node"}}}}`
 	}
-	code, body := cfnStrictCall(t, ts, "CreateStack", map[string]string{"StackName": "moving", "TemplateBody": tmpl("A")})
+	code, body := cfnStrictCall(t, ts, "CreateStack", map[string]string{"StackName": "moving", "TemplateBody": tmpl("moving.internal", "A")})
 	require.Equal(t, http.StatusOK, code, body)
 	status, reason := cfnStackStatusOf(t, ts, "moving")
 	require.Equal(t, "CREATE_COMPLETE", status, reason)
 	first := cfnStackOutput(t, ts, "moving", "NsId")
+	assert.Equal(t, "Node", cfnStackOutput(t, ts, "moving", "Node"), "Ref is the InstanceId")
 
-	code, body = cfnStrictCall(t, ts, "UpdateStack", map[string]string{"StackName": "moving", "TemplateBody": tmpl("B")})
+	// A Vpc change that keeps the Name is refused, as CloudFormation refuses replacing a resource
+	// whose name is fixed: the replacement's name is taken. The stack rolls back to the original.
+	code, body = cfnStrictCall(t, ts, "UpdateStack", map[string]string{"StackName": "moving", "TemplateBody": tmpl("moving.internal", "B")})
+	require.Equal(t, http.StatusOK, code, body)
+	status, reason = cfnStackStatusOf(t, ts, "moving")
+	assert.Equal(t, "UPDATE_ROLLBACK_COMPLETE", status, reason)
+	assert.Contains(t, reason, "NamespaceAlreadyExists")
+	assert.Equal(t, first, cfnStackOutput(t, ts, "moving", "NsId"))
+	sdOK(t, ts, "GetNamespace", map[string]string{"Id": first})
+
+	// With a new Name the replacement goes through: a new namespace, service and instance — the
+	// instance keeps its InstanceId and moves to the new service — and the old ones are deleted.
+	code, body = cfnStrictCall(t, ts, "UpdateStack", map[string]string{"StackName": "moving", "TemplateBody": tmpl("moved.internal", "B")})
 	require.Equal(t, http.StatusOK, code, body)
 	status, reason = cfnStackStatusOf(t, ts, "moving")
 	require.Equal(t, "UPDATE_COMPLETE", status, reason)
 	second := cfnStackOutput(t, ts, "moving", "NsId")
-	assert.NotEqual(t, first, second, "a Vpc change replaces the namespace")
+	assert.NotEqual(t, first, second, "a Name change replaces the namespace")
+	assert.Equal(t, "Node", cfnStackOutput(t, ts, "moving", "Node"))
+	services := sdOK(t, ts, "ListServices", map[string]any{})["Services"].([]any)
+	require.Len(t, services, 1, "the replaced service is deleted, so its instance was deregistered")
+	newSvc := services[0].(map[string]any)["Id"].(string)
+	sdOK(t, ts, "GetInstance", map[string]string{"ServiceId": newSvc, "InstanceId": "Node"})
 	code, doc, raw := sdCall(t, ts, "GetNamespace", map[string]string{"Id": first})
 	assert.Equal(t, http.StatusNotFound, code, "the replaced namespace is deleted: %s", raw)
 	assert.Equal(t, "NamespaceNotFound", sdErrCode(doc))
@@ -183,16 +202,74 @@ func TestCFN_ServiceDiscoveryNamespaceReplacementAndFailedDeletes(t *testing.T) 
 	assert.Empty(t, sdOK(t, ts, "ListNamespaces", map[string]any{})["Namespaces"])
 }
 
-// TestServiceDiscovery_PrivateNamespaceNamesAreUniquePerVPC pins that two private namespaces may
-// share a name in different VPCs, and not in one.
-func TestServiceDiscovery_PrivateNamespaceNamesAreUniquePerVPC(t *testing.T) {
+// TestServiceDiscovery_NamespaceNamesAreUniqueInTheAccount pins that a namespace name is refused
+// again in another VPC or as another type, because DiscoverInstances finds a namespace by name.
+func TestServiceDiscovery_NamespaceNamesAreUniqueInTheAccount(t *testing.T) {
 	ts := emulator.StartTestServer(t)
-	for _, vpc := range []string{"vpc-aaaa1111", "vpc-bbbb2222"} {
-		op := sdOK(t, ts, "CreatePrivateDnsNamespace", map[string]any{"Name": "shared.internal", "Vpc": vpc})["OperationId"].(string)
-		done, _ := sdWait(t, ts, op)
-		assert.Equal(t, "SUCCESS", done["Status"])
+	op := sdOK(t, ts, "CreatePrivateDnsNamespace", map[string]any{"Name": "shared.internal", "Vpc": "vpc-aaaa1111"})["OperationId"].(string)
+	done, _ := sdWait(t, ts, op)
+	require.Equal(t, "SUCCESS", done["Status"])
+	for op, body := range map[string]map[string]any{
+		"CreatePrivateDnsNamespace": {"Name": "shared.internal", "Vpc": "vpc-bbbb2222"},
+		"CreateHttpNamespace":       {"Name": "shared.internal"},
+	} {
+		code, doc, _ := sdCall(t, ts, op, body)
+		assert.Equal(t, http.StatusBadRequest, code, op)
+		assert.Equal(t, "NamespaceAlreadyExists", sdErrCode(doc), op)
 	}
-	code, doc, _ := sdCall(t, ts, "CreatePrivateDnsNamespace", map[string]any{"Name": "shared.internal", "Vpc": "vpc-aaaa1111"})
-	assert.Equal(t, http.StatusBadRequest, code)
-	assert.Equal(t, "NamespaceAlreadyExists", sdErrCode(doc))
+}
+
+// TestServiceDiscovery_CreateNamespaceUndoesItsZone pins that a namespace whose record cannot be
+// stored deletes the hosted zone it created and leaves no operation, and that a Route 53 failure
+// that is not a refusal is the request's failure rather than a FAIL operation.
+func TestServiceDiscovery_CreateNamespaceUndoesItsZone(t *testing.T) {
+	newEnv := func(namespace, kind string, skip int) (*sdFaultState, *emulator.PluginRegistry, *emulator.RequestContext) {
+		state := &sdFaultState{StateManager: emulator.NewMemoryStateManager()}
+		tc := emulator.NewTimeController(time.Unix(1_800_000_000, 0))
+		logger := emulator.NewDefaultLogger(slog.LevelError, false)
+		registry := emulator.NewPluginRegistry()
+		for _, p := range []emulator.Plugin{&emulator.Route53Plugin{}, &emulator.ServiceDiscoveryPlugin{}} {
+			require.NoError(t, p.Initialize(context.Background(), emulator.PluginConfig{State: state, Logger: logger,
+				Options: map[string]any{"time_controller": tc, "registry": registry}}))
+			registry.Register(p)
+		}
+		state.ns, state.fail, state.skip = namespace, kind, skip
+		return state, registry, &emulator.RequestContext{RequestID: "req-ns", AccountID: "123456789012", Region: "us-east-1",
+			IDs: emulator.NewIDMint("req-ns")}
+	}
+	create := func(registry *emulator.PluginRegistry, ctx *emulator.RequestContext) error {
+		_, err := registry.RouteRequest(ctx, &emulator.AWSRequest{Service: "servicediscovery", Operation: "CreatePublicDnsNamespace",
+			Body: []byte(`{"Name":"undo.example.com"}`), Headers: map[string]string{}, Params: map[string]string{}})
+		return err
+	}
+	zones := func(registry *emulator.PluginRegistry) string {
+		resp, err := registry.RouteRequest(&emulator.RequestContext{RequestID: "req-z", AccountID: "123456789012", Region: "us-east-1",
+			IDs: emulator.NewIDMint("req-z")}, &emulator.AWSRequest{Service: "route53", Operation: http.MethodGet,
+			Path: "/2013-04-01/hostedzone", Headers: map[string]string{}, Params: map[string]string{}})
+		require.NoError(t, err)
+		return string(resp.Body)
+	}
+	listOps := func(registry *emulator.PluginRegistry) string {
+		resp, err := registry.RouteRequest(&emulator.RequestContext{RequestID: "req-o", AccountID: "123456789012", Region: "us-east-1",
+			IDs: emulator.NewIDMint("req-o")}, &emulator.AWSRequest{Service: "servicediscovery", Operation: "ListOperations",
+			Body: []byte(`{}`), Headers: map[string]string{}, Params: map[string]string{}})
+		require.NoError(t, err)
+		return string(resp.Body)
+	}
+
+	// The second servicediscovery write is the namespace record (the first is the operation's
+	// counter, the second the operation, the third the namespace).
+	_, registry, ctx := newEnv("servicediscovery", "put", 2)
+	err := create(registry, ctx)
+	require.ErrorIs(t, err, errSDInjectedStore)
+	assert.NotContains(t, zones(registry), "undo.example.com", "the zone the failed create made is deleted")
+	assert.JSONEq(t, `{"Operations":[]}`, listOps(registry), "no operation names the failed create")
+
+	// A Route 53 store failure is an internal error, returned as the request's own.
+	_, registry, ctx = newEnv("route53", "put", 0)
+	err = create(registry, ctx)
+	require.ErrorIs(t, err, errSDInjectedStore)
+	var awsErr *emulator.AWSError
+	assert.False(t, errors.As(err, &awsErr), "not a FAIL operation: %v", err)
+	assert.JSONEq(t, `{"Operations":[]}`, listOps(registry))
 }

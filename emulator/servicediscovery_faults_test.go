@@ -17,16 +17,23 @@ import (
 var errSDInjectedStore = errors.New("injected Cloud Map store failure")
 
 // sdFaultState wraps a working StateManager and, once armed, fails every call of one kind ("get",
-// "put", "delete" or "list") on the Cloud Map namespace, after skip successful calls of that kind.
+// "put", "delete" or "list") on one namespace, Cloud Map's own by default, after skip successful
+// calls of that kind.
 type sdFaultState struct {
 	emulator.StateManager
+	// ns is the namespace that fails; empty is Cloud Map's own.
+	ns   string
 	fail string
 	skip int
 }
 
 // trip reports whether a call of kind on namespace fails.
 func (s *sdFaultState) trip(namespace, kind string) bool {
-	if namespace != "servicediscovery" || s.fail != kind {
+	want := s.ns
+	if want == "" {
+		want = "servicediscovery"
+	}
+	if namespace != want || s.fail != kind {
 		return false
 	}
 	if s.skip > 0 {
