@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -601,6 +602,11 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Post("/v1/transfer/server-status", s.handleTransferSeedServerStatus)
 		cp.Delete("/v1/transfer/server-status", s.handleTransferClearServerStatus)
 
+		// SES identity verification status, read by SES v1 and SES v2 alike (#1614); see
+		// ses_verification.go.
+		cp.Post("/v1/ses/identity-verification", s.handleSESSeedIdentityVerification)
+		cp.Delete("/v1/ses/identity-verification", s.handleSESClearIdentityVerification)
+
 		// EC2 spot-placement-score control-plane endpoints (#892).
 		cp.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)
 		cp.Delete("/v1/ec2/spot-placement-scores", s.handleEC2ClearSpotPlacementScore)
@@ -778,9 +784,9 @@ func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// handleEmails returns all captured SESv2 outbound emails as JSON. It is
-// intended for test assertions and accepts optional ?to= and ?subject= query
-// parameters for substring filtering.
+// handleEmails returns all captured SES outbound emails, from either SES API, as JSON.
+// It is intended for test assertions and accepts optional ?to= (matched against To, Cc
+// and Bcc) and ?subject= query parameters for substring filtering.
 func (s *Server) handleEmails(w http.ResponseWriter, r *http.Request) {
 	filterTo := r.URL.Query().Get("to")
 	filterSubject := r.URL.Query().Get("subject")
@@ -801,10 +807,10 @@ func (s *Server) handleEmails(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(data, &email) != nil {
 			continue
 		}
-		// Apply to filter.
+		// Apply to filter, over every recipient field.
 		if filterTo != "" {
 			matched := false
-			for _, addr := range email.To {
+			for _, addr := range slices.Concat(email.To, email.Cc, email.Bcc) {
 				if strings.Contains(addr, filterTo) {
 					matched = true
 					break

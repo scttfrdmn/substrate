@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 //go:generate go run ../cmd/gen-service-reference -out ../docs/services.md
@@ -171,6 +172,10 @@ func RegisterDefaultPlugins(
 		cloudwatchOpts[cwMaxDatapointsOption] = cfg.CloudWatch.MaxDatapointsPerSeries
 	}
 
+	// SES v1 and SES v2 write the same identity records and captured-email index, so they share
+	// the lock that serializes a record's read-check-write.
+	sesOpts := map[string]any{sesRecordLockOption: &sync.Mutex{}}
+
 	ceOpts := map[string]any{}
 	if store != nil {
 		ceOpts["event_store"] = store
@@ -222,7 +227,7 @@ func RegisterDefaultPlugins(
 		{&HealthPlugin{}, "health", nil},
 		{&PriceListPlugin{}, "pricing", nil},
 		{&OrganizationsPlugin{}, "organizations", nil},
-		{&SESv2Plugin{}, "sesv2", nil},
+		{&SESv2Plugin{}, "sesv2", sesOpts},
 		{&FirehosePlugin{}, "firehose", nil},
 		{&ServiceQuotasPlugin{}, "servicequotas", nil},
 		{&AppSyncPlugin{}, "appsync", nil},
@@ -249,6 +254,7 @@ func RegisterDefaultPlugins(
 		{&RedshiftDataPlugin{}, "redshift-data", nil},
 		{&TimestreamPlugin{}, "timestream", nil},
 		{&AutoScalingPlugin{}, "autoscaling", autoscalingOpts},
+		{&SESPlugin{}, "ses", sesOpts},
 	}
 	for _, r := range registrations {
 		if err := w.register(ctx, r.plugin, r.name, r.extra); err != nil {

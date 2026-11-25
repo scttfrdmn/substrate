@@ -13,11 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lambda: event-source mappings take tags on create, `TagResource`, `UntagResource` and `ListTags`, and appear in Resource Groups Tagging `GetResources` (#1660).
 - Lambda: `Get`, `Update`, `Delete` and `ListFunctionEventInvokeConfigs`; `PutFunctionEventInvokeConfig` stores `DestinationConfig` and honours `Qualifier` (#1685).
 - EC2: network ACLs (a default per VPC), DHCP option sets (`dhcpOptionsId` on `DescribeVpcs`) and flow logs, recorded and described, never enforced or delivered (#1614).
+- SES: a new `ses` plugin serves SES v1's Query API (21 operations), sharing identities with SES v2 and seeded at `/v1/ses/identity-verification`; `/v2/` paths route to SES v2, and SES v2 domains get Easy DKIM tokens (#1614).
 
 ### Fixed
 
 - Lambda: `Configuration` no longer carries `Tags`; `GetFunction` answers them only beside it (#1660).
 - Routing: an unemulated service's 501 `ServiceNotAvailable` arrives in the request's own envelope — CBOR, JSON RPC, Query, REST-XML for S3 Control's `amazonaws.com` hosts, else REST-JSON (#1614).
+- Costs: `sesv2/SendEmail` is $0.0001 per email, $0.10 per 1,000 (#1729).
 
 ### Compatibility
 
@@ -25,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lambda: `LambdaEventInvokeConfig.MaximumRetryAttempts` and `MaximumEventAgeInSeconds` are `*int`; an embedder reading them dereferences the pointer (#1685).
 - EC2: `DeleteVpc` refuses a VPC holding a custom network ACL, so delete the ACL first, and removes the VPC's flow logs. A test counting a VPC's records sees its default ACL (#1614).
 - Errors: a request to a service with no error-protocol entry (unemulated, or a custom plugin without one) that carries no `X-Amz-Target`, x-amz-json Content-Type, `Smithy-Protocol: rpc-v2-cbor` header, CBOR body at `/service/{S}/operation/{O}` or `Action` parameter is answered in REST-JSON. Assert the code from the `X-Amzn-ErrorType` header or the JSON body's `Code`, not from an `ErrorResponse` XML document, and expect `AccessDeniedException` rather than `AccessDenied` from the authorization gate (#1614).
+- Costs: a test asserting the cost of SES v2 `SendEmail`, or a `MaxCost` budget sized for it, must allow $0.0001 per email, 1,000 times the previous figure (#1729).
 
 ## [v0.134.0] - 2026-11-25
 

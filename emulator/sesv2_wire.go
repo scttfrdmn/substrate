@@ -27,20 +27,64 @@ type sesv2TagOut struct {
 
 // sesv2IdentityOut is GetEmailIdentity's response body.
 //
-// Two of the members API_GetEmailIdentity publishes. DkimAttributes, VerificationStatus,
-// VerifiedForSendingStatus and the rest are not modeled and are absent rather than present and
-// empty (#1013's rule).
+// The members API_GetEmailIdentity publishes that an identity's record can answer. Verification
+// is seeded and shared with SES v1 (ses_verification.go), so VerificationStatus is the seeded
+// status in SES v2's spelling and VerifiedForSendingStatus is true exactly when it is SUCCESS.
+// DkimAttributes and MailFromAttributes are present only once SES v1's VerifyDomainDkim or
+// SetIdentityMailFromDomain set them up; Policies, ConfigurationSetName and VerificationInfo
+// are not modeled and are absent rather than present and empty (#1013's rule).
 type sesv2IdentityOut struct {
-	IdentityType string        `json:"IdentityType"`
-	Tags         []sesv2TagOut `json:"Tags,omitempty"`
+	IdentityType             string            `json:"IdentityType"`
+	FeedbackForwardingStatus bool              `json:"FeedbackForwardingStatus"`
+	VerifiedForSendingStatus bool              `json:"VerifiedForSendingStatus"`
+	VerificationStatus       string            `json:"VerificationStatus"`
+	DkimAttributes           *sesv2DkimOut     `json:"DkimAttributes,omitempty"`
+	MailFromAttributes       *sesv2MailFromOut `json:"MailFromAttributes,omitempty"`
+	Tags                     []sesv2TagOut     `json:"Tags,omitempty"`
 }
 
-// sesv2IdentityToWire projects a persisted identity onto the published shape.
+// sesv2DkimOut is the DkimAttributes members an Easy DKIM setup answers.
+type sesv2DkimOut struct {
+	SigningEnabled bool     `json:"SigningEnabled"`
+	Status         string   `json:"Status"`
+	Tokens         []string `json:"Tokens"`
+}
+
+// sesv2MailFromOut is MailFromAttributes, in SES v2's enum spellings.
+type sesv2MailFromOut struct {
+	MailFromDomain       string `json:"MailFromDomain"`
+	MailFromDomainStatus string `json:"MailFromDomainStatus"`
+	BehaviorOnMxFailure  string `json:"BehaviorOnMxFailure"`
+}
+
+// sesv2IdentityToWire projects a persisted identity onto the published shape. status is the
+// identity's seeded verification status in SES v1's spelling ([sesVerificationStatus]), and
+// dkim its Easy DKIM state ([sesDkimFor]), which for an address is its domain's.
 //
 // The record holds its tags as a map, which has no order, so the array is sorted by key: the same
 // identity answers the same bytes on every read, which is what lets a replay match its recording.
-func sesv2IdentityToWire(identity SESv2Identity) sesv2IdentityOut {
-	out := sesv2IdentityOut{IdentityType: identity.IdentityType}
+func sesv2IdentityToWire(identity SESv2Identity, status string, dkim sesDkimView) sesv2IdentityOut {
+	v2Status := sesVerificationStatuses[status]
+	out := sesv2IdentityOut{
+		IdentityType:             identity.IdentityType,
+		FeedbackForwardingStatus: !identity.ForwardingDisabled,
+		VerifiedForSendingStatus: status == "Success",
+		VerificationStatus:       v2Status,
+	}
+	if dkim.SetUp {
+		out.DkimAttributes = &sesv2DkimOut{SigningEnabled: dkim.Enabled, Status: sesVerificationStatuses[dkim.Status], Tokens: dkim.Tokens}
+	}
+	if identity.MailFromDomain != "" {
+		behavior := "USE_DEFAULT_VALUE"
+		if identity.BehaviorOnMXFailure == "RejectMessage" {
+			behavior = "REJECT_MESSAGE"
+		}
+		out.MailFromAttributes = &sesv2MailFromOut{
+			MailFromDomain:       identity.MailFromDomain,
+			MailFromDomainStatus: sesVerificationStatuses[sesMailFromStatus(status)],
+			BehaviorOnMxFailure:  behavior,
+		}
+	}
 	for _, key := range slices.Sorted(maps.Keys(identity.Tags)) {
 		out.Tags = append(out.Tags, sesv2TagOut{Key: key, Value: identity.Tags[key]})
 	}

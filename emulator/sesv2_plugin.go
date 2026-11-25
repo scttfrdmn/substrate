@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -18,6 +19,10 @@ type SESv2Plugin struct {
 	logger Logger
 	tc     *TimeController
 	msgSeq atomic.Int64
+	// recordMu serializes the read-check-write of an identity record and the update of the
+	// captured-email index. It is shared with [SESPlugin], which writes the same records,
+	// when the two are registered together.
+	recordMu *sync.Mutex
 }
 
 // Name returns the service name "sesv2".
@@ -32,6 +37,7 @@ func (p *SESv2Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
+	p.recordMu = sesRecordLock(cfg.Options)
 	return nil
 }
 
@@ -115,6 +121,8 @@ func (p *SESv2Plugin) createEmailIdentity(reqCtx *RequestContext, req *AWSReques
 
 	goCtx := context.Background()
 	key := "identity:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + input.EmailIdentity
+	p.recordMu.Lock()
+	defer p.recordMu.Unlock()
 	existing, err := p.state.Get(goCtx, sesv2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("sesv2 createEmailIdentity get: %w", err)
@@ -135,6 +143,13 @@ func (p *SESv2Plugin) createEmailIdentity(reqCtx *RequestContext, req *AWSReques
 		Region:       reqCtx.Region,
 		Tags:         sesv2TagMap(input.Tags),
 		CreatedAt:    p.tc.Now(),
+	}
+	// A domain gets Easy DKIM: "When you verify a domain without specifying the
+	// DkimSigningAttributes object, this operation provides a set of DKIM tokens"
+	// (API_CreateEmailIdentity). The tokens are derived from the account, Region and domain
+	// ([sesDkimTokens]), not minted, so this draws no identifier.
+	if identityType == "DOMAIN" {
+		identity.DkimTokens = sesDkimTokens(reqCtx.AccountID, reqCtx.Region, input.EmailIdentity)
 	}
 
 	data, err := json.Marshal(identity)
@@ -239,7 +254,15 @@ func (p *SESv2Plugin) getEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, id
 	if err := json.Unmarshal(data, &identity); err != nil {
 		return nil, fmt.Errorf("sesv2 getEmailIdentity unmarshal: %w", err)
 	}
-	return sesv2JSONResponse(http.StatusOK, sesv2IdentityToWire(identity))
+	status, err := sesVerificationStatus(goCtx, p.state, reqCtx.AccountID, reqCtx.Region, identityName)
+	if err != nil {
+		return nil, err
+	}
+	dkim, err := sesDkimFor(goCtx, p.state, reqCtx.AccountID, reqCtx.Region, &identity)
+	if err != nil {
+		return nil, err
+	}
+	return sesv2JSONResponse(http.StatusOK, sesv2IdentityToWire(identity, status, dkim))
 }
 
 func (p *SESv2Plugin) deleteEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, identityName string) (*AWSResponse, error) {
@@ -251,6 +274,8 @@ func (p *SESv2Plugin) deleteEmailIdentity(reqCtx *RequestContext, _ *AWSRequest,
 	goCtx := context.Background()
 	key := "identity:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + identityName
 
+	p.recordMu.Lock()
+	defer p.recordMu.Unlock()
 	existing, err := p.state.Get(goCtx, sesv2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("sesv2 deleteEmailIdentity get: %w", err)
@@ -275,7 +300,9 @@ func (p *SESv2Plugin) sendEmail(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	var input struct {
 		FromEmailAddress string `json:"FromEmailAddress"`
 		Destination      struct {
-			ToAddresses []string `json:"ToAddresses"`
+			ToAddresses  []string `json:"ToAddresses"`
+			CcAddresses  []string `json:"CcAddresses"`
+			BccAddresses []string `json:"BccAddresses"`
 		} `json:"Destination"`
 		Content struct {
 			Simple struct {
@@ -307,6 +334,8 @@ func (p *SESv2Plugin) sendEmail(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	email := SESv2CapturedEmail{
 		MessageID: messageID,
 		To:        input.Destination.ToAddresses,
+		Cc:        input.Destination.CcAddresses,
+		Bcc:       input.Destination.BccAddresses,
 		From:      input.FromEmailAddress,
 		Subject:   input.Content.Simple.Subject.Data,
 		Body:      body,
@@ -317,16 +346,20 @@ func (p *SESv2Plugin) sendEmail(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 
 	goCtx := context.Background()
 	data, err := json.Marshal(email)
-	if err == nil {
-		stateKey := "captured_email:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + messageID
-		if putErr := p.state.Put(goCtx, sesv2Namespace, stateKey, data); putErr != nil {
-			p.logger.Warn("sesv2 sendEmail: failed to capture email", "err", putErr)
-		} else {
-			if err := updateStringIndex(goCtx, p.state, sesv2Namespace,
-				"captured_email_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, messageID); err != nil {
-				return nil, fmt.Errorf("sesv2 sendEmail index: %w", err)
-			}
-		}
+	if err != nil {
+		return nil, fmt.Errorf("sesv2 sendEmail encode: %w", err)
+	}
+	stateKey := "captured_email:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + messageID
+	if err := p.state.Put(goCtx, sesv2Namespace, stateKey, data); err != nil {
+		return nil, fmt.Errorf("sesv2 sendEmail put: %w", err)
+	}
+	// SES v1's captureEmail updates the same index, so both hold the shared record lock.
+	p.recordMu.Lock()
+	err = updateStringIndex(goCtx, p.state, sesv2Namespace,
+		"captured_email_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, messageID)
+	p.recordMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("sesv2 sendEmail index: %w", err)
 	}
 
 	return sesv2JSONResponse(http.StatusOK, map[string]string{

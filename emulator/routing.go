@@ -524,13 +524,23 @@ var pluginRouting = map[string]PluginRouting{
 		SigningNames: []string{"servicequotas"},
 		Source:       "botocore service-quotas service-2.json",
 	},
+	"ses": {
+		Display:      "SES",
+		Protocol:     "Query",
+		Hosts:        []string{"email.us-east-1.amazonaws.com"},
+		SigningNames: []string{"ses"},
+		Source:       "botocore ses service-2.json",
+	},
 	"sesv2": {
 		Display:      "SES v2",
 		Protocol:     "REST/JSON",
 		Hosts:        []string{"email.us-east-1.amazonaws.com"},
 		SigningNames: []string{"ses"},
-		Why:          "The v2 API keeps v1's email host and ses signing name.",
-		Source:       "botocore sesv2 service-2.json",
+		RoutesTo:     "ses",
+		Why: "The v2 API keeps v1's email host and ses signing name, so no routing signal " +
+			"distinguishes them. refineSESVersion separates the two on the /v2/ path segment " +
+			"every sesv2 requestUri carries; SES v1 posts its Query form to /.",
+		Source: "botocore sesv2 service-2.json",
 	},
 	"sns": {
 		Display:      "SNS",

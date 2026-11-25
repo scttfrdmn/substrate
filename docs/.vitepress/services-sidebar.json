@@ -263,6 +263,10 @@
       "link": "/reference/servicequotas"
     },
     {
+      "text": "SES",
+      "link": "/reference/ses"
+    },
+    {
       "text": "SES v2",
       "link": "/reference/sesv2"
     },

@@ -46,4 +46,5 @@ emulator/debug_ui.go	debugEventSummary	substrate	/v1/debug/events
 emulator/ecr_pull_through.go	ecrValidationSeed	substrate	/v1/ecr/pull-through-cache-validation
 emulator/eventstore.go	Event	substrate	/v1/debug/export
 emulator/organizations_account.go	orgPendingAccountOutcome	state	pendingCreateOutcome
+emulator/ses_verification.go	sesVerificationSeedBody	substrate	/v1/ses/identity-verification
 emulator/sesv2_types.go	SESv2CapturedEmail	substrate	/v1/emails

@@ -31,7 +31,7 @@ onUnmounted(() => window.removeEventListener('hashchange', redirect))
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1241 operations**. This
+Substrate ships **69 built-in service plugins** routing **1262 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -105,17 +105,18 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 55 | [EventBridge Scheduler](/reference/scheduler) | `scheduler` | REST/JSON | 12 |
 | 56 | [Secrets Manager](/reference/secretsmanager) | `secretsmanager` | JSON | 16 |
 | 57 | [Service Quotas](/reference/servicequotas) | `servicequotas` | JSON | 9 |
-| 58 | [SES v2](/reference/sesv2) | `sesv2` | REST/JSON | 5 |
-| 59 | [SNS](/reference/sns) | `sns` | Query | 18 |
-| 60 | [SQS](/reference/sqs) | `sqs` | JSON | 17 |
-| 61 | [SSM](/reference/ssm) | `ssm` | JSON | 15 |
-| 62 | [SSO / Identity Store](/reference/sso) | `sso` | JSON | 12 |
-| 63 | [Step Functions](/reference/states) | `states` | JSON | 18 |
-| 64 | [STS](/reference/sts) | `sts` | Query | 5 |
-| 65 | [Resource Groups Tagging](/reference/tagging) | `tagging` | JSON | 3 |
-| 66 | [Timestream](/reference/timestream) | `timestream` | JSON | 12 |
-| 67 | [Transfer Family](/reference/transfer) | `transfer` | JSON | 12 |
-| 68 | [WAFv2](/reference/wafv2) | `wafv2` | JSON | 13 |
+| 58 | [SES](/reference/ses) | `ses` | Query | 21 |
+| 59 | [SES v2](/reference/sesv2) | `sesv2` | REST/JSON | 5 |
+| 60 | [SNS](/reference/sns) | `sns` | Query | 18 |
+| 61 | [SQS](/reference/sqs) | `sqs` | JSON | 17 |
+| 62 | [SSM](/reference/ssm) | `ssm` | JSON | 15 |
+| 63 | [SSO / Identity Store](/reference/sso) | `sso` | JSON | 12 |
+| 64 | [Step Functions](/reference/states) | `states` | JSON | 18 |
+| 65 | [STS](/reference/sts) | `sts` | Query | 5 |
+| 66 | [Resource Groups Tagging](/reference/tagging) | `tagging` | JSON | 3 |
+| 67 | [Timestream](/reference/timestream) | `timestream` | JSON | 12 |
+| 68 | [Transfer Family](/reference/transfer) | `transfer` | JSON | 12 |
+| 69 | [WAFv2](/reference/wafv2) | `wafv2` | JSON | 13 |
 <!-- END GENERATED COVERAGE MATRIX -->
 
 ---

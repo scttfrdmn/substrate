@@ -7,11 +7,15 @@
 
 | Operation | Notes |
 |-----------|-------|
-| CreateEmailIdentity | `Tags` is read as the published array of `{Key, Value}` objects (#1335). Answers `{}` where the page publishes `IdentityType`, `VerifiedForSendingStatus` and `DkimAttributes` |
-| GetEmailIdentity | `IdentityType` and `Tags`, the latter as the published array in key order; the other published members are not modeled. No member the page does not publish |
+| CreateEmailIdentity | `Tags` is read as the published array of `{Key, Value}` objects (#1335). A domain gets three Easy DKIM tokens, derived like SES v1's. Answers `{}` where the page publishes `IdentityType`, `VerifiedForSendingStatus` and `DkimAttributes` |
+| GetEmailIdentity | `IdentityType`, `Tags` (the published array in key order), the seeded `VerificationStatus` with `VerifiedForSendingStatus`, `FeedbackForwardingStatus`, and `DkimAttributes` and `MailFromAttributes` once [SES v1](/reference/ses) set them up. `Policies`, `ConfigurationSetName` and `VerificationInfo` are not modeled. No member the page does not publish |
 | DeleteEmailIdentity | |
 | ListEmailIdentities | |
 | SendEmail | Returns stub MessageId; does not deliver |
+
+## Identities are shared with SES v1
+
+SES v2 and [SES v1](/reference/ses) read and write the same identity records, and one seed (`POST /v1/ses/identity-verification`) governs the verification status both report; see the SES page. The two share the `email` host and the `ses` signing name, so a request reaches SES v2 by its `/v2/` path.
 
 ## The account and Region a record carries reach no response
 
