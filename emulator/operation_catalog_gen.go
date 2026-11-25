@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1223 routed operations.
+// 68 plugins, 1237 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -408,6 +408,7 @@ var routedOperations = map[string][]string{
 	"ec2": {
 		"AllocateAddress",
 		"AssociateAddress",
+		"AssociateDhcpOptions",
 		"AssociateRouteTable",
 		"AttachInternetGateway",
 		"AttachVolume",
@@ -419,13 +420,17 @@ var routedOperations = map[string][]string{
 		"CreateCapacityReservation",
 		"CreateDefaultSubnet",
 		"CreateDefaultVpc",
+		"CreateDhcpOptions",
 		"CreateFleet",
+		"CreateFlowLogs",
 		"CreateImage",
 		"CreateInternetGateway",
 		"CreateKeyPair",
 		"CreateLaunchTemplate",
 		"CreateLaunchTemplateVersion",
 		"CreateNatGateway",
+		"CreateNetworkAcl",
+		"CreateNetworkAclEntry",
 		"CreatePlacementGroup",
 		"CreateRoute",
 		"CreateRouteTable",
@@ -436,12 +441,16 @@ var routedOperations = map[string][]string{
 		"CreateTags",
 		"CreateVolume",
 		"CreateVpc",
+		"DeleteDhcpOptions",
 		"DeleteFleets",
+		"DeleteFlowLogs",
 		"DeleteInternetGateway",
 		"DeleteKeyPair",
 		"DeleteLaunchTemplate",
 		"DeleteLaunchTemplateVersions",
 		"DeleteNatGateway",
+		"DeleteNetworkAcl",
+		"DeleteNetworkAclEntry",
 		"DeletePlacementGroup",
 		"DeleteRoute",
 		"DeleteRouteTable",
@@ -455,7 +464,9 @@ var routedOperations = map[string][]string{
 		"DescribeAddresses",
 		"DescribeAvailabilityZones",
 		"DescribeCapacityReservations",
+		"DescribeDhcpOptions",
 		"DescribeFleets",
+		"DescribeFlowLogs",
 		"DescribeImages",
 		"DescribeInstanceAttribute",
 		"DescribeInstanceStatus",
@@ -467,6 +478,7 @@ var routedOperations = map[string][]string{
 		"DescribeLaunchTemplateVersions",
 		"DescribeLaunchTemplates",
 		"DescribeNatGateways",
+		"DescribeNetworkAcls",
 		"DescribeNetworkInterfaces",
 		"DescribePlacementGroups",
 		"DescribeRegions",
@@ -496,6 +508,8 @@ var routedOperations = map[string][]string{
 		"RebootInstances",
 		"RegisterImage",
 		"ReleaseAddress",
+		"ReplaceNetworkAclAssociation",
+		"ReplaceNetworkAclEntry",
 		"ReplaceRoute",
 		"ReplaceRouteTableAssociation",
 		"RequestSpotInstances",

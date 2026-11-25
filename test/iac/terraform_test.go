@@ -36,10 +36,21 @@ func tfProviderVersion(t *testing.T, src string) string {
 
 // tfAddresses is every address `terraform state list` reports after the apply: the
 // fourteen kinds of resource the roadmap review applied (#1597), the bucket's public-access
-// block and default encryption, and the two policy documents the IAM resources are built from.
+// block and default encryption, the VPC's network controls (#1614), and the policy documents the
+// IAM resources are built from.
 var tfAddresses = []string{
+	"data.aws_iam_policy_document.assume_flow_logs",
 	"data.aws_iam_policy_document.assume_lambda",
 	"data.aws_iam_policy_document.handler",
+	"aws_cloudwatch_log_group.flow_logs",
+	"aws_default_network_acl.main",
+	"aws_flow_log.vpc",
+	"aws_iam_role.flow_logs",
+	"aws_network_acl.private",
+	"aws_network_acl_rule.all_out",
+	"aws_network_acl_rule.https_in",
+	"aws_vpc_dhcp_options.main",
+	"aws_vpc_dhcp_options_association.main",
 	"aws_cloudwatch_event_rule.nightly",
 	"aws_cloudwatch_log_group.handler",
 	"aws_cloudwatch_metric_alarm.queue_depth",

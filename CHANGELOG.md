@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- EC2: network ACLs: every VPC gets a default ACL and every subnet an association; seven ACL, entry and association operations, all nineteen filters (#1614).
+- EC2: DHCP option sets: a per-Region default set, `Create`/`Delete`/`Describe`/`AssociateDhcpOptions`, and `dhcpOptionsId` plus the `dhcp-options-id` filter on `DescribeVpcs` (#1614).
+- EC2: flow logs: `CreateFlowLogs`, `DescribeFlowLogs` and `DeleteFlowLogs` record configuration and report `SUCCESS`; nothing is delivered (#1614).
+
+### Compatibility
+
+- EC2: `DeleteVpc` refuses a VPC holding a custom network ACL; delete the ACL first. A test counting a VPC's records sees its default ACL (#1614).
+
 ## [v0.134.0] - 2026-11-25
 
 ### Added

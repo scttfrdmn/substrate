@@ -139,6 +139,10 @@ func (p *EC2Plugin) seedDefaultVPC(reqCtx *RequestContext) error {
 // from the account and Region, CreateDefaultVpc the request's own.
 func (p *EC2Plugin) createDefaultVPCResources(ctx context.Context, reqCtx *RequestContext) (*EC2VPC, error) {
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	dhcpOptionsID, err := p.newVPCDHCPOptionsID(ctx, reqCtx)
+	if err != nil {
+		return nil, err
+	}
 	vpcID := generateVPCID(reqCtx.IDs)
 	vpc := EC2VPC{
 		VPCID:              vpcID,
@@ -147,6 +151,7 @@ func (p *EC2Plugin) createDefaultVPCResources(ctx context.Context, reqCtx *Reque
 		State:              "available",
 		EnableDNSSupport:   true,
 		EnableDNSHostnames: true,
+		DhcpOptionsID:      dhcpOptionsID,
 		AccountID:          reqCtx.AccountID,
 		Region:             reqCtx.Region,
 	}
@@ -185,10 +190,18 @@ func (p *EC2Plugin) createDefaultVPCResources(ctx context.Context, reqCtx *Reque
 		return nil, fmt.Errorf("ec2 default VPC main route table: %w", err)
 	}
 
+	var subnetIDs []string
 	for i, zone := range ec2SeededZones(reqCtx.Region) {
-		if _, err := p.createDefaultSubnetIn(ctx, reqCtx, vpcID, zone.ZoneName, ec2DefaultSubnetCIDR(i)); err != nil {
+		subnet, err := p.createDefaultSubnetIn(ctx, reqCtx, vpcID, zone.ZoneName, ec2DefaultSubnetCIDR(i))
+		if err != nil {
 			return nil, err
 		}
+		subnetIDs = append(subnetIDs, subnet.SubnetID)
+	}
+	// The default network ACL and its subnet associations are drawn after every other
+	// resource here, so the IDs those resources have always been seeded with are unchanged (#1614).
+	if err := p.createDefaultNetworkACL(ctx, reqCtx, vpcID, subnetIDs); err != nil {
+		return nil, err
 	}
 	return &vpc, nil
 }
@@ -499,6 +512,9 @@ func (p *EC2Plugin) createDefaultSubnet(reqCtx *RequestContext, req *AWSRequest)
 	}
 	subnet, err := p.createDefaultSubnetIn(ctx, reqCtx, vpc.VPCID, resolved, cidr)
 	if err != nil {
+		return nil, err
+	}
+	if err := p.associateSubnetWithDefaultNetworkACL(ctx, reqCtx, subnet.SubnetID, vpc.VPCID); err != nil {
 		return nil, err
 	}
 	type response struct {

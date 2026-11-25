@@ -31,7 +31,7 @@ onUnmounted(() => window.removeEventListener('hashchange', redirect))
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1223 operations**. This
+Substrate ships **68 built-in service plugins** routing **1237 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -70,7 +70,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 20 | [Cognito Identity Provider](/reference/cognito-idp) | `cognito-idp` | JSON | 34 |
 | 21 | [Config](/reference/config) | `config` | JSON | 25 |
 | 22 | [DynamoDB](/reference/dynamodb) | `dynamodb` | JSON | 28 |
-| 23 | [EC2 / VPC](/reference/ec2) | `ec2` | Query | 100 |
+| 23 | [EC2 / VPC](/reference/ec2) | `ec2` | Query | 114 |
 | 24 | [ECR](/reference/ecr) | `ecr` | JSON | 26 |
 | 25 | [ECS](/reference/ecs) | `ecs` | JSON | 21 |
 | 26 | [EFS](/reference/efs) | `efs` | REST/JSON | 13 |

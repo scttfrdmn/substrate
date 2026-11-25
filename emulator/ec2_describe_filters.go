@@ -96,6 +96,8 @@ func ec2VPCMatchesFilter(vpc EC2VPC, name string, values []string) bool {
 		// [ec2SubnetMatchesFilter] records for the subnet cidr filter, and the reason the
 		// cidr-block-association family is a separate set of names rather than an alias.
 		return ec2FilterAccepts(values, vpc.CIDRBlock)
+	case "dhcp-options-id":
+		return ec2FilterAccepts(values, ec2VPCDHCPOptionsID(vpc))
 	case "is-default":
 		return ec2FilterAccepts(values, strconv.FormatBool(vpc.IsDefault))
 	case "owner-id":

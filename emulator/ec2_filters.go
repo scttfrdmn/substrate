@@ -484,21 +484,20 @@ func ec2InstanceStatusFilterSpec() ec2FilterSpec {
 // ec2VPCFilterSpec is DescribeVpcs' filter set, from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeVpcs.html.
 //
-// Six of fifteen evaluated. The nine that are not all name a CIDR *association* — the
-// cidr-block-association and ipv6-cidr-block-association families — or the DHCP option set,
-// and substrate models neither: [EC2VPC] carries one primary CIDR block and no association
-// records, so the association filters have nothing to walk. dhcp-options-id is inert for the
-// same reason the response renders no dhcpOptionsId.
+// Seven of fifteen evaluated. The eight that are not all name a CIDR *association* — the
+// cidr-block-association and ipv6-cidr-block-association families — which substrate does not
+// model: [EC2VPC] carries one primary CIDR block and no association records, so the association
+// filters have nothing to walk. dhcp-options-id matches the set the VPC renders (#1614).
 func ec2VPCFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
 		tagValueFilter: true,
 		evaluated: []string{
-			"cidr", "is-default", "owner-id", "state", "tag-key", "vpc-id",
+			"cidr", "dhcp-options-id", "is-default", "owner-id", "state", "tag-key", "vpc-id",
 		},
 		accepted: []string{
 			"cidr-block-association.association-id",
 			"cidr-block-association.cidr-block", "cidr-block-association.state",
-			"dhcp-options-id", "ipv6-cidr-block-association.association-id",
+			"ipv6-cidr-block-association.association-id",
 			"ipv6-cidr-block-association.ipv6-cidr-block",
 			"ipv6-cidr-block-association.ipv6-pool",
 			"ipv6-cidr-block-association.state",
