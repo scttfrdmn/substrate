@@ -125,13 +125,16 @@ func (p *FISPlugin) mergeTags(key string, add map[string]string, remove []string
 }
 
 // requireTagKey resolves a tag operation's ARN, refusing one that names nothing.
-func (p *FISPlugin) requireTagKey(ctx *RequestContext, arn string) (string, *AWSError) {
+func (p *FISPlugin) requireTagKey(ctx *RequestContext, arn string) (string, error) {
 	key, ok := fisKeyForARN(arn, ctx.AccountID, ctx.Region)
 	if !ok {
 		return "", fisNotFound("Resource " + arn + " not found.")
 	}
 	rec, err := p.loadTagRecord(key)
-	if err != nil || rec == nil {
+	if err != nil {
+		return "", err
+	}
+	if rec == nil {
 		return "", fisNotFound("Resource " + arn + " not found.")
 	}
 	return key, nil
@@ -161,9 +164,9 @@ func (p *FISPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key, awsErr := p.requireTagKey(ctx, strings.TrimPrefix(req.Path, "/tags/"))
-	if awsErr != nil {
-		return nil, awsErr
+	key, err := p.requireTagKey(ctx, strings.TrimPrefix(req.Path, "/tags/"))
+	if err != nil {
+		return nil, err
 	}
 	if err := p.mergeTags(key, in.Tags, nil, enforceTagQuota); err != nil {
 		return nil, fisTagWriteError(err)
@@ -181,9 +184,9 @@ func (p *FISPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key, awsErr := p.requireTagKey(ctx, strings.TrimPrefix(req.Path, "/tags/"))
-	if awsErr != nil {
-		return nil, awsErr
+	key, err := p.requireTagKey(ctx, strings.TrimPrefix(req.Path, "/tags/"))
+	if err != nil {
+		return nil, err
 	}
 	if err := p.mergeTags(key, nil, keys, skipTagQuota); err != nil {
 		return nil, fisTagWriteError(err)
@@ -192,9 +195,9 @@ func (p *FISPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 }
 
 func (p *FISPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	key, awsErr := p.requireTagKey(ctx, strings.TrimPrefix(req.Path, "/tags/"))
-	if awsErr != nil {
-		return nil, awsErr
+	key, err := p.requireTagKey(ctx, strings.TrimPrefix(req.Path, "/tags/"))
+	if err != nil {
+		return nil, err
 	}
 	rec, err := p.loadTagRecord(key)
 	if err != nil {
