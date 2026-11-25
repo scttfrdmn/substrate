@@ -115,6 +115,27 @@ have been caught here. Where a per-service section below states a target prefix,
 prefix is what the model declares; substrate also accepts the older spellings it used
 to document, so correcting one of them cannot break a caller.
 
+## Operations whose SDK call adds a host prefix
+
+A few operations declare an endpoint `hostPrefix` in their service model, and the SDKs prepend it
+to the host even when the client is pointed at a custom endpoint. Against substrate on
+`http://localhost:4566` such a call is sent to a host like `data-localhost`, which does not
+resolve, so it fails in the client with a connection error and never reaches substrate.
+
+| Service | Operations | Prefix |
+|---|---|---|
+| Cloud Map (`servicediscovery`) | `DiscoverInstances`, `DiscoverInstancesRevision` | `data-` |
+| Step Functions (`states`) | `StartSyncExecution` | `sync-` |
+| Omics | the workflow-run operations | `workflows-` |
+
+Turn the prefix off in the client. Substrate routes these operations by credential scope and
+operation, not by host, so nothing else changes.
+
+- **boto3:** `botocore.config.Config(inject_host_prefix=False)`, passed as the client's
+  `config`.
+- **aws-sdk-go-v2:** call the operation with a context from
+  `smithyhttp.DisableEndpointHostPrefix(ctx, true)` (`github.com/aws/smithy-go/transport/http`).
+
 ## An operation substrate does not implement
 
 No plugin covers its whole service, so every one of the 67 has an answer for a call it

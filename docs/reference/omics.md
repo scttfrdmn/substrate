@@ -11,6 +11,8 @@ the run is `COMPLETED` the moment it is created, the nominal success path. Seede
 the published start-up statuses first; see [A run's status progresses only when
 seeded](#a-run-s-status-progresses-only-when-seeded).
 
+**A custom endpoint needs host-prefix injection off for the workflow-run operations.** The SDKs prepend `workflows-` to the host, so turn it off in the client (boto3: `Config(inject_host_prefix=False)`); see [Operations whose SDK call adds a host prefix](concepts/routing.md#operations-whose-sdk-call-adds-a-host-prefix).
+
 ## Supported operations
 
 | Operation | Notes |
