@@ -34,13 +34,14 @@ func ec2SubnetMatchesFilters(subnet EC2Subnet, filters map[string][]string) bool
 
 // ec2SubnetMatchesFilter evaluates a single DescribeSubnets filter against a subnet.
 //
-// Eleven of AWS's twenty-five names are answerable from [EC2Subnet], and four of them have
+// Twelve of AWS's twenty-five names are answerable from [EC2Subnet], and five of them have
 // an alias spelling the reference documents inline ("You can also use availabilityZone as
 // the filter name") — the aliases are separate names on the wire, so each is handled here
 // beside its canonical form rather than normalized away, which would leave the canonical
 // name working and the documented alias silently inert.
 //
-// The other fourteen are inert, per the rule [ec2FilterSpec] states: substrate models no
+// availability-zone-id compares the zone's AZ ID, derived from its name (#1621); see
+// [ec2SubnetZoneID]. The other thirteen are inert, per the rule [ec2FilterSpec] states: substrate models no
 // IPv6 association, Outpost, customer-owned pool or private-DNS-on-launch option, so a
 // filter over one has nothing to compare against. A name outside all twenty-five never
 // arrives — [ec2SubnetFilterSpec] refuses it before the scan (#687).
@@ -57,6 +58,8 @@ func ec2SubnetMatchesFilter(subnet EC2Subnet, name string, values []string) bool
 	switch name {
 	case "availability-zone", "availabilityZone":
 		return ec2FilterAccepts(values, subnet.AvailabilityZone)
+	case "availability-zone-id", "availabilityZoneId":
+		return ec2FilterAccepts(values, ec2SubnetZoneID(subnet))
 	case "cidr-block", "cidr", "cidrBlock":
 		// AWS: "The CIDR block you specify must exactly match the subnet's CIDR block
 		// for information to be returned for the subnet." So this is equality, not
@@ -95,6 +98,33 @@ func ec2SubnetMatchesFilter(subnet EC2Subnet, name string, values []string) bool
 		// A documented filter substrate cannot evaluate is inert; see the doc comment.
 		return true
 	}
+}
+
+// ec2SubnetZoneID is a subnet's AZ ID, derived from its zone name through [ec2SeededZones] at
+// read time, so a subnet stored before the ID was rendered has one too (#1621). A zone the
+// region does not seed — CreateSubnet records a zone name as given — has none.
+func ec2SubnetZoneID(subnet EC2Subnet) string {
+	for _, z := range ec2SeededZones(subnet.Region) {
+		if z.ZoneName == subnet.AvailabilityZone {
+			return z.ZoneID
+		}
+	}
+	return ""
+}
+
+// ec2SubnetZone resolves CreateSubnet's zone (#1621). AvailabilityZoneId is accepted as the
+// alternative API_CreateSubnet publishes — "Either AvailabilityZone or AvailabilityZoneId" —
+// and resolved through [ec2VolumeZone], CreateVolume's rule for the same pair, so naming both is
+// InvalidParameterCombination and an ID naming no zone of the region is InvalidParameterValue.
+// A request naming neither keeps substrate's default, the region's zone a.
+func ec2SubnetZone(region string, params map[string]string) (string, *AWSError) {
+	if params["AvailabilityZoneId"] != "" {
+		return ec2VolumeZone(region, params)
+	}
+	if az := params["AvailabilityZone"]; az != "" {
+		return az, nil
+	}
+	return region + "a", nil
 }
 
 // ec2SubnetItem renders a subnet as AWS's Subnet element.
@@ -146,6 +176,10 @@ type ec2SubnetItem struct {
 	// AvailabilityZone is the zone the subnet was created in.
 	AvailabilityZone string `xml:"availabilityZone"`
 
+	// AvailabilityZoneID is the zone's AZ ID (#1621), absent for a zone substrate does not
+	// seed; see [ec2SubnetZoneID].
+	AvailabilityZoneID string `xml:"availabilityZoneId,omitempty"`
+
 	// DefaultForAz reports whether this is the zone's default subnet.
 	DefaultForAz bool `xml:"defaultForAz"`
 
@@ -166,6 +200,7 @@ func ec2SubnetXML(subnet EC2Subnet) ec2SubnetItem {
 		VpcID:               subnet.VPCID,
 		CIDRBlock:           subnet.CIDRBlock,
 		AvailabilityZone:    subnet.AvailabilityZone,
+		AvailabilityZoneID:  ec2SubnetZoneID(subnet),
 		DefaultForAz:        subnet.IsDefault,
 		MapPublicIPOnLaunch: subnet.MapPublicIPOnLaunch,
 	}

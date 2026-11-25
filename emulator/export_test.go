@@ -2125,3 +2125,19 @@ func LambdaTaggedEventSourceMappingsForTest(state StateManager, accountID, regio
 	}
 	return arns, err
 }
+
+// EC2SecurityGroupRuleIDsForTest returns the sgr- IDs of sg's rules, ingress first.
+func EC2SecurityGroupRuleIDsForTest(sg EC2SecurityGroup) []string {
+	var out []string
+	for _, r := range ec2SecurityGroupRules(sg) {
+		out = append(out, r.ID)
+	}
+	return out
+}
+
+// EC2TagSecurityGroupRuleForTest sets the tags of sg's i-th rule, as CreateTags on its sgr- ID
+// would.
+func EC2TagSecurityGroupRuleForTest(sg *EC2SecurityGroup, i int, tags []EC2Tag) {
+	key := ec2SecurityGroupRules(*sg)[i].Key
+	ec2SetRuleMeta(sg, key, func(m *EC2SecurityGroupRuleMeta) { m.Tags = tags })
+}

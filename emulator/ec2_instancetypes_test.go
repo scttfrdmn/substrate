@@ -37,6 +37,45 @@ func ec2CatalogTypes(t *testing.T, ts *httptest.Server) []string {
 	return types
 }
 
+// ec2ArmTypes returns the catalog's arm64 (AWS Graviton) types, which us-east-1's use1-az3
+// does not offer (#1621).
+func ec2ArmTypes(t *testing.T, ts *httptest.Server) map[string]bool {
+	t.Helper()
+	resp := ec2Request(t, ts, map[string]string{
+		"Action": "DescribeInstanceTypes", "Filter.1.Name": "processor-info.supported-architecture",
+		"Filter.1.Value.1": "arm64",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result struct {
+		InstanceTypes []struct {
+			InstanceType string `xml:"instanceType"`
+		} `xml:"instanceTypeSet>item"`
+	}
+	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&result))
+	arm := map[string]bool{}
+	for _, it := range result.InstanceTypes {
+		arm[it.InstanceType] = true
+	}
+	require.NotEmpty(t, arm)
+	return arm
+}
+
+// ec2ZoneOfferingCount is the number of us-east-1 zone offerings of types: three seeded zones
+// each, less use1-az3 (us-east-1c) for an arm64 type.
+func ec2ZoneOfferingCount(t *testing.T, ts *httptest.Server, types []string) int {
+	t.Helper()
+	arm := ec2ArmTypes(t, ts)
+	n := 0
+	for _, typ := range types {
+		n += 3
+		if arm[typ] {
+			n--
+		}
+	}
+	return n
+}
+
 // catalogSize returns the number of types in the seeded instance-type catalog.
 func catalogSize(t *testing.T, ts *httptest.Server) int {
 	t.Helper()
@@ -509,10 +548,12 @@ func TestEC2_DescribeInstanceTypeOfferings_InstanceTypeFilter(t *testing.T) {
 				assert.Empty(t, offerings, "an unmatched filter must be an empty answer, not an error")
 			case tt.wantAllCatalog:
 				assert.Equal(t, ec2CatalogTypes(t, ts), offeringTypes(offerings))
-				assert.Len(t, offerings, catalogSize(t, ts)*3, "one offering per type per seeded AZ")
+				assert.Len(t, offerings, ec2ZoneOfferingCount(t, ts, ec2CatalogTypes(t, ts)),
+					"one offering per type per seeded AZ that offers it")
 			default:
 				assert.Equal(t, tt.wantTypes, offeringTypes(offerings))
-				assert.Len(t, offerings, len(tt.wantTypes)*3, "one offering per type per seeded AZ")
+				assert.Len(t, offerings, ec2ZoneOfferingCount(t, ts, tt.wantTypes),
+					"one offering per type per seeded AZ that offers it")
 			}
 		})
 	}
@@ -701,12 +742,17 @@ func TestEC2_DescribeInstanceTypeOfferings_LocationsMatchDescribeAvailabilityZon
 	require.NoError(t, xml.NewDecoder(resp.Body).Decode(&zones))
 	require.NotEmpty(t, zones.Zones)
 
+	arm := ec2ArmTypes(t, ts)
 	for _, z := range zones.Zones {
 		offerings := ec2Offerings(t, ts, map[string]string{
 			"Filter.1.Name":    "location",
 			"Filter.1.Value.1": z.ZoneName,
 		})
-		assert.Len(t, offerings, catalogSize(t, ts), "zone %s offers no instance types", z.ZoneName)
+		want := catalogSize(t, ts)
+		if z.ZoneName == "us-east-1c" {
+			want -= len(arm) // use1-az3 offers no Graviton type (#1621).
+		}
+		assert.Len(t, offerings, want, "zone %s", z.ZoneName)
 	}
 }
 

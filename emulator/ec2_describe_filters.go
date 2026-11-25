@@ -440,6 +440,8 @@ func ec2InstanceTypeMatchesFilter(info ec2InstanceTypeInfo, name string, values 
 		return false
 	case "vcpu-info.default-vcpus":
 		return ec2FilterAccepts(values, strconv.Itoa(info.VCpus))
+	case "burstable-performance-supported":
+		return ec2FilterAccepts(values, strconv.FormatBool(ec2BurstableFamily(info.InstanceType)))
 	default:
 		return true
 	}

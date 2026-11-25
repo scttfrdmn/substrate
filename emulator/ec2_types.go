@@ -150,6 +150,12 @@ type EC2Instance struct {
 	// named none, and for an instance from an event log predating the fields.
 	PlacementGroupName string `json:"placement_group_name,omitempty"`
 	PlacementGroupID   string `json:"placement_group_id,omitempty"`
+
+	// CPUCredits is the credit option of a burstable performance instance, standard or
+	// unlimited, resolved at launch and changed by ModifyInstanceCreditSpecification. Empty for
+	// a non-burstable launch, and for an instance from an event log predating the field, which
+	// reads back as its family's default; see [ec2InstanceCPUCredits].
+	CPUCredits string `json:"cpu_credits,omitempty"`
 }
 
 // EC2NetworkInterface is one interface attached to an instance at launch, from a
@@ -411,11 +417,32 @@ type EC2SecurityGroup struct {
 	// stamped on the raw record.
 	EverTagged bool `json:"ever_tagged,omitempty"`
 
+	// RuleMeta holds what a rule carries beyond its content, keyed by the rule's content key:
+	// an IPv4, IPv6 or prefix-list rule's description, a rule's tags, and the ID of a rule
+	// ModifySecurityGroupRules changed. A rule with none of the three has no entry, and its ID is
+	// derived from its content; see [ec2SecurityGroupRules].
+	RuleMeta map[string]EC2SecurityGroupRuleMeta `json:"rule_meta,omitempty"`
+
 	// AccountID is the AWS account that owns the security group.
 	AccountID string `json:"account_id"`
 
 	// Region is the AWS region in which the security group resides.
 	Region string `json:"region"`
+}
+
+// EC2SecurityGroupRuleMeta is the part of one security group rule that its content does not
+// determine (#1490).
+type EC2SecurityGroupRuleMeta struct {
+	// ID is the rule's sgr- ID when it is not the one derived from the rule's content, which
+	// is the case once ModifySecurityGroupRules has changed that content.
+	ID string `json:"id,omitempty"`
+
+	// Description is an IPv4, IPv6 or prefix-list rule's description. A referenced-group
+	// rule's description lives on its [EC2UserIDGroupPair].
+	Description string `json:"description,omitempty"`
+
+	// Tags are the rule's tags.
+	Tags []EC2Tag `json:"tags,omitempty"`
 }
 
 // EC2IGWAttachment represents the attachment of an internet gateway to a VPC.
@@ -1077,6 +1104,10 @@ type EC2LaunchTemplateData struct {
 	// is: absent is a third state, and a template that said nothing must neither read back as
 	// false nor override a launch that said true (#1471).
 	DisableAPITermination string `json:"disableApiTermination,omitempty"`
+
+	// CPUCredits is the template's CreditSpecification.CpuCredits, standard or unlimited, or
+	// empty when the template states none.
+	CPUCredits string `json:"cpuCredits,omitempty"`
 }
 
 // EC2BlockDeviceMapping is one BlockDeviceMapping.N entry of a launch request or a

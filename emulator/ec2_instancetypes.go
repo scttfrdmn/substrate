@@ -116,6 +116,18 @@ const (
 // (network optimized) variants of these lines follow them (#1509): m6gd–m9gd, c6gd–c9gd,
 // r6gd–r9gd, c6gn, c7gn and c8gn, every one the guide pages publish.
 var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
+	// Burstable, Intel, the one family whose credit option defaults to standard (#1614), and the
+	// type of most Terraform examples, whose aws_instance reads DescribeInstanceTypes for it.
+	// Sizes from the general-purpose guide's T2 rows. 0.0035 USD/GiB, substrate's, below t3.
+	{Name: "t2", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
+		{"nano", 1, 512, "0.0018"},
+		{"micro", 1, 1024, "0.0035"},
+		{"small", 1, 2048, "0.0070"},
+		{"medium", 2, 4096, "0.0140"},
+		{"large", 2, 8192, "0.0280"},
+		{"xlarge", 4, 16384, "0.0560"},
+		{"2xlarge", 8, 32768, "0.1120"},
+	}},
 	// Burstable, Intel. 0.0042 USD/GiB.
 	{Name: "t3", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
 		{"nano", 2, 512, "0.0021"},
@@ -756,7 +768,7 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 // neither. They are transcribed anyway, whole: the list is a copy of one AWS table rather than
 // the intersection with [ec2InstanceTypeFamilies], so a family added to the catalog later is
 // classified by AWS's answer instead of by whoever adds it remembering to look. Intersected
-// with the catalog's forty-seven families today it selects exactly p3 — three of 349 types report
+// with the catalog's forty-eight families today it selects exactly p3 — three of 356 types report
 // false and 346 report true. (a1, the first Graviton family, is on the list and not in the
 // catalog; the thirteen Graviton families #1497 added and the sixteen #1509 added are all
 // current.)
@@ -855,6 +867,45 @@ func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2Instanc
 // filtering an offerings query by a zone DescribeAvailabilityZones reported gets an
 // answer rather than an empty set.
 var ec2SeededAZSuffixes = []string{"a", "b", "c"}
+
+// ec2ZoneExclusion is one row of [ec2ZoneOfferingExclusions]: a zone, by AZ ID, that offers no
+// type of one architecture.
+type ec2ZoneExclusion struct {
+	// ZoneID is the zone's AZ ID, the identity AWS keeps across accounts, so the row holds for
+	// every account where a zone name would not.
+	ZoneID string
+	// Architecture is the processor architecture none of whose types the zone offers.
+	Architecture string
+}
+
+// ec2ZoneOfferingExclusions is the small, explicit table of zones that do not offer every type
+// of the catalog, so DescribeInstanceTypeOfferings by zone is not uniform (#1621). Real
+// offerings differ per zone for hundreds of types and change as AWS builds out; substrate
+// models only rows it can cite, so a consumer can test its handling of a zone without a type.
+//
+//   - use1-az3, us-east-1's oldest zone, offers no AWS Graviton (arm64) type: the
+//     aws-elastic-globus-compute report in #1621 ("us-east-1's use1-az3 has no
+//     c7g/c8g/c9g/m*/r*g"), and "No Graviton Instances" there in the r/aws threads that also
+//     note it lacks newer Nitro families (wolfman.dev, "AWS AZs: Not all are Equal": "use1-az3,
+//     which doesn't support newer generation instances").
+//
+// Substrate maps zone c of every region to az3 ([ec2SeededZones]), so us-east-1c is the zone
+// this row removes Graviton from. Only the offerings answer is affected; RunInstances does not
+// consult the table.
+var ec2ZoneOfferingExclusions = []ec2ZoneExclusion{ //nolint:gochecknoglobals // immutable table
+	{ZoneID: "use1-az3", Architecture: ec2ArchARM64},
+}
+
+// ec2ZoneOffers reports whether the zone zoneID offers the instance type, per
+// [ec2ZoneOfferingExclusions].
+func ec2ZoneOffers(zoneID string, info ec2InstanceTypeInfo) bool {
+	for _, ex := range ec2ZoneOfferingExclusions {
+		if ex.ZoneID == zoneID && slices.Contains(info.SupportedArchs, ex.Architecture) {
+			return false
+		}
+	}
+	return true
+}
 
 // ec2InvalidInstanceTypeError returns the error EC2 raises when DescribeInstanceTypes is
 // asked for types that do not exist.

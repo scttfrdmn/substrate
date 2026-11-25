@@ -310,6 +310,7 @@ func ec2ValidationWarningFor(problems []*AWSError) *ec2ValidationWarningXML {
 // template left empty. A nil pointer omits the element whole.
 type ec2LTVersionDataXML struct {
 	BlockDeviceMappings   *ec2ItemSet[ec2LTVersionBDMXML]     `xml:"blockDeviceMappingSet,omitempty"`
+	CreditSpecification   *ec2LTCreditSpecificationXML        `xml:"creditSpecification,omitempty"`
 	DisableAPITermination *bool                               `xml:"disableApiTermination,omitempty"`
 	IamInstanceProfile    *ec2LTVersionProfileXML             `xml:"iamInstanceProfile,omitempty"`
 	ImageID               string                              `xml:"imageId,omitempty"`
@@ -405,6 +406,12 @@ type ec2LTVersionTagSpecXML struct {
 	Tags         []ec2TagItem `xml:"tagSet>item"`
 }
 
+// ec2LTCreditSpecificationXML is ResponseLaunchTemplateData's creditSpecification, AWS's
+// CreditSpecification (#1614).
+type ec2LTCreditSpecificationXML struct {
+	CPUCredits string `xml:"cpuCredits"`
+}
+
 // ec2LTVersionData renders stored template data for the wire.
 func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 	out := ec2LTVersionDataXML{
@@ -418,6 +425,9 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 	if d.DisableAPITermination != "" {
 		v := d.DisableAPITermination == "true"
 		out.DisableAPITermination = &v
+	}
+	if d.CPUCredits != "" {
+		out.CreditSpecification = &ec2LTCreditSpecificationXML{CPUCredits: d.CPUCredits}
 	}
 	// The profile is stored as one string, so it is echoed back in whichever member
 	// it arrived in: an "arn:"-prefixed value is an arn and anything else is a name.
@@ -694,6 +704,9 @@ func ec2OverlayTemplateData(src, overlay EC2LaunchTemplateData) EC2LaunchTemplat
 	}
 	if overlay.DisableAPITermination != "" {
 		out.DisableAPITermination = overlay.DisableAPITermination
+	}
+	if overlay.CPUCredits != "" {
+		out.CPUCredits = overlay.CPUCredits
 	}
 	// A version naming its own interfaces replaces the source's list — the one every read and
 	// launch prefers — as well as the flat primary fields (#1471). The list and the primary's

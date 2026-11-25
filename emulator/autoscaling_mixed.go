@@ -75,7 +75,7 @@ import (
 // substrate cannot attribute.
 func asgFamilyCPUManufacturer(family string) string {
 	switch family {
-	case "t3", "m5", "c5", "r5", "p3", "p4d", "p4de", "g4dn", "inf1", "trn1", "trn2":
+	case "t2", "t3", "m5", "c5", "r5", "p3", "p4d", "p4de", "g4dn", "inf1", "trn1", "trn2":
 		return "intel"
 	case "t3a", "m5a", "c5a", "p5", "g5", "g6", "inf2":
 		return "amd"

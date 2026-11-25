@@ -103,7 +103,7 @@
     },
     "ec2": {
       "apiVersion": "2016-11-15",
-      "operations": 114
+      "operations": 120
     },
     "ecr": {
       "apiVersion": "2015-09-21",

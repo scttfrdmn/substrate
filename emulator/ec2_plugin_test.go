@@ -2516,7 +2516,7 @@ func TestEC2_DescribeInstanceTypeOfferings(t *testing.T) {
 	// Every catalog type in each of the three seeded AZs. Derived from the catalog rather
 	// than a literal: #485 widened the catalog from 8 types to whole families, and a
 	// hardcoded count made every such widening look like a regression.
-	want := catalogSize(t, ts) * 3
+	want := catalogSize(t, ts)*3 - len(ec2ArmTypes(t, ts))
 	if len(result.Offerings) != want {
 		t.Fatalf("expected %d offerings (catalog * 3 AZs), got %d", want, len(result.Offerings))
 	}

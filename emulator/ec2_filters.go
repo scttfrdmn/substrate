@@ -328,8 +328,8 @@ func ec2SnapshotFilterSpec() ec2FilterSpec {
 // ec2SubnetFilterSpec is DescribeSubnets' filter set, from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSubnets.html.
 //
-// Twenty-five names plus five alias spellings the page documents inline, of which #685
-// evaluates eleven and four aliases. The aliases are listed individually rather than
+// Twenty-five names plus five alias spellings the page documents inline, of which twelve and all
+// five aliases are evaluated (#685, #1621). The aliases are listed individually rather than
 // normalized: they are distinct names on the wire, and folding them would make the spec
 // disagree with [ec2SubnetMatchesFilter] about what it accepts.
 //
@@ -339,12 +339,13 @@ func ec2SubnetFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
 		tagValueFilter: true,
 		evaluated: []string{
-			"availability-zone", "availabilityZone", "cidr", "cidr-block", "cidrBlock",
+			"availability-zone", "availabilityZone", "availability-zone-id", "availabilityZoneId",
+			"cidr", "cidr-block", "cidrBlock",
 			"default-for-az", "defaultForAz", "map-public-ip-on-launch", "owner-id",
 			"state", "subnet-arn", "subnet-id", "tag-key", "vpc-id",
 		},
 		accepted: []string{
-			"availability-zone-id", "availabilityZoneId", "available-ip-address-count",
+			"available-ip-address-count",
 			"customer-owned-ipv4-pool", "enable-dns64", "enable-lni-at-device-index",
 			"ipv6-cidr-block-association.association-id",
 			"ipv6-cidr-block-association.ipv6-cidr-block",
@@ -637,12 +638,12 @@ func ec2RegionFilterSpec() ec2FilterSpec {
 func ec2InstanceTypeFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
 		evaluated: []string{
-			"current-generation", "instance-type", "memory-info.size-in-mib",
-			"processor-info.supported-architecture", "supported-usage-class",
-			"vcpu-info.default-vcpus",
+			"burstable-performance-supported", "current-generation", "instance-type",
+			"memory-info.size-in-mib", "processor-info.supported-architecture",
+			"supported-usage-class", "vcpu-info.default-vcpus",
 		},
 		accepted: []string{
-			"auto-recovery-supported", "bare-metal", "burstable-performance-supported",
+			"auto-recovery-supported", "bare-metal",
 			"dedicated-hosts-supported",
 			"ebs-info.attachment-limit-type",
 			"ebs-info.ebs-optimized-info.baseline-bandwidth-in-mbps",
