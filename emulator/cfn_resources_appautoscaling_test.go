@@ -141,7 +141,7 @@ func TestCFN_ApplicationAutoScalingRefusals(t *testing.T) {
 			"ScalableDimension":"dynamodb:table:ReadCapacityUnits","ResourceId":"table/missing","MinCapacity":1,"MaxCapacity":2}}`,
 			"DynamoDB resource doesn't exist"},
 		"unregistered target": {`"P":{"Type":"AWS::ApplicationAutoScaling::ScalingPolicy","Properties":{"PolicyName":"p","PolicyType":"StepScaling",
-			"ScalingTargetId":"r|custom-resource:ResourceType:Property|custom-resource",
+			"ScalingTargetId":"never-registered|custom-resource:ResourceType:Property|custom-resource",
 			"StepScalingPolicyConfiguration":{"AdjustmentType":"ChangeInCapacity"}}}`,
 			"No scalable target registered"},
 		"bad schedule": {`"T":{"Type":"AWS::ApplicationAutoScaling::ScalableTarget","Properties":{"ServiceNamespace":"custom-resource",
