@@ -2057,3 +2057,19 @@ func CFNRoute53ChangeForTest(action string, rrset Route53ResourceRecordSet) stri
 func R53OnlyNotFoundForTest(err error) bool {
 	return r53OnlyNotFound(err)
 }
+
+// CFNStackCreatorRoundTripForTest records creator on a stack as a deployment does, round-trips the
+// stack record through JSON as state does, and returns the creator a later operation resolves.
+func CFNStackCreatorRoundTripForTest(creator *Principal) (*Principal, error) {
+	var s CFNStackState
+	s.setAttribution(cfnAttribution{creator: creator})
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	var back CFNStackState
+	if err := json.Unmarshal(raw, &back); err != nil {
+		return nil, err
+	}
+	return back.attribution().creator, nil
+}

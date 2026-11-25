@@ -483,6 +483,13 @@ type CFNStackState struct {
 	// resources ran with it present — so a policy naming ${aws:username} authorized the
 	// create and refused to clean up after it (#745).
 	CreatorUserName string `json:"CreatorUserName,omitempty"`
+
+	// CreatorSession is what the creating principal's session carried — session policies,
+	// session tags and source identity — so a later update, delete or rollback runs under the
+	// same restrictions rather than escaping them. They are kept as recorded even after the
+	// session itself expires: CloudFormation acts with the permissions the stack was created
+	// with, and a session policy that narrowed the create must narrow what follows it.
+	CreatorSession *EventPrincipalSession `json:"CreatorSession,omitempty"`
 }
 
 // attribution returns who the stack's resource calls are made as, from what was
@@ -499,6 +506,7 @@ func (s CFNStackState) attribution() cfnAttribution {
 			Type:     cfnPrincipalType(s.CreatorPrincipalARN),
 			UserName: s.CreatorUserName,
 		}
+		s.CreatorSession.apply(att.creator)
 	}
 	return att
 }
@@ -514,6 +522,7 @@ func (s *CFNStackState) setAttribution(att cfnAttribution) {
 	if att.creator != nil {
 		s.CreatorPrincipalARN = att.creator.ARN
 		s.CreatorUserName = att.creator.UserName
+		s.CreatorSession = eventPrincipalSession(att.creator)
 	}
 }
 

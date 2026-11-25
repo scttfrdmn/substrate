@@ -272,10 +272,26 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("unmarshal role: %w", err)
 	}
 
+	session, refusal := stsAssumeRoleSessionParams(ctx.Principal, req.Params)
+	if refusal != nil {
+		return nil, refusal
+	}
+
 	// The trust policy decides *before* a credential exists. Minting first and
 	// checking after would leave a usable session in state behind a 403.
-	if err := p.checkTrustPolicy(ctx, role, roleARN, externalID); err != nil {
+	if err := p.checkTrustPolicy(ctx, role, roleARN, externalID, session); err != nil {
 		return nil, err
+	}
+
+	// "If you specify a value higher than this setting, the operation fails." The wording is the
+	// IAM troubleshooting guide's.
+	maxDuration := role.MaxSessionDuration
+	if maxDuration == 0 {
+		maxDuration = stsMaxSessionDuration
+	}
+	if duration > maxDuration {
+		return nil, stsFederationError("ValidationError",
+			"Requested DurationSeconds exceeds MaxSessionDuration set for this role.", http.StatusBadRequest)
 	}
 
 	policies, refusal, err := p.stsSessionPolicies(goCtx, req)
@@ -288,7 +304,8 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	now := p.now()
 	creds, err := p.mintRoleSession(goCtx, ctx, ctx.AccountID, roleName, role.RoleID, sessionName,
-		now.Add(time.Duration(duration)*time.Second), stsSessionExtras{policies: policies})
+		now.Add(time.Duration(duration)*time.Second), stsSessionExtras{policies: policies, tags: session.tags,
+			transitiveKeys: session.transitiveKeys, sourceIdentity: session.sourceIdentity})
 	if err != nil {
 		return nil, err
 	}
@@ -312,6 +329,7 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	type assumeResult struct {
 		Credentials     xmlCreds        `xml:"Credentials"`
 		AssumedRoleUser assumedRoleUser `xml:"AssumedRoleUser"`
+		SourceIdentity  string          `xml:"SourceIdentity,omitempty"`
 	}
 	type response struct {
 		XMLName          xml.Name         `xml:"AssumeRoleResponse"`
@@ -329,6 +347,7 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 				SessionToken:    creds.SessionToken,
 				Expiration:      creds.Expiration,
 			},
+			SourceIdentity: session.sourceIdentity,
 			AssumedRoleUser: assumedRoleUser{
 				AssumedRoleID: assumedRoleID,
 				Arn:           assumedRoleARN,
@@ -355,16 +374,17 @@ func (p *STSPlugin) mintRoleSession(
 ) (STSSessionCredentials, error) {
 	assumedRoleARN := fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", accountID, roleName, sessionName)
 	creds := STSSessionCredentials{
-		AccessKeyID:     generateIAMID(ctx.IDs, "ASIA"),
-		SecretAccessKey: stsGenerateSecret(ctx.IDs),
-		SessionToken:    stsGenerateToken(ctx.IDs),
-		Expiration:      expiry,
-		PrincipalARN:    assumedRoleARN,
-		AccountID:       accountID,
-		PrincipalID:     roleID + ":" + sessionName,
-		SessionPolicies: extras.policies,
-		SessionTags:     extras.tags,
-		SourceIdentity:  extras.sourceIdentity,
+		AccessKeyID:       generateIAMID(ctx.IDs, "ASIA"),
+		SecretAccessKey:   stsGenerateSecret(ctx.IDs),
+		SessionToken:      stsGenerateToken(ctx.IDs),
+		Expiration:        expiry,
+		PrincipalARN:      assumedRoleARN,
+		AccountID:         accountID,
+		PrincipalID:       roleID + ":" + sessionName,
+		SessionPolicies:   extras.policies,
+		SessionTags:       extras.tags,
+		SourceIdentity:    extras.sourceIdentity,
+		TransitiveTagKeys: extras.transitiveKeys,
 	}
 	credRaw, err := json.Marshal(creds)
 	if err != nil {
@@ -445,7 +465,8 @@ func (p *STSPlugin) recordRoleLastUsed(
 // and would break every caller who never wrote a policy. A nil principal is
 // skipped for the same reason CheckAccess skips one: an unauthenticated request
 // resolves to no ARN, so there is nothing for a Principal element to be true of.
-func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN, externalID string) error {
+func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN, externalID string,
+	session stsAssumeRoleSession) error {
 	if len(role.AssumeRolePolicyDocument.Statement) == 0 {
 		p.logger.Debug("sts: role has no trust policy, not enforced", "role", roleARN)
 		return nil
@@ -468,9 +489,22 @@ func (p *STSPlugin) checkTrustPolicy(ctx *RequestContext, role IAMRole, roleARN,
 	// was satisfied by every caller, exempting nobody and, on an Allow, admitting all
 	// (#714). See [authzPrincipalContext].
 	authzPrincipalContext(condCtx, ctx.Principal)
+	multi := session.trustContext(condCtx)
 
-	result := stsTrustDecision(role, ctx.Principal.ARN, "sts:AssumeRole", condCtx, nil)
+	result := stsTrustDecision(role, ctx.Principal.ARN, "sts:AssumeRole", condCtx, multi)
 	if result.Decision == DecisionAllow {
+		// Passing tags needs sts:TagSession, and a source identity sts:SetSourceIdentity, in the
+		// same trust policy. The refusal's wording is AWS's, observed through the AWS CLI.
+		for _, action := range session.extraActions() {
+			if stsTrustDecision(role, ctx.Principal.ARN, action, condCtx, multi).Decision != DecisionAllow {
+				return &AWSError{
+					Code: "AccessDenied",
+					Message: fmt.Sprintf("User: %s is not authorized to perform: %s on resource: %s",
+						ctx.Principal.ARN, action, roleARN),
+					HTTPStatus: http.StatusForbidden,
+				}
+			}
+		}
 		return nil
 	}
 
@@ -643,8 +677,12 @@ type STSSessionCredentials struct {
 	// SessionTags are the session tags a federated assume's token or assertion passed.
 	SessionTags map[string]string `json:"SessionTags,omitempty"`
 
-	// SourceIdentity is the source identity a federated assume's token or assertion set.
+	// SourceIdentity is the session's source identity, set by the assume that minted it or carried
+	// from the session that called it.
 	SourceIdentity string `json:"SourceIdentity,omitempty"`
+
+	// TransitiveTagKeys are the session tag keys a role-chained AssumeRole carries forward.
+	TransitiveTagKeys []string `json:"TransitiveTagKeys,omitempty"`
 }
 
 // responseMetadata is the XML response metadata included in all STS responses.

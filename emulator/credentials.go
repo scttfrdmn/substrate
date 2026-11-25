@@ -227,9 +227,11 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 				UserID: sess.PrincipalID,
 				// The role's own tags for an assumed role, the user's for a session
 				// token, with a federated session's tags over them; see [Principal.Tags].
-				Tags:            stsMergeSessionTags(iamPrincipalTags(ctx, state, sess.PrincipalARN), sess.SessionTags),
-				SessionPolicies: sess.SessionPolicies,
-				SourceIdentity:  sess.SourceIdentity,
+				Tags:              stsMergeSessionTags(iamPrincipalTags(ctx, state, sess.PrincipalARN), sess.SessionTags),
+				SessionPolicies:   sess.SessionPolicies,
+				SourceIdentity:    sess.SourceIdentity,
+				SessionTags:       sess.SessionTags,
+				TransitiveTagKeys: sess.TransitiveTagKeys,
 			}, sess.AccountID
 		}
 	}

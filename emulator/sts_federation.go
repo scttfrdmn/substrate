@@ -128,6 +128,7 @@ func stsRequire(req *AWSRequest, names ...string) *AWSError {
 type stsSessionExtras struct {
 	policies       []PolicyDocument
 	tags           map[string]string
+	transitiveKeys []string
 	sourceIdentity string
 }
 
@@ -143,8 +144,9 @@ const (
 // managed policies PolicyArns names — as documents. The session they are minted into may do only
 // what both the role's policies and these allow; [authzSessionPolicyCheck] applies them.
 //
-// A managed policy ARN that names no policy is refused with MalformedPolicyDocument, in the wording
-// AWS returns (observed through the AWS CLI). The other messages are substrate's own.
+// A customer managed policy ARN that names no policy is refused with MalformedPolicyDocument, in the
+// wording AWS returns (observed through the AWS CLI). An AWS managed policy outside substrate's
+// bundled catalog is accepted and not applied. The other messages are substrate's own.
 func (p *STSPlugin) stsSessionPolicies(goCtx context.Context, req *AWSRequest) ([]PolicyDocument, *AWSError, error) {
 	text := req.Params["Policy"]
 	var arns []string
@@ -173,6 +175,13 @@ func (p *STSPlugin) stsSessionPolicies(goCtx context.Context, req *AWSRequest) (
 			docs = append(docs, mp.Document)
 			continue
 		}
+		// An AWS managed policy substrate does not bundle is valid on AWS, so it is accepted —
+		// and, with no document to read, it neither narrows the session nor fails the call. Only
+		// the catalog bundled in iam_managed.go narrows a session.
+		if strings.HasPrefix(arn, "arn:aws:iam::aws:policy/") {
+			p.logger.Debug("sts: session policy names an unbundled AWS managed policy; not applied", "arn", arn)
+			continue
+		}
 		raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 		if err != nil {
 			return nil, nil, fmt.Errorf("get session policy: %w", err)
@@ -187,22 +196,43 @@ func (p *STSPlugin) stsSessionPolicies(goCtx context.Context, req *AWSRequest) (
 	return docs, nil, nil
 }
 
-// stsValidateSessionTags checks a federated session's tags against the documented limits: "You
-// can pass a maximum of 50 session tags", keys up to 128 characters and values up to 256. The
-// message is substrate's own.
-func stsValidateSessionTags(tags map[string]string) *AWSError {
-	bad := len(tags) > 50
-	for k, v := range tags {
-		if k == "" || len(k) > 128 || len(v) > 256 {
-			bad = true
-		}
+// stsTag is one session tag as a request or token passed it.
+type stsTag struct{ key, value string }
+
+// stsSessionTagMap validates session tags and returns them as a map, or nil for none.
+//
+// The limits are documented: "You can pass a maximum of 50 session tags", keys up to 128 characters
+// and values up to 256; that message is substrate's own and the code is refusalCode. Keys that
+// repeat regardless of case are refused with InvalidParameterValue in IAM's wording, "Duplicate tag
+// keys found. Please note that Tag keys are case insensitive.", because "New session tags override
+// existing … session tags with the same tag key, regardless of character case" leaves two of them
+// no defined winner.
+func stsSessionTagMap(tags []stsTag, refusalCode string) (map[string]string, *AWSError) {
+	if len(tags) == 0 {
+		return nil, nil
 	}
-	if bad {
-		return stsFederationError("InvalidIdentityToken",
+	if len(tags) > 50 {
+		return nil, stsFederationError(refusalCode,
 			"Session tags must number at most 50, with keys of 1 to 128 characters and values of at most 256.",
 			http.StatusBadRequest)
 	}
-	return nil
+	out := make(map[string]string, len(tags))
+	seen := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		if t.key == "" || len(t.key) > 128 || len(t.value) > 256 {
+			return nil, stsFederationError(refusalCode,
+				"Session tags must number at most 50, with keys of 1 to 128 characters and values of at most 256.",
+				http.StatusBadRequest)
+		}
+		folded := strings.ToLower(t.key)
+		if seen[folded] {
+			return nil, stsFederationError("InvalidParameterValue",
+				"Duplicate tag keys found. Please note that Tag keys are case insensitive.", http.StatusBadRequest)
+		}
+		seen[folded] = true
+		out[t.key] = t.value
+	}
+	return out, nil
 }
 
 // stsValidateSourceIdentity checks a source identity in the IAM troubleshooting guide's wording.
@@ -224,16 +254,16 @@ func stsMergeSessionTags(roleTags, sessionTags map[string]string) map[string]str
 		return roleTags
 	}
 	out := make(map[string]string, len(roleTags)+len(sessionTags))
-	for k, v := range roleTags {
-		out[k] = v
+	byFold := make(map[string]string, len(roleTags))
+	for _, k := range sortedStringKeys(roleTags) {
+		out[k] = roleTags[k]
+		byFold[strings.ToLower(k)] = k
 	}
-	for k, v := range sessionTags {
-		for existing := range out {
-			if strings.EqualFold(existing, k) {
-				delete(out, existing)
-			}
+	for _, k := range sortedStringKeys(sessionTags) {
+		if existing, ok := byFold[strings.ToLower(k)]; ok {
+			delete(out, existing)
 		}
-		out[k] = v
+		out[k] = sessionTags[k]
 	}
 	return out
 }
@@ -410,12 +440,12 @@ func (p *STSPlugin) federatedSession(goCtx context.Context, ctx *RequestContext,
 	if a.sessionCap != nil && a.sessionCap.Before(expiry) {
 		expiry = a.sessionCap.UTC()
 	}
-	var tags map[string]string
+	var transitive []string
 	if len(a.tags) > 0 {
-		tags = a.tags
+		transitive = a.transitiveKeys
 	}
 	creds, err := p.mintRoleSession(goCtx, ctx, arnAccountID(a.roleARN), a.roleName, a.role.RoleID, a.sessionName,
-		expiry, stsSessionExtras{policies: policies, tags: tags, sourceIdentity: a.sourceIdentity})
+		expiry, stsSessionExtras{policies: policies, tags: a.tags, transitiveKeys: transitive, sourceIdentity: a.sourceIdentity})
 	if err != nil {
 		return STSSessionCredentials{}, nil, err
 	}
@@ -469,17 +499,18 @@ const (
 	stsJWTSourceIdentityClaim = "https://aws.amazon.com/source_identity"
 )
 
-// sessionTags returns the session tags and transitive tag keys the token passes, in either the
-// nested or the flattened claim format. Each principal tag's value is a single string, or a list
-// holding one in the nested format.
-func (c stsJWTClaims) sessionTags() (map[string]string, []string) {
-	tags := map[string]string{}
+// sessionTags returns the session tags and transitive tag keys the token passes, in the nested
+// and the flattened claim formats together, in key order so a duplicate is reported the same way on
+// every run. Each principal tag's value is a single string, or a list holding one in the nested
+// format.
+func (c stsJWTClaims) sessionTags() ([]stsTag, []string) {
+	var tags []stsTag
 	var transitive []string
 	if nested, ok := c.raw[stsJWTTagsClaim].(map[string]any); ok {
 		if principal, ok := nested["principal_tags"].(map[string]any); ok {
 			for k, v := range principal {
 				if values := stsStrings(v); len(values) > 0 {
-					tags[k] = values[0]
+					tags = append(tags, stsTag{k, values[0]})
 				}
 			}
 		}
@@ -488,11 +519,12 @@ func (c stsJWTClaims) sessionTags() (map[string]string, []string) {
 	for name, v := range c.raw {
 		if key, ok := strings.CutPrefix(name, stsJWTFlatTagPrefix); ok {
 			if values := stsStrings(v); len(values) > 0 {
-				tags[key] = values[0]
+				tags = append(tags, stsTag{key, values[0]})
 			}
 		}
 	}
 	transitive = append(transitive, stsStrings(c.raw[stsJWTFlatTransitiveClaim])...)
+	sort.SliceStable(tags, func(i, j int) bool { return tags[i].key < tags[j].key })
 	return tags, transitive
 }
 
@@ -619,8 +651,9 @@ func (p *STSPlugin) assumeRoleWithWebIdentity(ctx *RequestContext, req *AWSReque
 		return nil, refusal
 	}
 
-	tags, transitive := claims.sessionTags()
-	if refusal := stsValidateSessionTags(tags); refusal != nil {
+	tagList, transitive := claims.sessionTags()
+	tags, refusal := stsSessionTagMap(tagList, "InvalidIdentityToken")
+	if refusal != nil {
 		return nil, refusal
 	}
 	sourceIdentity := claims.str(stsJWTSourceIdentityClaim)
@@ -782,12 +815,13 @@ func (a *stsSAMLAssertion) attribute(name string) []string {
 	return out
 }
 
-// sessionTags returns the PrincipalTag:<key> attributes as session tags, and TransitiveTagKeys.
-func (a *stsSAMLAssertion) sessionTags() (map[string]string, []string) {
-	tags := map[string]string{}
+// sessionTags returns the PrincipalTag:<key> attributes as session tags, in assertion order, and
+// TransitiveTagKeys.
+func (a *stsSAMLAssertion) sessionTags() ([]stsTag, []string) {
+	var tags []stsTag
 	for _, attr := range a.Attributes {
 		if key, ok := strings.CutPrefix(attr.Name, stsSAMLPrincipalTagPrefix); ok && len(attr.Values) > 0 {
-			tags[key] = strings.TrimSpace(attr.Values[0])
+			tags = append(tags, stsTag{key, strings.TrimSpace(attr.Values[0])})
 		}
 	}
 	return tags, a.attribute(stsSAMLTransitiveAttr)
@@ -989,8 +1023,9 @@ func (p *STSPlugin) assumeRoleWithSAML(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, stsFederationError("InvalidIdentityToken",
 			"RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}", http.StatusBadRequest)
 	}
-	tags, transitive := assertion.sessionTags()
-	if refusal := stsValidateSessionTags(tags); refusal != nil {
+	tagList, transitive := assertion.sessionTags()
+	tags, refusal := stsSessionTagMap(tagList, "InvalidIdentityToken")
+	if refusal != nil {
 		return nil, refusal
 	}
 	sourceIdentity := ""

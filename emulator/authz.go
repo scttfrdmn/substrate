@@ -144,25 +144,65 @@ func authzPrincipalContext(ctx map[string]string, principal *Principal) {
 // narrowed.
 func authzSessionPolicyCheck(principal *Principal, action, resource string, condCtx map[string]string,
 	multi map[string][]string, deniedCode string) error {
-	if principal == nil || len(principal.SessionPolicies) == 0 {
-		return nil
-	}
-	result := Evaluate(principal.SessionPolicies, EvaluationRequest{
-		Principal:    principal.ARN,
+	return authzSessionPolicyEval(principal, EvaluationRequest{
+		Principal:    principalARN(principal),
 		Action:       action,
 		Resource:     resource,
 		Context:      condCtx,
 		MultiContext: multi,
-	})
-	if result.Decision == DecisionAllow {
+	}, deniedCode)
+}
+
+// authzSessionPolicyEval is [authzSessionPolicyCheck] for a pass that has already built its
+// evaluation request — the tag-on-create, copy-source and create-side-effect passes, each of which
+// a session policy narrows exactly as it narrows the main action.
+func authzSessionPolicyEval(principal *Principal, evalReq EvaluationRequest, deniedCode string) error {
+	if principal == nil || len(principal.SessionPolicies) == 0 {
+		return nil
+	}
+	if Evaluate(principal.SessionPolicies, evalReq).Decision == DecisionAllow {
 		return nil
 	}
 	return &AWSError{
 		Code: deniedCode,
 		Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by session policy)",
-			principal.ARN, action),
+			principal.ARN, evalReq.Action),
 		HTTPStatus: http.StatusForbidden,
 	}
+}
+
+// sessionPolicyOnly decides a request whose identity policies CheckAccess cannot read — the role
+// was deleted, or its policies failed to load — against the session's own policies. Those paths
+// fail open for the identity policies, but a session policy is recorded on the credential itself,
+// so it can still narrow the request; a session with none is not enforced, as before.
+func (a *AuthController) sessionPolicyOnly(reqCtx *RequestContext, req *AWSRequest, action string,
+	resources []authzResource, now time.Time, haveClock bool) error {
+	if len(reqCtx.Principal.SessionPolicies) == 0 {
+		return nil
+	}
+	requestTags := make(map[string]string)
+	addRequestTags(requestTags, req)
+	deniedCode := accessDeniedCodeFor(req.Service, "")
+	for _, res := range resources {
+		condCtx := make(map[string]string, len(requestTags)+4)
+		for k, v := range requestTags {
+			condCtx[k] = v
+		}
+		a.authzTimeContext(condCtx, now, haveClock)
+		authzPrincipalContext(condCtx, reqCtx.Principal)
+		if err := authzSessionPolicyCheck(reqCtx.Principal, action, res.ARN, condCtx, nil, deniedCode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// principalARN returns principal's ARN, or "" for no principal.
+func principalARN(principal *Principal) string {
+	if principal == nil {
+		return ""
+	}
+	return principal.ARN
 }
 
 // now reports the controlled time, and whether there is a clock to read it from.
@@ -197,7 +237,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		// on a storage error would turn an infrastructure fault into a
 		// misleading AccessDeniedException.
 		a.logger.Warn("authz: failed to resolve principal", "principal", reqCtx.Principal.ARN, "err", err)
-		return nil
+		return a.sessionPolicyOnly(reqCtx, req, action, resources, now, haveClock)
 	}
 	if !exists {
 		// Enforcement is opt-in by creating the principal. A credential that
@@ -206,14 +246,14 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		// and warning on each would bury the signal it is meant to carry.
 		a.logger.Debug("authz: principal has no IAM entity, not enforced",
 			"principal", reqCtx.Principal.ARN, "action", action)
-		return nil
+		return a.sessionPolicyOnly(reqCtx, req, action, resources, now, haveClock)
 	}
 
 	docs, err := a.loadPoliciesForPrincipal(entity)
 	if err != nil {
 		// Fail open: if we cannot load policies we cannot block the caller.
 		a.logger.Warn("authz: failed to load policies", "principal", reqCtx.Principal.ARN, "err", err)
-		return nil
+		return a.sessionPolicyOnly(reqCtx, req, action, resources, now, haveClock)
 	}
 
 	// Both denial arms take their code from the same helper, so an identity-policy
@@ -452,6 +492,9 @@ func (a *AuthController) checkEC2TagOnCreate(reqCtx *RequestContext, req *AWSReq
 				HTTPStatus: http.StatusForbidden,
 			}
 		}
+		if err := authzSessionPolicyEval(reqCtx.Principal, evalReq, deniedCode); err != nil {
+			return err
+		}
 		if boundary == nil {
 			continue
 		}
@@ -540,7 +583,7 @@ func (a *AuthController) checkELBTagOnCreate(reqCtx *RequestContext, req *AWSReq
 			HTTPStatus: http.StatusForbidden,
 		}
 	}
-	return nil
+	return authzSessionPolicyEval(reqCtx.Principal, evalReq, deniedCode)
 }
 
 // iamEntity is the IAM entity a principal ARN names, in the terms the policy

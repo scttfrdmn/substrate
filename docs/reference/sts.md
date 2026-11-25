@@ -8,7 +8,7 @@
 | Operation | Notes |
 |-----------|-------|
 | GetCallerIdentity | Returns account 123456789012 by default |
-| AssumeRole | Evaluates the role's trust policy, then returns temporary credentials. `Policy` and `PolicyArns` narrow the session — see [Session policies](#session-policies-narrow-the-session) |
+| AssumeRole | Evaluates the role's trust policy, then returns temporary credentials. `Policy` and `PolicyArns` narrow the session — see [Session policies](#session-policies-narrow-the-session). `Tags`, `TransitiveTagKeys` and `SourceIdentity` need `sts:TagSession`/`sts:SetSourceIdentity` and carry through role chaining. `DurationSeconds` is at most the role's `MaxSessionDuration` |
 | GetSessionToken | Returns stub temporary credentials |
 | AssumeRoleWithWebIdentity | Unsigned. Checks the token's `iss`, `aud` and `exp` against a registered OIDC provider and the simulated clock, then the role's trust policy — see [below](#federated-assumes-check-claims-not-signatures) |
 | AssumeRoleWithSAML | Unsigned. Checks the assertion's provider, Role attribute and `NotOnOrAfter`, then the trust policy with the `saml:` keys |
@@ -126,8 +126,16 @@ assertion's `SessionNotOnOrAfter` when that comes first.
 `TransitiveTagKeys` and `SourceIdentity` attributes. At the assume they are `aws:RequestTag/<key>`,
 `aws:TagKeys`, `sts:TransitiveTagKeys` and `sts:SourceIdentity`. Afterwards they are the session's
 `aws:PrincipalTag/<key>` (over the role's own tags, a session tag winning regardless of case) and
-`aws:SourceIdentity`. The response reports `SourceIdentity`. Role chaining is not modeled, so
-transitive keys are evaluated and not carried forward.
+`aws:SourceIdentity`. The response reports `SourceIdentity`. Session tag keys that repeat
+regardless of case are refused with `InvalidParameterValue` "Duplicate tag keys found. Please note
+that Tag keys are case insensitive.", the wording IAM uses for the same refusal.
+
+**Role chaining.** An `AssumeRole` called with a session's credentials carries the session's
+transitive tags and its source identity into the new session. A request tag that would override an
+inherited transitive tag is refused with `InvalidParameterValue`. A different `SourceIdentity` is
+refused with `AccessDenied`: a source identity "cannot be changed during the role session". Both
+messages are substrate's own. Carrying a source identity needs `sts:SetSourceIdentity` in the target
+role's trust policy, as the User Guide says.
 
 ## Session policies narrow the session
 
@@ -137,11 +145,24 @@ identity-based policy and the session policies." The documents are stored on the
 every request signed with it must be allowed by them after the identity policies and the
 permissions boundary. A refusal says "(blocked by session policy)".
 
+Session policies reach every authorization pass: the main action, the tag-on-create passes for
+EC2 and ELB, S3's copy source and create side effects, and IAM's own check. They also apply when the
+role has been deleted or its policies cannot be read, which leaves its identity policies unenforced.
+The session's policies, tags, transitive keys and source identity are also recorded in two places:
+- **On every event the session signs.** A replay decides the request as the live run did, so a live
+  refusal replays as a refusal.
+- **With a CloudFormation stack's creator.** An update, delete or rollback runs under the
+  restrictions the create ran under. They are kept even after the session expires, because
+  CloudFormation acts with the permissions the stack was created with.
+
 Both limits are enforced: 2,048 characters for `Policy` and 10 ARNs for `PolicyArns`, each
 answering `ValidationError`. A `Policy` that is not a policy document is `MalformedPolicyDocument`,
-in substrate's own wording. A `PolicyArns` entry naming no policy is `MalformedPolicyDocument`
-`Policy <arn> does not exist or is not attachable.`, observed from the service. The documents are
-read when the session is minted, so a later change to a managed policy does not reach an existing
+in substrate's own wording. A customer managed `PolicyArns` entry that names no policy is
+`MalformedPolicyDocument` `Policy <arn> does not exist or is not attachable.`, observed from the
+service. An AWS managed policy narrows a session only if it is in the catalog bundled in
+`emulator/iam_managed.go`. Any other `arn:aws:iam::aws:policy/…` is valid on AWS, so it is accepted:
+with no document to read, it neither narrows the session nor fails the call. The documents are read
+when the session is minted, so a later change to a managed policy does not reach an existing
 session.
 
 ### Seeding what the identity provider decides

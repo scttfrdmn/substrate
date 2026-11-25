@@ -1023,6 +1023,10 @@ func replayPrincipal(ctx context.Context, state StateManager, event *Event) *Pri
 			}
 		}
 	}
+	// The session's policies, tags and source identity, as recorded: the session record they
+	// came from may since have expired or been replayed away, and a replay must decide the
+	// request as the live run did.
+	event.PrincipalSession.apply(principal)
 	return principal
 }
 

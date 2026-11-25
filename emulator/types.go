@@ -213,6 +213,14 @@ type Principal struct {
 	// SourceIdentity is the source identity the session was minted with, published as
 	// `aws:SourceIdentity` on every request the session makes, or empty.
 	SourceIdentity string
+
+	// SessionTags are the session tags the credential was minted with, before they are merged
+	// over the role's own tags into Tags. A role-chained AssumeRole reads them to carry the
+	// transitive ones forward.
+	SessionTags map[string]string
+
+	// TransitiveTagKeys are the session tag keys that persist through role chaining.
+	TransitiveTagKeys []string
 }
 
 // StateManager defines the interface for reading and writing emulator state.
