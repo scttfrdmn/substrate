@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"sync"
 	"sync/atomic"
 )
 
@@ -89,6 +90,41 @@ type IDMint struct {
 	// goroutine; the *values* are then assigned in whichever order the draws land, which is
 	// why a handler that needs reproducible identifiers must mint them sequentially.
 	ordinal atomic.Uint64
+
+	// streamsMu guards streams, the request's named side streams; see [IDMint.Stream].
+	streamsMu sync.Mutex
+	streams   map[string]*IDMint
+}
+
+// Stream returns the request's side stream named name: a mint of its own, derived from this
+// mint's seed and the name, and the same mint every time the request asks for that name.
+//
+// A side stream is how an operation that already mints a sequence of identifiers adds new
+// ones without moving the old ones. A draw from the request's own mint advances the ordinal
+// every later draw is keyed on, so a new draw inserted ahead of an existing one would change
+// every identifier minted after it, and a recording made by a build that did not draw it would
+// replay to different identifiers. A draw from a side stream advances only that stream's
+// ordinal. A seedless mint's streams are seedless too, and a nil mint's stream is nil, which
+// draws exactly as a nil mint does.
+func (m *IDMint) Stream(name string) *IDMint {
+	if m == nil {
+		return nil
+	}
+	m.streamsMu.Lock()
+	defer m.streamsMu.Unlock()
+	if s, ok := m.streams[name]; ok {
+		return s
+	}
+	if m.streams == nil {
+		m.streams = map[string]*IDMint{}
+	}
+	seed := ""
+	if m.seed != "" {
+		seed = m.seed + "/" + name
+	}
+	s := NewIDMint(seed)
+	m.streams[name] = s
+	return s
 }
 
 // NewIDMint returns a mint deriving identifiers from seed, which is the request id the

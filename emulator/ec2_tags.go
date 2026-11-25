@@ -294,7 +294,7 @@ func ec2TagSpecificationTags(params map[string]string, prefix, resourceType stri
 // The launch path checks again, deliberately — see the fallback in
 // [EC2Plugin.runInstancesWithTags] for why a stored template can still carry one.
 func ec2CheckTemplateTags(d EC2LaunchTemplateData) *AWSError {
-	for _, scope := range [][]EC2Tag{d.TagSpecifications, d.VolumeTagSpecifications} {
+	for _, scope := range [][]EC2Tag{d.TagSpecifications, d.VolumeTagSpecifications, d.NetworkInterfaceTagSpecifications} {
 		if awsErr := ec2CheckTagRules(scope); awsErr != nil {
 			return awsErr
 		}
@@ -370,6 +370,7 @@ var taggingEC2ScannedTypes = []taggingEC2ScannedType{
 	{arnType: "security-group", keyPrefix: "sg:"},
 	{arnType: "launch-template", keyPrefix: "lt:"},
 	{arnType: "volume", keyPrefix: "volume:"},
+	{arnType: "network-interface", keyPrefix: "eni:"},
 }
 
 // taggingEC2RawMergedKey reports whether key belongs to one of [taggingEC2ScannedTypes].
@@ -498,8 +499,26 @@ func ec2ScanTaggedVolumes(ctx context.Context, state StateManager, reqCtx *Reque
 	return out, nil
 }
 
+// ec2ScanTaggedNetworkInterfaces returns the caller's network interfaces (#1522), under the ARN
+// the Service Authorization Reference publishes for the type,
+// arn:${Partition}:ec2:${Region}:${Account}:network-interface/${NetworkInterfaceId}.
+func ec2ScanTaggedNetworkInterfaces(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	var out []resourceTagMapping
+	err := taggingScanRecords(ctx, state, ec2Namespace, taggingScanPrefix("eni:", reqCtx), func(eni EC2NetworkInterfaceRecord) {
+		out = append(out, resourceTagMapping{
+			ResourceARN: taggingEC2ARN(eni.Region, eni.AccountID, "network-interface", eni.NetworkInterfaceID),
+			Tags:        ec2TagsToTaggingTags(eni.Tags),
+			everTagged:  eni.EverTagged,
+		})
+	})
+	if err != nil {
+		return out, fmt.Errorf("scan ec2 network interfaces: %w", err)
+	}
+	return out, nil
+}
+
 // ec2ListTaggedResources returns every EC2 resource the tagging API reports: instances, Elastic
-// IPs, security groups, launch templates and volumes. Each type's failure is joined into the error
+// IPs, security groups, launch templates, volumes and network interfaces. Each type's failure is joined into the error
 // and the others are still listed, so one unreadable type hides no other.
 func ec2ListTaggedResources(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	var out []resourceTagMapping
@@ -510,6 +529,7 @@ func ec2ListTaggedResources(ctx context.Context, state StateManager, reqCtx *Req
 		ec2ScanTaggedSecurityGroups,
 		ec2ScanTaggedLaunchTemplates,
 		ec2ScanTaggedVolumes,
+		ec2ScanTaggedNetworkInterfaces,
 	} {
 		resources, err := scan(ctx, state, reqCtx)
 		out = append(out, resources...)

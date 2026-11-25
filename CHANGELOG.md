@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cloud Map: new plugin with Route 53 zones for DNS namespaces, operation status seeded at `/v1/servicediscovery/operation-status`, and five `AWS::ServiceDiscovery::*` CloudFormation types (#1614).
 - Application Auto Scaling: new plugin for scalable targets, scaling policies, scheduled actions and tags, recorded without scaling; target tracking policies create their CloudWatch alarms (#1614).
 - CloudFormation: `AWS::ApplicationAutoScaling::ScalableTarget` and `::ScalingPolicy`, so the CDK's DynamoDB autoscaling app deploys in strict mode (#1661).
+- EC2: network interfaces are resources, with `CreateNetworkInterface`, `AttachNetworkInterface`, `DetachNetworkInterface`, `DeleteNetworkInterface`, `ModifyNetworkInterfaceAttribute`, a primary interface per instance, and `network-interface` tags (#1522).
 
 ### Fixed
 
@@ -27,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Routing: an unemulated service's 501 `ServiceNotAvailable` arrives in the request's own envelope — CBOR, JSON RPC, Query, REST-XML for S3 Control's `amazonaws.com` hosts, else REST-JSON (#1614).
 - Costs: `sesv2/SendEmail` is $0.0001 per email, $0.10 per 1,000 (#1729).
 - EC2: revoking an absent egress rule outside the default VPC is pinned as `InvalidPermission.NotFound`, AWS's answer, with its provenance (#1658).
+- EC2: private addresses come from the subnet's CIDR, unique and skipping its five reserved addresses; `availableIpAddressCount` reports what is left (#1592).
 
 ### Compatibility
 
@@ -39,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EC2: the `availability-zone-id` `DescribeSubnets` filter now selects subnets instead of being ignored; a test that relied on it matching every subnet should drop the filter (#1621).
 - EC2: `AuthorizeSecurityGroupIngress`/`Egress` naming a referenced group of the account that does not exist, by ID or by name, is now `InvalidGroup.NotFound`; create the group before the rule (#1490).
 - Auto Scaling: `t2` types now match `InstanceRequirements` that include burstable types, and sort first, so a 1-vCPU group may launch `t2.nano` where it launched `t3.nano`; add `ExcludedInstanceTypes: t2.*` to keep the previous choice (#1614).
+- EC2: private addresses change. A default-VPC launch starts at `172.31.0.4`, a non-default subnet's instances and NAT gateways are addressed inside it, and a taken `PrivateIpAddress` is `InvalidIPAddress.InUse` (#1592).
+- EC2: every instance reports a primary interface; a launch's `NetworkInterfaceId` must name a `CreateNetworkInterface` interface; delete kept interfaces before their subnet, VPC or security group (#1522).
+- EC2: `RunInstances` with `NetworkInterface.N` but none at `DeviceIndex` 0 on `NetworkCardIndex` 0, or two at one `DeviceIndex`/`NetworkCardIndex`, is `InvalidParameterValue`; declare the primary at 0/0 and each other interface at its own position (#1522).
+- EC2: a launch interface, or an `AttachNetworkInterface`, in another Availability Zone than the instance is `InvalidParameterCombination`; use a subnet in the instance's zone (#1522).
 
 ## [v0.134.0] - 2026-11-25
 

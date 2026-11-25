@@ -157,7 +157,12 @@ func (p *EC2Plugin) describeInstanceAttribute(reqCtx *RequestContext, req *AWSRe
 		// Always a present element, empty when the instance has no groups, for the
 		// same reason an unset userData is present: an SDK distinguishes an empty
 		// array from a nil one.
-		resp.Groups = &ec2GroupSetXML{Items: p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs)}
+		// The groups are the primary interface's (#1522); see [ec2InstanceGroups].
+		idx, idxErr := p.ec2InterfacesByInstance(reqCtx.AccountID, reqCtx.Region)
+		if idxErr != nil {
+			return nil, idxErr
+		}
+		resp.Groups = &ec2GroupSetXML{Items: p.ec2GroupItems(reqCtx, ec2InstanceGroups(*inst, idx))}
 	case ec2AttrBlockDeviceMapping:
 		// Derived from the volume records rather than from the launch's recorded
 		// mappings, so the answer tracks attachments made and broken after launch; see

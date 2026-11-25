@@ -32,18 +32,23 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | CreateVpc | Stores `TagSpecification.N` scoped to `vpc` and `InstanceTenancy` (`default` or `dedicated`; anything else, `host` included, is `InvalidParameterValue`, since API_CreateVpc says host "cannot be used with this parameter"), both dropped before #1519. Renders the same VPC `DescribeVpcs` does, `ownerId`, `instanceTenancy` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters). Creates the VPC's main route table and, as of [#1492](https://github.com/scttfrdmn/substrate/issues/1492), its security group named `default` — the self-referencing all-traffic ingress rule and the all-traffic egress rule to `0.0.0.0/0` — see [A VPC's dependents](#a-vpc-s-dependents). As of [#1614](https://github.com/scttfrdmn/substrate/issues/1614) it also creates the VPC's default network ACL and associates the VPC with the Region's default DHCP option set — see [Network ACLs, DHCP option sets and flow logs](#network-acls-dhcp-option-sets-and-flow-logs) |
 | CreateDefaultVpc | Creates the [default VPC](#the-default-vpc) and everything AWS creates with one; `DefaultVpcAlreadyExists` when the Region has one. Clears the tombstone a deleted default VPC leaves |
 | CreateDefaultSubnet | A `/20` default subnet in the named zone of the [default VPC](#the-default-vpc), by `AvailabilityZone` or `AvailabilityZoneId`; refuses with `DefaultVpcDoesNotExist`, `DefaultSubnetAlreadyExistsInAvailabilityZone` or `InvalidAvailabilityZone`. `Ipv6Native` is unread |
-| DescribeNetworkInterfaces | The interfaces live instances recorded from `NetworkInterface.N` at launch; substrate mints none for an instance launched without one, or for a Lambda function or load balancer. [Explicit resource IDs](#explicit-resource-ids) (`InvalidNetworkInterfaceID.NotFound`/`.Malformed`); sixteen filters evaluated and the rest inert, with [filter names checked](#one-rule-for-an-unrecognized-filter-name); paginates on `MaxResults`/`NextToken` over 5–1000 (#1519) |
+| DescribeNetworkInterfaces | Every stored [network interface](#network-interfaces), available or attached — each instance's primary, the secondaries a launch creates and every `CreateNetworkInterface` — plus the interfaces of an instance recorded before interfaces were stored. Substrate mints none for a Lambda function or load balancer. [Explicit resource IDs](#explicit-resource-ids) (`InvalidNetworkInterfaceID.NotFound`/`.Malformed`); twenty-four filters evaluated, `tag:<key>` among them, and the rest inert, with [filter names checked](#one-rule-for-an-unrecognized-filter-name); paginates on `MaxResults`/`NextToken` over 5–1000 (#1519, #1522) |
+| CreateNetworkInterface | An `available` interface in `SubnetId` (required and checked), with an address from the [subnet's allocator](#private-ip-addresses): `PrivateIpAddress`, the `PrivateIpAddresses.N` entry marked `Primary`, or the next free one; further `PrivateIpAddresses.N` and `SecondaryPrivateIpAddressCount` are secondary addresses. `SecurityGroupId.N`, or the VPC's `default` group; `Description`; `InterfaceType` (`efa-only` takes no address); `TagSpecification.N` scoped to `network-interface`. `ClientToken` is not read — see [Network interfaces](#network-interfaces) (#1522) |
+| AttachNetworkInterface | Attaches an `available` interface in the instance's zone at `DeviceIndex` on `NetworkCardIndex`, answering an `eni-attach-` `attachmentId` and `networkCardIndex`; the attachment's `DeleteOnTermination` is `false`. An interface already attached is `InvalidNetworkInterface.InUse`, a device index the instance uses is `InvalidParameterValue`, and a terminated instance is `IncorrectInstanceState` — see [Network interfaces](#network-interfaces) (#1522) |
+| DetachNetworkInterface | By `AttachmentId` (`InvalidAttachmentID.NotFound`, `InvalidNetworkInterfaceAttachmentId.Malformed`); the interface goes `available`, keeps its addresses, and reports the attachment as `detached`. The primary — device index 0 on network card 0 — is `OperationNotPermitted`. `Force` is accepted and changes nothing (#1522) |
+| DeleteNetworkInterface | Deletes an `available` interface and releases its addresses; an attached one is `InvalidNetworkInterface.InUse` (#1522) |
+| ModifyNetworkInterfaceAttribute | `Description.Value`, `SourceDestCheck.Value`, `SecurityGroupId.N` (checked against the interface's VPC; on an instance's primary interface they are the instance's `groupSet` too) and `Attachment.AttachmentId` with `Attachment.DeleteOnTermination`; the other members are accepted and not recorded. An older instance's synthesized interfaces are stored on the first write naming one of them (#1522) |
 | DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); seven of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId`, `dhcpOptionsId` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifyVpcAttribute | `VpcId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `EnableDnsSupport.Value`, `EnableDnsHostnames.Value` and `EnableNetworkAddressUsageMetrics.Value` are read under the spellings the page publishes, and each is readable back through `DescribeVpcAttribute` ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then the first two were read as `EnableDNSSupport.Value`/`EnableDNSHostnames.Value`, which no SDK sends, and every modify was discarded). One attribute per request, and hostnames only where DNS support is enabled ([#1554](https://github.com/scttfrdmn/substrate/issues/1554)) — see [VPC attributes and internet gateways](#vpc-attributes-and-internet-gateways) |
 | DescribeVpcAttribute | `VpcId` and `Attribute` are required; `Attribute` is one of `enableDnsSupport`, `enableDnsHostnames` and `enableNetworkAddressUsageMetrics` (`InvalidParameterValue` otherwise), and the response carries `vpcId` and that one attribute as `value` — the shape of the page's samples. A new VPC answers DNS support on and hostnames off; the [default VPC](#the-default-vpc) has both on. Network Address Usage metrics is a recorded flag: no metric is produced |
-| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Refused with `DependencyViolation` while the VPC holds a subnet, an attached internet gateway, a security group other than `default`, a route table other than its main one, a network ACL other than its default one, a NAT gateway not yet `deleted`, or an instance not yet `terminated`, and nothing is written; otherwise its `default` security group, main route table, default network ACL and flow logs go with it — see [A VPC's dependents](#a-vpc-s-dependents). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again |
+| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Refused with `DependencyViolation` while the VPC holds a subnet, an attached internet gateway, a security group other than `default`, a route table other than its main one, a network ACL other than its default one, a NAT gateway not yet `deleted`, a network interface, or an instance not yet `terminated`, and nothing is written; otherwise its `default` security group, main route table, default network ACL and flow logs go with it — see [A VPC's dependents](#a-vpc-s-dependents). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again |
 | CreateSubnet | `AvailabilityZoneId` is accepted in place of `AvailabilityZone` and resolved to the zone's name; both is `InvalidParameterCombination`, an ID of no zone `InvalidParameterValue`. `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them). The subnet is associated with its VPC's default network ACL ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)) |
 | DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); reports `availabilityZoneId`; sixteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifySubnetAttribute | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `MapPublicIpOnLaunch` is the one modelled attribute — it decides whether a launch into the subnet gets a public IPv4 address, and it is readable back through [`DescribeSubnets`](#a-subnet-reports-its-tags-and-filters-on-them) — and the other ten published parameters are unread. It is read as `MapPublicIpOnLaunch.Value`, the page's own spelling ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then it was read as `MapPublicIPOnLaunch.Value` and every SDK's modify was discarded). AWS's *"You can only modify one attribute at a time"* is not enforced, which is inert while one attribute is modelled |
-| DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids). A subnet still holding an instance that is not terminated, or a NAT gateway not yet `deleted`, is `DependencyViolation` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) — see [What a delete refuses on](#what-a-delete-refuses-on). A deleted subnet's network ACL association goes with it |
+| DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids). A subnet still holding an instance that is not terminated, a NAT gateway not yet `deleted`, or a network interface, is `DependencyViolation` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) — see [What a delete refuses on](#what-a-delete-refuses-on). A deleted subnet's network ACL association goes with it |
 | CreateSecurityGroup | `TagSpecification.N` scoped to `security-group`, answered in `tagSet`; an absent `VpcId` places the group in the [default VPC](#the-default-vpc), or is `VPCIdNotSpecified` without one; the name `default` is reserved (`InvalidParameterValue`), and a name another group in the same VPC holds, compared case-insensitively, is `InvalidGroup.Duplicate` ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)); a `VpcId` naming no VPC is `InvalidVpcID.NotFound` — see [Security group tags and rules](#security-group-tags-and-rules) |
 | DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); `GroupName.N` selects among the [default VPC](#the-default-vpc)'s groups only, as the page scopes it, case-insensitively ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)); reports `ownerId` and `tagSet`, and evaluates every filter it documents, `tag:<key>` and the rule filters included — see [Security group tags and rules](#security-group-tags-and-rules); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range, and `GroupName.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids). `GroupName` names a group in the [default VPC](#the-default-vpc), case-insensitively, and one that resolves to nothing there is `InvalidGroup.NotFound`; `GroupId` wins when both are sent ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)). A VPC's `default` group is `CannotDelete`, and a group an instance carries or another group's rule references is `DependencyViolation` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) — see [What a delete refuses on](#what-a-delete-refuses-on) |
+| DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids). `GroupName` names a group in the [default VPC](#the-default-vpc), case-insensitively, and one that resolves to nothing there is `InvalidGroup.NotFound`; `GroupId` wins when both are sent ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)). A VPC's `default` group is `CannotDelete`, and a group an instance or a network interface carries, or another group's rule references, is `DependencyViolation` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) — see [What a delete refuses on](#what-a-delete-refuses-on) |
 | AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules. A source the group already allows for the same protocol and ports is `InvalidPermission.Duplicate`, checked per source, and nothing is written ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)). IPv4 and IPv6 CIDRs are [canonicalised](#security-group-tags-and-rules) before they are compared or stored, an unparseable one is `InvalidParameterValue`, and `GroupName` names a group in the [default VPC](#the-default-vpc) ([#1553](https://github.com/scttfrdmn/substrate/issues/1553)) |
 | AuthorizeSecurityGroupEgress | Supports destination security groups. A duplicate is refused as for `AuthorizeSecurityGroupIngress` — including the all-traffic `0.0.0.0/0` rule every new group carries — and CIDRs and `GroupName` are read as there |
 | RevokeSecurityGroupIngress | Matches on protocol, ports, **and** source, and removes [each named source on its own](#security-group-tags-and-rules), not the permission it was authorized in; a rule the group does not hold is `InvalidPermission.NotFound` outside the default VPC and `unknownIpPermissionSet` inside it. `SecurityGroupRuleId.N` is unread. CIDRs are canonicalised and `GroupName` is read as for `AuthorizeSecurityGroupIngress`, and a rule stored before canonicalisation still matches |
@@ -109,7 +114,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
 | DisassociateAddress | `AssociationId` is resolved by scanning the region's addresses; the association is cleared and, where it named an instance, the instance's `publicIp` and `publicDnsName` are cleared with it. An `AssociationId` naming nothing answers `return=true` — which is **not** a divergence here: AWS publishes *"This is an idempotent operation. If you perform the operation more than once, Amazon EC2 doesn't return an error."* The page marks `AssociationId` `Required: No` while its own prose says *"This parameter is required"*, and substrate follows the prose only to the extent of reading it |
 | ReleaseAddress | `AllocationId` is required and checked; an address still associated is refused with `InvalidIPAddress.InUse`/400, which is why a release is preceded by a disassociate. The record is deleted rather than marked, so the release is **not** idempotent — a second one answers `InvalidAllocationID.NotFound` |
-| CreateNatGateway | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)), and the VPC is taken from the subnet rather than the request. `TagSpecification.N` scoped to `natgateway`, validated [before the gateway is written](#a-tagged-create-is-authorized-twice). `ConnectivityType` defaults to `public`. A named `AllocationId` that resolves to no Elastic IP is `InvalidAllocationID.NotFound` (#1188). `PrivateIpAddress` is honored and must be an IPv4 address inside the subnet's CIDR block (`InvalidParameterValue` otherwise); without it `privateIp` is derived from the minted gateway ID, so it replays identically. `ClientToken` is echoed as `clientToken` and makes the create idempotent — see [Seeding a NAT gateway progression](#seeding-a-nat-gateway-progression). `state` is `available` unless a seed is in place, in which case the gateway is born `pending`. `networkInterfaceId` is not answered: no network interface is modeled |
+| CreateNatGateway | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)), and the VPC is taken from the subnet rather than the request. `TagSpecification.N` scoped to `natgateway`, validated [before the gateway is written](#a-tagged-create-is-authorized-twice). `ConnectivityType` defaults to `public`. A named `AllocationId` that resolves to no Elastic IP is `InvalidAllocationID.NotFound` (#1188). `PrivateIpAddress` is honored, and without it the gateway takes the subnet's next free address, through the [subnet's allocator](#private-ip-addresses); a deleted gateway releases it. `ClientToken` is echoed as `clientToken` and makes the create idempotent — see [Seeding a NAT gateway progression](#seeding-a-nat-gateway-progression). `state` is `available` unless a seed is in place, in which case the gateway is born `pending`. `networkInterfaceId` is not answered: no network interface is modeled |
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared). `state` is what the [seeded progression](#seeding-a-nat-gateway-progression) reports, taken before the filters run, and a `failed` gateway carries `failureCode` and `failureMessage` |
 | DeleteNatGateway | `NatGatewayId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). The answer is `natGatewayId` alone, as published; the `state` element substrate used to add is on no page. The record settles `deleted` and is kept, so `DescribeNatGateways` keeps reporting it — as AWS does, though AWS stops after about an hour and substrate reports it for the life of the store. A seed's count reports `deleting` first ([Seeding a NAT gateway progression](#seeding-a-nat-gateway-progression)). A second delete answers again rather than refusing |
 | CreateKeyPair | `KeyName` is required (`MissingParameter`), and a name already held answers `InvalidKeyPair.Duplicate`/400. `TagSpecification.N` scoped to `key-pair`; `tagSet` is [omitted rather than empty](#an-untagged-resource-omits-tagset) for an untagged key. `KeyType` is `rsa` (the default) or `ed25519`, anything else `InvalidParameterValue`, and the key is that type (#1296): a 2048-bit RSA key as the PKCS#1 `RSA PRIVATE KEY` PEM the page publishes, fingerprinted as the colon-separated SHA-1 digest of its DER (PKCS#8) private key; or an ed25519 key in OpenSSH format, fingerprinted as the base64 SHA-256 digest of its public key. The material is [derived from the request ID](/reference/concepts/seeds-and-replay#an-identifier-a-replay-mints-is-the-one-it-recorded), so a replay answers the same key. `KeyName` is up to 255 ASCII characters, as published, and anything longer or non-ASCII is `InvalidParameterValue`. `KeyFormat` is read: `pem` (the default) is answered, and `ppk` is `InvalidParameterValue` — substrate does not generate PuTTY keys — as is any other value. The response does not render `keyType`, which this operation's Response Elements do not publish ([#1190](https://github.com/scttfrdmn/substrate/issues/1190)); `DescribeKeyPairs` reports it. The published 5,000-per-Region quota is not enforced |
@@ -132,8 +137,8 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | CreateCapacityReservation | Reserves capacity **immediately**, in `active` state, and returns the whole `capacityReservation` structure. `InstanceCount`, `InstancePlatform` and `InstanceType` are the only required parameters — `AvailabilityZone` is not one — and `InstanceCount` is range-checked 1–1000. Honours `TagSpecification.N`. `EndDateType` is inferred from `EndDate` rather than defaulted; a **future-dated** reservation is refused rather than answered falsely, and the outcome is [seedable](#seeding-a-capacity-reservation-outcome) — see [A Capacity Reservation is never consumed](#a-capacity-reservation-is-never-consumed) |
 | DescribeCapacityReservations | `CapacityReservationId.N` is **singular** and narrows rather than asserting, while a malformed ID is refused; **all twelve** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) — the page documents **no tag filter**, so use `DescribeTags`. `MaxResults` 1–1000 and `NextToken` through the [shared paginator](#one-offset-paginator-shared). A reservation past its `EndDate` reports `expired`, derived from the simulated clock |
 | CancelCapacityReservation | Sets the state to `cancelled` and releases the capacity, so `availableInstanceCount` becomes zero while `totalInstanceCount` keeps reporting what was reserved. A well-formed ID naming nothing answers `InvalidCapacityReservationId.NotFound`; a second cancel answers `IncorrectState`, which is [substrate's reading](#a-capacity-reservation-is-never-consumed) |
-| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all seventeen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
-| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); resolves [the same sixteen prefixes](#every-taggable-id-prefix-is-reachable); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all eighteen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); resolves [the same eighteen prefixes](#every-taggable-id-prefix-is-reachable); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 | DescribeTags | Every tag in the region, across [the same sixteen resource types `CreateTags` writes](#every-taggable-id-prefix-is-reachable). Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken` (through the [shared paginator](#one-offset-paginator-shared)), and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
 
 ## One rule for an unrecognized filter name
@@ -1204,14 +1209,15 @@ route tables stayed listed, so a teardown in the wrong order passed here and fai
 | a route table | it exists and is not the VPC's main one |
 | a network ACL | it exists and is not the VPC's default one ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)) |
 | a NAT gateway | its state is not `deleted` |
+| a network interface | it exists, attached or not |
 | an instance | its state is not `terminated` |
 
 Any of them is `DependencyViolation` / "The specified object has dependent resources." — the
 client-error table's gloss — and nothing is written. Once none remains the VPC is deleted, and its
 `default` security group, main route table and default network ACL with it, along with its flow
 logs: "flow logs for deleted VPCs are eventually automatically removed". Dependents substrate does not store as
-records of their own — network interfaces, VPC endpoints, peering connections, egress-only
-gateways — cannot hold a VPC here.
+records of their own — VPC endpoints, peering connections, egress-only gateways — cannot hold a
+VPC here.
 
 **Every VPC has a `default` security group.** `CreateVpc` writes one alongside the main route
 table, as the VPC User Guide describes — "Your default VPCs and any VPCs that you create come with a
@@ -1242,8 +1248,10 @@ answered before anything is written.
 | `DeleteSecurityGroup` | the group is a VPC's default group | `CannotDelete` / "You cannot delete the 'default' security group in your VPC, but you can change its rules." |
 | `DeleteSecurityGroup` | another group in the same VPC references it in an ingress or egress rule | `DependencyViolation` / "resource sg-… has a dependent object" |
 | `DeleteSecurityGroup` | an instance that is not terminated carries it, on any of its interfaces | the same |
+| `DeleteSecurityGroup` | a [network interface](#network-interfaces) carries it, attached or not | the same |
 | `DeleteSubnet` | an instance that is not terminated has an interface in it | `DependencyViolation` / "The subnet '…' has dependencies and cannot be deleted." |
 | `DeleteSubnet` | a NAT gateway in it is not yet `deleted` | the same |
+| `DeleteSubnet` | a [network interface](#network-interfaces) is in it, attached or not | the same |
 
 - **The default group.** The VPC User Guide: "You can't delete a default security group. If you try
   to delete a default security group, we return the following error code: `Client.CannotDelete`."
@@ -1256,8 +1264,9 @@ answered before anything is written.
   same VPC, or has a VPC association, the operation fails with `DependencyViolation`." The page names
   that one code for a reference too, so the client-error table's `InvalidGroup.InUse` is not used. A
   group's rules about itself do not hold it, and nor does a reference from another VPC's group — a
-  peered VPC's — since the page limits a reference to "the same VPC". An instance's groups are read from every interface it
-  was launched with, since substrate stores no standalone network interface. VPC associations and
+  peered VPC's — since the page limits a reference to "the same VPC". A stored network interface carrying the group holds it
+  whether or not it is attached, and an instance recorded before interfaces were stored is read
+  from every interface it was launched with. VPC associations and
   resources other services hold (load balancers, Lambda functions, RDS instances) are not consulted.
 - **A subnet in use.** `API_DeleteSubnet`: "You must terminate all running instances in the subnet
   before you can delete the subnet." A NAT gateway holds its subnet as it holds its VPC.
@@ -1410,7 +1419,7 @@ stores and renders each under its own `Route` element:
 | `GatewayId` | `gatewayId` | an `igw-` gateway, as `InvalidGatewayID.NotFound` |
 | `NatGatewayId` | `natGatewayId` | yes, as `InvalidNatGatewayID.NotFound` |
 | `InstanceId` | `instanceId`, with `instanceOwnerId` | yes, as `InvalidInstanceID.NotFound` |
-| `NetworkInterfaceId` | `networkInterfaceId` | no — network interfaces are not stored as their own records yet ([#1522](https://github.com/scttfrdmn/substrate/issues/1522)) |
+| `NetworkInterfaceId` | `networkInterfaceId` | no |
 | `TransitGatewayId` | `transitGatewayId` | no |
 | `VpcPeeringConnectionId` | `vpcPeeringConnectionId` | no |
 | `EgressOnlyInternetGatewayId` | `egressOnlyInternetGatewayId` | no |
@@ -1531,7 +1540,7 @@ the `RunInstances` reference's own sample response shows:
     <networkInterfaceId>eni-1a2b3c4d</networkInterfaceId>
     <subnetId>subnet-0123456789abcdef0</subnetId>
     <status>in-use</status>
-    <privateIpAddress>172.31.1.10</privateIpAddress>
+    <privateIpAddress>172.31.0.4</privateIpAddress>
     <groupSet><item><groupId>sg-…</groupId><groupName>default</groupName></item></groupSet>
     <attachment>
       <deviceIndex>0</deviceIndex>
@@ -1546,7 +1555,15 @@ the `RunInstances` reference's own sample response shows:
 `DeviceIndex` as "the position of the network interface in the attachment order",
 and it is not required to agree with the position the request happens to write it
 at, so `NetworkInterface.1.DeviceIndex=3` and `NetworkInterface.2.DeviceIndex=0`
-makes the *second* one primary. Interfaces are reported in `DeviceIndex` order.
+makes the *second* one primary. Interfaces are reported in network-card, then
+`DeviceIndex`, order.
+
+**The primary is device index 0 on network card 0** — "For the primary network
+interface, specify NetworkCardIndex=0, DeviceIndex=0" (EC2 User Guide, *Maximize network
+bandwidth on Amazon EC2 instances with multiple network cards*). A launch declaring
+interfaces but none at that position, or two at one position, is `InvalidParameterValue`
+(the messages are substrate's own). The same rule decides which interface
+`DetachNetworkInterface` refuses and whose groups are the instance's `groupSet`.
 
 The instance's flat `subnetId`, `privateIpAddress` and `groupSet` describe the
 **primary** interface, as real EC2 does — they are not superseded by the set.
@@ -1560,21 +1577,156 @@ explicit value wins over either default.
 
 Substrate's own choices, where the API model does not decide:
 
-- A **secondary** interface that names no `PrivateIpAddress` is given one derived
-  from its instance index and device index, so every interface of every instance
-  in a multi-`Count` launch has a distinct address a test can assert on. The
-  primary's address is the instance's own.
-- There are **no standalone ENI resources** — `CreateNetworkInterface` is not
-  modeled, so an interface exists only as part of the instance that declared it,
-  and an `eni-` ID is minted for one the request did not name. A launch declaring
-  no interface reports an empty `networkInterfaceSet` rather than a synthesized
-  phantom interface.
 - Interfaces report `status: in-use` and attachment `status: attached`
   immediately, because substrate's instances are already `running` by the time
   `RunInstances` answers; an `attaching` attachment would contradict the instance
   state reported beside it.
 - `InterfaceType` defaults to `interface`; `efa` and `efa-only` are recorded as
   given. `NetworkCardIndex` is recorded as given and defaults to 0.
+
+Every interface is a [network interface record](#network-interfaces) of its own, and
+every address comes from its subnet's [allocator](#private-ip-addresses).
+
+## Private IP addresses
+
+**Every private IPv4 address comes from its subnet's CIDR block** ([#1592](https://github.com/scttfrdmn/substrate/issues/1592)): an instance's
+primary interface, each secondary interface a launch creates, each `CreateNetworkInterface`,
+and each NAT gateway. Auto Scaling and fleet launches go through `RunInstances`' launch and are
+addressed the same way. The VPC User Guide's "Subnet CIDR blocks" fixes which addresses are
+usable: "The first four IP addresses and the last IP address in each subnet CIDR block are not
+available for your use". So a launch into `10.0.1.0/24` gets `10.0.1.4`, the next one
+`10.0.1.5`, and a launch naming no subnet gets `172.31.0.4` in the
+[default VPC](#the-default-vpc)'s default subnet for zone `a`. The private DNS name follows the
+address (`ip-10-0-1-4.us-east-1.compute.internal`).
+
+Each subnet has one allocation record, keyed by account, Region and subnet. An automatic address
+is the **next free one after the last handed out**, wrapping from the top of the block back to the
+fifth address, so an address an instance, interface or gateway released is reused only once the
+cursor has gone round — a test that terminates an instance and launches another sees a new
+address. AWS documents no order; the cursor is substrate's. The record lives in state and every
+allocation is a read-modify-write of it, so a replay assigns the same addresses.
+
+`RunInstances`' top-level `PrivateIpAddress`, `NetworkInterface.N.PrivateIpAddress`,
+`CreateNetworkInterface`'s addresses and `CreateNatGateway`'s `PrivateIpAddress` are checked in
+this order, each answered with EC2's observed wording:
+
+| Address | Answer |
+|---|---|
+| not an IPv4 address | `InvalidParameterValue` / "Value (…) for parameter PrivateIpAddress is invalid. It is not an IPv4 address." (substrate's wording) |
+| outside the subnet's block | `InvalidParameterValue` / "Address does not fall within the subnet's address range" |
+| one of the five reserved | `InvalidParameterValue` / "Address 10.0.1.1 is in subnet's reserved address range" |
+| held by another resource | `InvalidIPAddress.InUse` / "Address 10.0.1.4 is in use." |
+| none free, for an automatic address | `InsufficientFreeAddressesInSubnet` |
+
+Every address a launch needs is allocated before its first instance is written, so a
+two-instance launch naming one `PrivateIpAddress` is refused with `InvalidIPAddress.InUse` and
+writes nothing. A terminated instance releases its addresses, as does a deleted interface or NAT
+gateway; a detached interface keeps its own. `DescribeSubnets` reports what is left as
+`availableIpAddressCount`.
+
+A subnet created with no `CidrBlock` has no range to check against: it allocates from
+`172.31.0.0/16`, and an address a request names is held to no range, only to uniqueness.
+
+**State from an older build.** A subnet with no allocation record has one built on first use from
+what it already holds — its stored network interfaces, the interfaces of its live instances, and
+its NAT gateways — so an instance an older build launched keeps its recorded address and that
+address is not handed out again. An address an older build recorded outside the subnet's block,
+such as `172.31.1.10` in a `10.0.1.0/24` subnet, holds nothing in it. Older builds could also give
+one address to several instances of a subnet; it stays held while any live instance or stored
+interface or NAT gateway reports it, passing to the next reporter when the one holding it is released.
+
+**Compatibility.** Private addresses change: an instance in a non-default subnet is addressed
+inside that subnet rather than in `172.31.0.0/16`, a default-VPC instance starts at `172.31.0.4`
+rather than `172.31.1.10`, and a NAT gateway's address is the subnet's next free one rather than
+one derived from its ID. A test asserting a literal address reads the new one.
+
+## Network interfaces
+
+**A network interface is a resource of its own** ([#1522](https://github.com/scttfrdmn/substrate/issues/1522)), stored under
+`eni:{account}/{region}/{eni-id}` with its attachment on it, which is where AWS reports one. So
+an `available` interface with no attachment exists, and `DescribeNetworkInterfaces` reports it.
+
+- **Every instance has a primary interface.** `RunInstances` mints one at device index 0 with
+  `DeleteOnTermination` true for an instance that declared no `NetworkInterface.N`; one that
+  declared interfaces gets a record for each, with an `eni-attach-` attachment ID. A primary named
+  by `NetworkInterfaceId` must be an `available` interface (`InvalidNetworkInterfaceID.NotFound`,
+  `InvalidNetworkInterface.InUse` otherwise), and a launch naming no subnet lands in the
+  interface's subnet. The instance's `networkInterfaceSet` is read from the records attached to
+  it, and its `groupSet` is its primary interface's groups. A secondary interface's
+  `SecurityGroupId.N` is checked against its own subnet's VPC, and one naming none takes that VPC's
+  `default` group, as `CreateNetworkInterface` does. An `efa-only` interface takes no address, at
+  launch as on `CreateNetworkInterface`.
+- **One Availability Zone.** Every interface of an instance is in its zone: an
+  `AttachNetworkInterface`, or a launch naming an interface or a secondary `SubnetId` in another
+  zone, is refused. Another VPC in the same zone is not refused — an instance may carry interfaces
+  in several VPCs.
+- **Tags.** `TagSpecification.N` scoped to `network-interface` tags every interface the launch
+  creates, and a launch template's `LaunchTemplateData.TagSpecification.N` with that scope does the
+  same when the request names none; the template reads the scope back. `CreateTags`,
+  `DeleteTags`, `DescribeTags` and the tagging API reach `eni-` IDs, under
+  `arn:aws:ec2:{region}:{account}:network-interface/{eni-id}`.
+- **Termination.** An attached interface whose `DeleteOnTermination` is true is deleted with the
+  instance and its addresses released; any other — one attached by `AttachNetworkInterface`, or
+  named at launch by `NetworkInterfaceId` — is detached and left `available`. A terminated
+  instance reports no interface. So an instance's interface goes `in-use` → gone, and a kept one
+  `in-use` → `available` → gone when it is deleted.
+- **Dependents.** A stored interface holds its subnet, its VPC and each of its security groups:
+  `DeleteSubnet`, `DeleteVpc` and `DeleteSecurityGroup` answer `DependencyViolation` while one
+  exists, attached or not.
+
+| Refusal | Answer | Source |
+|---|---|---|
+| attach or delete an interface in use | `InvalidNetworkInterface.InUse` | the client-error table; the message is substrate's. The table notes EC2 may answer `InvalidParameterValue` for this |
+| attach at a device index the instance uses on that network card | `InvalidParameterValue` / "Instance 'i-…' already has an interface attached at device index '1'." | observed (hashicorp/terraform#2998) |
+| an interface and an instance in different zones | `InvalidParameterCombination` / "You may not attach a network interface to an instance if they are not in the same availability zone" | observed (Stack Overflow 75854119); a launch answers the same |
+| `CreateNetworkInterface` naming two primary addresses | `InvalidParameterValue` | the page's rule, "only one IP address can be designated as primary"; the message is substrate's. An entry repeating `PrivateIpAddress` is the primary again, not a second address |
+| detach the primary (device index 0 on network card 0) | `OperationNotPermitted` / "The network interface at device index 0 and networkCard index 0 cannot be detached." | the client-error table names the case; the wording is observed (getmoto/moto#7678) |
+| an unknown attachment | `InvalidAttachmentID.NotFound` | the client-error table |
+| a malformed attachment | `InvalidNetworkInterfaceAttachmentId.Malformed` | the client-error table |
+
+**What is not modeled.** `ClientToken` on `CreateNetworkInterface` is not read, so a retry
+creates a second interface; IPv6 addresses and prefixes, MAC addresses, Elastic IP associations
+on an interface, and requester-managed interfaces (a NAT gateway's, a load balancer's, a Lambda
+function's) are not recorded. An attachment completes within the request, with no `attaching` or
+`detaching` phase. Once detached, an available interface goes on reporting its last attachment
+with status `detached`, as EC2 does — the Terraform AWS provider waits for that status after
+`DetachNetworkInterface` — until it is attached again or deleted.
+
+**State from an older build.** An instance recorded before interfaces were stored has its
+interfaces synthesized at read time, with no ID drawn: the interfaces its launch declared, as it
+recorded them, or one primary interface whose ID is the instance's own suffix behind `eni-`
+(`i-0123456789abcdef0` reports `eni-0123456789abcdef0`). Each reports an attachment ID derived the
+same way, `eni-attach-` and the interface's suffix, so `DetachNetworkInterface` and
+`ModifyNetworkInterfaceAttribute`'s `Attachment.AttachmentId` can name it before anything is
+written. Each is in its own subnet's VPC. An instance whose launch declared nothing at device
+index 0 on network card 0 keeps the older build's decision: its lowest device index is its primary,
+for its `groupSet` and for `DetachNetworkInterface`'s refusal. An older multi-instance launch that
+named one interface by `NetworkInterfaceId` recorded that ID on every instance; it is reported once,
+on the lowest live instance ID carrying it. An interface attached to such an instance afterwards is
+a record of its own beside them.
+
+The first write of any kind naming one of its interfaces or attachments —
+`ModifyNetworkInterfaceAttribute`, `DetachNetworkInterface`, `CreateTags`, or the instance's
+termination — stores all of them under those same IDs, moves their addresses to the stored
+records, and writes a marker, `eni_legacy:{account}/{region}/{instance}`. The marker, not the
+records, ends the synthesis, so an interface stored and then deleted stays deleted, and the
+instance record is never rewritten. `DeleteNetworkInterface` on an unstored one is
+`InvalidNetworkInterface.InUse`, as for any attached interface, and `DeleteTags` on one changes
+nothing, as it carries no tags.
+
+**Replay.** The interface IDs a declared `NetworkInterface.N` left unnamed are drawn inside the
+launch loop from the request's mint, in the order the declarations sort by device index alone, the
+order older recordings drew them in; they are reported network card first. A primary interface ID for an instance that declared none, and
+an attachment ID for every interface, are drawn from the request's `eni` side stream, a mint of its
+own keyed on the request ID, so they advance none of the ordinals the instance, reservation, volume
+and Spot request IDs are keyed on — including across the several launches one `CreateFleet`, Auto
+Scaling reconcile or `TerminateInstances` makes. A recording an older build made replays to the
+same IDs.
+
+**Compatibility.** A launch declaring no interface now reports one in `networkInterfaceSet`, and
+`DescribeNetworkInterfaces` reports it. A launch naming a `NetworkInterfaceId` that no
+`CreateNetworkInterface` made is refused with `InvalidNetworkInterfaceID.NotFound`. A teardown
+must delete a kept interface before its subnet, VPC or security group.
 
 ## Security group tags and rules
 
@@ -3856,11 +4008,12 @@ both of AWS's `DescribeSubnets` samples show. That deliberately differs from
 operation's samples rather than one house rule. No sample on either page shows a *tagged*
 subnet, so `tagSet`'s position last in the element is substrate's choice.
 
-Five members AWS's samples carry stay absent: `availableIpAddressCount`,
+`availableIpAddressCount` is the subnet's [address allocator](#private-ip-addresses)'s: the
+block's addresses, less the five AWS reserves, less every address an instance, network
+interface or NAT gateway holds (#1592). Four members AWS's samples carry stay absent:
 `availabilityZoneId`, `assignIpv6AddressOnCreation`, `ipv6CidrBlockAssociationSet` and the
-`blockPublicAccessStates`/`privateDnsNameOptionsOnLaunch` structures. Nothing in state backs
-them, and deriving an address count from the CIDR would be fabrication — the real count
-depends on how many addresses AWS reserves and on every interface in the subnet.
+`blockPublicAccessStates`/`privateDnsNameOptionsOnLaunch` structures, which nothing in state
+backs.
 
 Eleven filter names are applied, plus the four alias spellings the reference documents
 inline ("You can also use `availabilityZone` as the filter name"); the aliases are separate
@@ -4099,9 +4252,10 @@ nothing. Every one of the five was well-formed and named a resource substrate st
 there was no way for a caller to tell — the answer a consumer's tag-everything step reads is
 the same answer it gets when the tags land.
 
-Seventeen prefixes now resolve, on `CreateTags` and `DeleteTags` alike — the fifteen the
-resolution below covers, `cr-` with the Capacity Reservation operations (#891), and `sir-` with
-the Spot Instance request operations (#1436):
+Eighteen prefixes now resolve, on `CreateTags` and `DeleteTags` alike — the fifteen the
+resolution below covers, `cr-` with the Capacity Reservation operations (#891), `sir-` with
+the Spot Instance request operations (#1436), and `eni-` with the network interface operations
+(#1522):
 
 | Prefix | Resource type | Prefix | Resource type |
 |---|---|---|---|
@@ -4113,7 +4267,7 @@ the Spot Instance request operations (#1436):
 | `rtb-` | `route-table` | `key-` | `key-pair` |
 | `eipalloc-` | `elastic-ip` | `vol-` | `volume` |
 | `nat-` | `natgateway` | `cr-` | `capacity-reservation` |
-| `sir-` | `spot-instances-request` | | |
+| `sir-` | `spot-instances-request` | `eni-` | `network-interface` |
 
 **A prefix naming no taggable type is now refused** rather than ignored, before anything is
 written:

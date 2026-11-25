@@ -20,8 +20,8 @@ import (
 // Through v0.127.0 DeleteVpc removed the VPC record and nothing else, whatever it still held, so
 // a teardown that ran in the wrong order passed here and failed against AWS, and the subnets,
 // groups and route tables it left behind stayed listed. The check below covers every dependent
-// substrate stores; the ones it does not store (network interfaces, VPC endpoints, peering
-// connections, egress-only gateways) cannot block a delete here.
+// substrate stores, network interfaces among them (#1522); the ones it does not store (VPC
+// endpoints, peering connections, egress-only gateways) cannot block a delete here.
 
 // ec2DependencyViolationError is DependencyViolation, the client-error table's code for "The
 // specified object has dependent resources." The message is that gloss's first sentence; no
@@ -83,20 +83,6 @@ func ec2SubnetDependencyViolationError(subnetID string) *AWSError {
 	}
 }
 
-// ec2InstanceUsesGroup reports whether inst carries sgID, on its primary interface's flat list
-// or on any interface the launch declared.
-func ec2InstanceUsesGroup(inst EC2Instance, sgID string) bool {
-	if slices.Contains(inst.SecurityGroupIDs, sgID) {
-		return true
-	}
-	for _, ifc := range inst.NetworkInterfaces {
-		if slices.Contains(ifc.SecurityGroupIDs, sgID) {
-			return true
-		}
-	}
-	return false
-}
-
 // ec2PermissionsReference reports whether any rule names sgID as its referenced group.
 func ec2PermissionsReference(rules []EC2IPPermission, sgID string) bool {
 	for _, r := range rules {
@@ -119,9 +105,9 @@ func ec2PermissionsReference(rules []EC2IPPermission, sgID string) bool {
 // client-error table's InvalidGroup.InUse, glossed "in use by another security group", is not
 // what this operation's own page says it returns.
 //
-// Each half is what substrate stores. An association is a non-terminated instance carrying the
-// group on any of its interfaces — substrate stores no standalone network interface, so an
-// interface's groups are read off the instance it was launched with. A reference is an ingress
+// Each half is what substrate stores. An association is a stored network interface carrying the
+// group, attached or not (#1522), or a non-terminated instance carrying it — the latter covers an
+// instance whose interfaces predate stored interfaces and are read off the instance. A reference is an ingress
 // or egress rule of another group **in the same VPC** naming it, as the page limits it; a group's
 // rules about itself (the default group's own inbound rule is one) go with it, and a reference
 // from another VPC — a peered VPC's group — does not hold it. A terminated instance holds nothing, as it holds
@@ -142,8 +128,20 @@ func (p *EC2Plugin) securityGroupInUse(reqCtx *RequestContext, target EC2Securit
 	}); err != nil {
 		return false, fmt.Errorf("ec2 deleteSecurityGroup groups: %w", err)
 	}
+	// An instance's groups are its interfaces'. Those of an instance an older build recorded that
+	// are not stored are read off the instance; that state is read before the stored records, the
+	// reverse of the order storing them writes in, so an interface being stored is seen.
+	legacy, err := p.ec2LegacyStateFor(ctx, reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return false, err
+	}
+	if err := ec2ScanRecords(ctx, p.state, "eni:"+scope, func(_ string, eni EC2NetworkInterfaceRecord) {
+		used = used || slices.Contains(eni.SecurityGroupIDs, sgID)
+	}); err != nil {
+		return false, fmt.Errorf("ec2 deleteSecurityGroup network interfaces: %w", err)
+	}
 	if err := ec2ScanRecords(ctx, p.state, "instance:"+scope, func(_ string, inst EC2Instance) {
-		used = used || (inst.State.Name != ec2StateTerminated && ec2InstanceUsesGroup(inst, sgID))
+		used = used || ec2LegacyUsesGroup(inst, legacy, sgID)
 	}); err != nil {
 		return false, fmt.Errorf("ec2 deleteSecurityGroup instances: %w", err)
 	}
@@ -151,13 +149,13 @@ func (p *EC2Plugin) securityGroupInUse(reqCtx *RequestContext, target EC2Securit
 }
 
 // subnetInUse reports whether subnetID still holds a resource DeleteSubnet must refuse on
-// (#1551): an instance not yet terminated with any interface in the subnet, or a NAT gateway not
-// yet deleted.
+// (#1551): an instance not yet terminated with any interface in the subnet, a NAT gateway not
+// yet deleted, or a stored network interface in it (#1522), attached or available.
 //
 // API_DeleteSubnet: "You must terminate all running instances in the subnet before you can
 // delete the subnet." A NAT gateway occupies its subnet as an instance does, and is counted the
-// same way [EC2Plugin.vpcDependents] counts it for the VPC; network interfaces are counted
-// through the instances that carry them, since substrate stores no standalone interface.
+// same way [EC2Plugin.vpcDependents] counts it for the VPC; so does a network interface, which
+// holds an address in the subnet until it is deleted.
 func (p *EC2Plugin) subnetInUse(reqCtx *RequestContext, subnetID string) (bool, error) {
 	ctx := context.Background()
 	scope := reqCtx.AccountID + "/" + reqCtx.Region + "/"
@@ -177,6 +175,11 @@ func (p *EC2Plugin) subnetInUse(reqCtx *RequestContext, subnetID string) (bool, 
 		used = used || (gw.SubnetID == subnetID && gw.State != "deleted")
 	}); err != nil {
 		return false, fmt.Errorf("ec2 deleteSubnet NAT gateways: %w", err)
+	}
+	if err := ec2ScanRecords(ctx, p.state, "eni:"+scope, func(_ string, eni EC2NetworkInterfaceRecord) {
+		used = used || eni.SubnetID == subnetID
+	}); err != nil {
+		return false, fmt.Errorf("ec2 deleteSubnet network interfaces: %w", err)
 	}
 	return used, nil
 }
@@ -254,7 +257,7 @@ func ec2ScanRecords[T any](ctx context.Context, state StateManager, prefix strin
 // A dependent is a subnet, an attached internet gateway, a security group other than the
 // default one ([ec2IsDefaultSecurityGroup]), a route table that is not the main one, a network
 // ACL that is not the default one, a NAT
-// gateway not yet deleted, or an instance not yet terminated. A NAT gateway answers `deleted` and an instance `terminated` for a
+// gateway not yet deleted, a stored network interface, or an instance not yet terminated. A NAT gateway answers `deleted` and an instance `terminated` for a
 // while after their deletes, in AWS as here, and neither holds the VPC.
 func (p *EC2Plugin) vpcDependents(reqCtx *RequestContext, vpcID string) (bool, []string, error) {
 	ctx := context.Background()
@@ -317,6 +320,11 @@ func (p *EC2Plugin) vpcDependents(reqCtx *RequestContext, vpcID string) (bool, [
 		held = held || (inst.VPCID == vpcID && inst.State.Name != ec2StateTerminated)
 	}); err != nil {
 		return false, owned, fmt.Errorf("ec2 deleteVpc instances: %w", err)
+	}
+	if err := ec2ScanRecords(ctx, p.state, "eni:"+scope, func(_ string, eni EC2NetworkInterfaceRecord) {
+		held = held || eni.VPCID == vpcID
+	}); err != nil {
+		return false, owned, fmt.Errorf("ec2 deleteVpc network interfaces: %w", err)
 	}
 	return held, owned, nil
 }
