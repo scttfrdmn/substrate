@@ -17,9 +17,9 @@ package emulator
 //
 // The actions substrate models:
 //
-//   - aws:ec2:stop-instances stops its instances at the action's start. With
-//     startInstancesAfterDuration it starts them again that long afterwards, which is when the
-//     action completes; a targeted instance terminated meanwhile fails the action, unless
+//   - aws:ec2:stop-instances stops its instances at the action's start, passing over one already
+//     stopped. With startInstancesAfterDuration it starts the ones it stopped again that long
+//     afterwards, which is when the action completes; one terminated meanwhile fails the action, unless
 //     completeIfInstancesTerminated is true (FIS actions reference). Without it the action
 //     completes at once.
 //   - aws:ec2:terminate-instances terminates its instances at the action's start, honoring
@@ -388,7 +388,7 @@ func (r *fisRun) startAction(name string, a *FISExperimentAction, at time.Time) 
 	case fisActionStopInstances:
 		ec2, ids, err := r.liveTargetIDs(a)
 		if err == nil && len(ids) > 0 {
-			err = ec2.stopInternally(r.reqCtx(name, "stop"), ids, userInitiated)
+			a.Stopped, err = ec2.stopInternally(r.reqCtx(name, "stop"), ids, userInitiated)
 		}
 		if err != nil {
 			return fisFailureText(err)
@@ -445,8 +445,10 @@ func (r *fisRun) finishAction(name string, a *FISExperimentAction, at time.Time)
 	return ""
 }
 
-// restartInstances starts the instances a stop-instances action stopped. An instance
-// terminated meanwhile fails the action unless completeIfInstancesTerminated is true.
+// restartInstances starts the instances a stop-instances action itself stopped — not one that
+// was already stopped when the action started, which a caller may have stopped for its own
+// reasons. An instance terminated meanwhile fails the action unless completeIfInstancesTerminated
+// is true.
 func (r *fisRun) restartInstances(name string, a *FISExperimentAction) string {
 	ec2, err := r.p.ec2()
 	if err != nil {
@@ -454,7 +456,7 @@ func (r *fisRun) restartInstances(name string, a *FISExperimentAction) string {
 	}
 	skipTerminated := strings.EqualFold(a.Parameters["completeIfInstancesTerminated"], "true")
 	var ids []string
-	for _, id := range r.targetIDs(a) {
+	for _, id := range a.Stopped {
 		inst, err := ec2.loadInstanceForInternal(r.e.AccountID, r.e.Region, id)
 		if err != nil {
 			return fisFailureText(err)
@@ -470,7 +472,7 @@ func (r *fisRun) restartInstances(name string, a *FISExperimentAction) string {
 	if len(ids) == 0 {
 		return ""
 	}
-	if err := ec2.startInternally(r.reqCtx(name, "start"), ids); err != nil {
+	if _, err := ec2.startInternally(r.reqCtx(name, "start"), ids); err != nil {
 		return fisFailureText(err)
 	}
 	return ""

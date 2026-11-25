@@ -33,6 +33,14 @@ type fisFaultEnv struct {
 func newFISFaultEnv(t *testing.T, namespace string) *fisFaultEnv {
 	t.Helper()
 	state := &nsFaultState{StateManager: emulator.NewMemoryStateManager(), namespace: namespace}
+	e := newFISFaultEnvOver(t, state)
+	e.state = state
+	return e
+}
+
+// newFISFaultEnvOver is a registry of every plugin over state.
+func newFISFaultEnvOver(t *testing.T, state emulator.StateManager) *fisFaultEnv {
+	t.Helper()
 	tc := emulator.NewTimeController(fisClockInstant)
 	tc.Freeze()
 	tc.SetTime(fisClockInstant)
@@ -42,7 +50,7 @@ func newFISFaultEnv(t *testing.T, namespace string) *fisFaultEnv {
 		emulator.NewDefaultLogger(slog.LevelError, false), store, nil))
 	p, ok := registry.Plugin("fis")
 	require.True(t, ok)
-	return &fisFaultEnv{t: t, state: state, registry: registry, fis: p.(*emulator.FISPlugin), tc: tc}
+	return &fisFaultEnv{t: t, registry: registry, fis: p.(*emulator.FISPlugin), tc: tc}
 }
 
 // ctx is a fresh request context.

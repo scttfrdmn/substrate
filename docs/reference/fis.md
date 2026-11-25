@@ -36,7 +36,7 @@ From the [AWS FIS actions reference](https://docs.aws.amazon.com/fis/latest/user
 
 | Action | Target | What substrate does |
 |--------|--------|---------------------|
-| `aws:ec2:stop-instances` | `Instances` (`aws:ec2:instance`) | Stops the instances when the action starts. With `startInstancesAfterDuration` (1 minute to 12 hours) starts them again that long afterwards, when the action completes; a targeted instance terminated meanwhile fails the action unless `completeIfInstancesTerminated` is `true` |
+| `aws:ec2:stop-instances` | `Instances` (`aws:ec2:instance`) | Stops the instances when the action starts, passing over one already stopped. With `startInstancesAfterDuration` (1 minute to 12 hours) starts the ones it stopped again that long afterwards, when the action completes; one terminated meanwhile fails the action unless `completeIfInstancesTerminated` is `true` |
 | `aws:ec2:terminate-instances` | `Instances` | Terminates the instances when the action starts. Termination protection refuses it, failing the action, since FIS calls TerminateInstances on the caller's behalf |
 | `aws:ec2:reboot-instances` | `Instances` | Completes at once; a reboot is not observable through DescribeInstances |
 | `aws:ec2:send-spot-instance-interruptions` | `SpotInstances` (`aws:ec2:spot-instance`) | Interrupts the Spot Instances `durationBeforeInterruption` (2 to 15 minutes) after the action starts, when the action completes (see below) |
@@ -90,11 +90,16 @@ request, as an Auto Scaling group's Spot capacity has none) is terminated with `
 status `instance-terminated-by-experiment`, the status the FIS Spot tutorial names, and is closed,
 or for a persistent request re-fulfilled with a replacement, as for any terminated Spot Instance.
 An instance whose interruption behavior is `stop` or `hibernate` is stopped instead, with
-`Server.SpotInstanceShutdown`, and its request reports `instance-stopped-by-experiment`. Stop and
+`Server.SpotInstanceShutdown`, and its request reports `instance-stopped-by-experiment` in the
+`disabled` state, as the User Guide's Spot request lifecycle lists it; starting the instance returns
+the request to `active`/`fulfilled` ("fulfilled | active | stopped → running"). Stop and
 terminate actions record `Client.UserInitiatedShutdown` and `User initiated (…)`. A caller's own
-StopInstances, StartInstances or TerminateInstances clears both reasons; terminating an instance
-that is already terminated changes nothing, so its reasons, `TerminatedTime` and Spot request stay
-as the interruption left them. These are EC2's own
+StopInstances, StartInstances or TerminateInstances clears both reasons. Terminating an instance
+that is already terminated keeps its reasons and `TerminatedTime`, and repeats only the settlement
+the first termination left unfinished — a store failure part-way through, say: interfaces still
+attached, its volumes, and a Spot request still fulfilled by it, which is then settled with the
+status the first termination implies (`instance-terminated-by-experiment` for an interruption).
+These are EC2's own
 transitions, so volumes, the Spot request and Auto Scaling membership settle as they do for a
 caller's termination; no StopInstances or TerminateInstances request is recorded. The interruption
 notice and rebalance recommendation, delivered through instance metadata and EventBridge, are not

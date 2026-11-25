@@ -127,6 +127,9 @@ type FISExperimentAction struct {
 	// DueAt is when a running action's timed part ends: the restart of a stop-instances
 	// action, the interruption of a send-spot-instance-interruptions action, the end of a wait.
 	DueAt *time.Time `json:"due_at,omitempty"`
+
+	// Stopped are the instances a stop-instances action stopped, which its restart starts.
+	Stopped []string `json:"stopped,omitempty"`
 }
 
 // FISExperiment is one stored experiment.

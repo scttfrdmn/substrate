@@ -8,10 +8,12 @@ package emulator
 // changes go through these methods, which no request reaches, as an Auto Scaling group's
 // terminations go through [EC2Plugin.terminateForAutoScaling].
 //
-// Termination reuses [EC2Plugin.terminateInstanceIDs], so volume settlement and the Spot
-// request's settlement happen exactly as for a caller's TerminateInstances. Stop and start mirror
-// the record writes of StopInstances and StartInstances, which have no per-instance helper to
-// share.
+// Termination goes through [EC2Plugin.terminateInstanceIDsBecause], the body a caller's
+// TerminateInstances runs, so everything a termination settles is settled the same way: an
+// instance with legacy interfaces has them materialized as records first, its interfaces are
+// deleted or detached and their addresses released, its volumes deleted or released, and its Spot
+// request settled. Stop and start mirror the record writes of StopInstances and StartInstances,
+// which have no per-instance helper to share, under the same instMu.
 //
 // # State reasons
 //
@@ -19,9 +21,10 @@ package emulator
 // recent state transition" (API_Instance). An internal change records both; a caller's stop,
 // start or terminate clears them, so a describe never reports the reason for a transition that
 // is no longer the most recent. Terminating an instance that is already terminated is no
-// transition, so it changes nothing: the reasons, TerminatedTime, the observation countdown and
-// the Spot request stay as the termination that happened settled them, and the response reports
-// the state a describe would report now. The messages are API_StateReason's own, which publishes
+// transition: the reasons, TerminatedTime and the observation countdown stay as the termination
+// that happened wrote them, only settlement that termination left unfinished is repeated (see
+// [EC2Plugin.resettleTerminated]), and the response reports the state a describe would report
+// now. The messages are API_StateReason's own, which publishes
 // each message prefixed by its code. The transition reason's "Service initiated (YYYY-MM-DD
 // HH:MM:SS GMT)" form is observed behavior (DescribeInstances of a reclaimed Spot host,
 // ejc3/aws#489); its "User initiated" counterpart is the same form for an API call.
@@ -201,64 +204,72 @@ func (p *EC2Plugin) instancesInRegion(accountID, region string) ([]EC2Instance, 
 	return out, nil
 }
 
-// terminateInternally terminates ids through [EC2Plugin.terminateInstanceIDs], recording why.
-// honorProtection says whether termination protection refuses the termination, as it does for
-// an API call made on the caller's behalf and does not for a Spot interruption.
+// terminateInternally terminates ids through [EC2Plugin.terminateInstanceIDsBecause], recording
+// why. honorProtection says whether termination protection refuses the termination, as it does
+// for an API call made on the caller's behalf and does not for a Spot interruption.
 func (p *EC2Plugin) terminateInternally(reqCtx *RequestContext, ids []string, honorProtection bool, why *ec2InternalTransition) error {
 	_, err := p.terminateInstanceIDsBecause(reqCtx, ids, honorProtection, why)
 	return err
 }
 
-// stopInternally stops ids, recording why, as StopInstances writes the record: stopped,
-// with the instance's observation countdown restarted so a seeded progression reports
-// `stopping` from here. A terminated instance cannot be stopped and is refused with
-// StopInstances' own answer. Every ID is resolved before any is stopped.
-func (p *EC2Plugin) stopInternally(reqCtx *RequestContext, ids []string, why *ec2InternalTransition) error {
-	return p.transitionInternally(reqCtx, ids, "stopped", EC2InstanceState{Code: 80, Name: ec2StateStopped}, why)
+// stopInternally stops ids, recording why, as StopInstances writes the record: stopped, with the
+// instance's observation countdown restarted so a seeded progression reports `stopping` from
+// here. It returns the instances it stopped; see [EC2Plugin.transitionInternally] for the ones
+// it passes over.
+func (p *EC2Plugin) stopInternally(reqCtx *RequestContext, ids []string, why *ec2InternalTransition) ([]string, error) {
+	return p.transitionInternally(reqCtx, ids, EC2InstanceState{Code: 80, Name: ec2StateStopped}, why)
 }
 
 // startInternally starts ids as StartInstances writes the record, clearing the reasons the stop
 // recorded, since the start is now the most recent transition.
-func (p *EC2Plugin) startInternally(reqCtx *RequestContext, ids []string) error {
-	return p.transitionInternally(reqCtx, ids, "started", EC2InstanceState{Code: 16, Name: ec2StateRunning}, nil)
+func (p *EC2Plugin) startInternally(reqCtx *RequestContext, ids []string) ([]string, error) {
+	return p.transitionInternally(reqCtx, ids, EC2InstanceState{Code: 16, Name: ec2StateRunning}, nil)
 }
 
-// transitionInternally settles ids into to, recording why.
-func (p *EC2Plugin) transitionInternally(reqCtx *RequestContext, ids []string, verb string, to EC2InstanceState, why *ec2InternalTransition) error {
-	instances := make([]EC2Instance, 0, len(ids))
+// transitionInternally settles ids into to, recording why, and returns the ones it changed.
+//
+// It holds instMu, the lock every termination holds, and reads each record under it, so an
+// instance a concurrent termination ended is seen ended and never written back. An instance that
+// is gone, terminated, or already in the target state is passed over rather than refused: no
+// transition is due, and a stop rewriting a stopped instance's reasons, or a later restart
+// starting an instance a caller had stopped, would be a change nothing asked for.
+func (p *EC2Plugin) transitionInternally(reqCtx *RequestContext, ids []string, to EC2InstanceState, why *ec2InternalTransition) ([]string, error) {
+	p.instMu.Lock()
+	defer p.instMu.Unlock()
+	now := p.tc.Now()
+	var changed []string
 	for _, id := range ids {
 		inst, err := p.loadInstanceForInternal(reqCtx.AccountID, reqCtx.Region, id)
 		if err != nil {
-			return err
+			return changed, err
 		}
-		if lookupErr := ec2RequireResource(ec2InstanceIDKind, id, inst != nil); lookupErr != nil {
-			return lookupErr
+		if inst == nil || inst.State.Name == ec2StateTerminated || inst.State.Name == to.Name {
+			continue
 		}
-		if inst.State.Name == ec2StateTerminated {
-			return ec2CannotTransitionTerminated(verb)
-		}
-		instances = append(instances, *inst)
-	}
-	now := p.tc.Now()
-	for _, inst := range instances {
 		inst.State = to
-		why.apply(&inst, now)
-		if err := p.putEC2Record(context.Background(), ec2InstanceKey(reqCtx.AccountID, reqCtx.Region, inst.InstanceID), inst); err != nil {
-			return fmt.Errorf("ec2 internal %s: %w", verb, err)
+		why.apply(inst, now)
+		if err := p.putEC2Record(context.Background(), ec2InstanceKey(reqCtx.AccountID, reqCtx.Region, id), *inst); err != nil {
+			return changed, fmt.Errorf("ec2 internal transition to %s: %w", to.Name, err)
 		}
-		if err := p.resetInstanceObservations(inst.InstanceID); err != nil {
-			return err
+		if err := p.resetInstanceObservations(id); err != nil {
+			return changed, err
 		}
+		changed = append(changed, id)
 	}
-	return nil
+	return changed, nil
 }
+
+// ec2SpotStateDisabled is the Spot request state of a request whose instance is stopped: the
+// User Guide's State changes for a Spot request lists instance-stopped-by-experiment (like
+// instance-stopped-by-user) as "disabled | stopped".
+const ec2SpotStateDisabled = "disabled"
 
 // interruptSpotInstances interrupts Spot Instances as EC2 does when it reclaims capacity:
 // "Two minutes after the interruption time, the Spot Instances are terminated or stopped,
 // depending on their interruption behavior" (FIS actions reference,
 // aws:ec2:send-spot-instance-interruptions). An instance whose request names stop or hibernate
 // is stopped with Server.SpotInstanceShutdown and its request records
-// instance-stopped-by-experiment; every other instance is terminated with
+// instance-stopped-by-experiment and the disabled state; every other instance is terminated with
 // Server.SpotInstanceTermination, and its request records instance-terminated-by-experiment and
 // is settled as a terminated Spot Instance's request is. Hibernation is modeled as a stop.
 // An instance already terminated, or already stopped for a stop, is left as it is. at is when
@@ -285,10 +296,8 @@ func (p *EC2Plugin) interruptSpotInstances(reqCtx *RequestContext, ids []string,
 			}
 		}
 		if behavior == "stop" || behavior == "hibernate" {
-			if inst.State.Name != ec2StateStopped {
-				stop = append(stop, id)
-				stopRequests[id] = inst.SpotInstanceRequestID
-			}
+			stop = append(stop, id)
+			stopRequests[id] = inst.SpotInstanceRequestID
 			continue
 		}
 		terminate = append(terminate, id)
@@ -304,13 +313,14 @@ func (p *EC2Plugin) interruptSpotInstances(reqCtx *RequestContext, ids []string,
 	if len(stop) == 0 {
 		return nil
 	}
-	if err := p.stopInternally(reqCtx, stop, &ec2InternalTransition{
+	stopped, err := p.stopInternally(reqCtx, stop, &ec2InternalTransition{
 		reasonCode: ec2ReasonSpotInstanceShutdown, initiator: ec2InitiatorService, at: at,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	now := at.UTC().Format(time.RFC3339)
-	for _, id := range stop {
+	for _, id := range stopped {
 		if stopRequests[id] == "" {
 			continue
 		}
@@ -318,13 +328,84 @@ func (p *EC2Plugin) interruptSpotInstances(reqCtx *RequestContext, ids []string,
 		if err != nil {
 			return err
 		}
-		if r == nil {
+		if r == nil || r.InstanceID != id || r.State != ec2SpotStateActive {
 			continue
 		}
+		r.State = ec2SpotStateDisabled
 		r.setStatus(ec2SpotStatusStoppedByExperiment, now)
 		if err := p.putSpotRequest(*r); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// onSpotInstanceStarted returns a disabled request to active when its stopped instance starts:
+// "fulfilled | active | stopped → running" (State changes for a Spot request, Fulfilled). The
+// same page has a restarted instance-stopped-by-user request pass through pending-evaluation
+// first; substrate models no evaluation delay, as for every fulfillment. A request in any other
+// state, or one now fulfilled by another instance, is left as it is.
+func (p *EC2Plugin) onSpotInstanceStarted(reqCtx *RequestContext, inst EC2Instance) error {
+	if inst.SpotInstanceRequestID == "" {
+		return nil
+	}
+	r, err := p.getSpotRequest(reqCtx, inst.SpotInstanceRequestID)
+	if err != nil || r == nil || r.InstanceID != inst.InstanceID || r.State != ec2SpotStateDisabled {
+		return err
+	}
+	r.State = ec2SpotStateActive
+	r.setStatus(ec2SpotStatusFulfilled, p.tc.Now().UTC().Format(time.RFC3339))
+	return p.putSpotRequest(*r)
+}
+
+// resettleTerminated repeats, for an instance already terminated, the settlement its termination
+// may not have finished — a store failure part-way through leaves the instance written terminated
+// and the rest undone — so a retried TerminateInstances repairs it, as it always has for volumes.
+// Each step is idempotent and changes nothing a finished settlement left:
+//
+//   - interfaces still attached to the instance are deleted or detached and their addresses
+//     released ([EC2Plugin.settleInstanceInterfaces]); with none attached, nothing is read
+//     further, so an instance whose interfaces were never materialized draws no identifier;
+//   - its volumes are deleted or released;
+//   - its Spot request is settled only while it still shows this instance as fulfilling it
+//     (active, or cancelled with the instance running), with the status the termination's own
+//     reason implies and at TerminatedTime, so instance-terminated-by-experiment survives a later
+//     caller's TerminateInstances.
+func (p *EC2Plugin) resettleTerminated(reqCtx *RequestContext, inst EC2Instance) error {
+	all, err := p.ec2NetworkInterfaces(context.Background(), reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return err
+	}
+	for _, rec := range all {
+		if rec.attached() && rec.Attachment.InstanceID == inst.InstanceID {
+			if err := p.settleInstanceInterfaces(reqCtx, inst); err != nil {
+				return err
+			}
+			break
+		}
+	}
+	if err := p.ec2DeleteInstanceVolumes(reqCtx.AccountID, reqCtx.Region, inst.InstanceID); err != nil {
+		return err
+	}
+	if inst.SpotInstanceRequestID == "" {
+		return nil
+	}
+	r, err := p.getSpotRequest(reqCtx, inst.SpotInstanceRequestID)
+	if err != nil || r == nil || r.InstanceID != inst.InstanceID {
+		return err
+	}
+	unsettled := r.State == ec2SpotStateActive ||
+		(r.State == ec2SpotStateCancelled && r.StatusCode == ec2SpotStatusCanceledRunning)
+	if !unsettled {
+		return nil
+	}
+	why := (*ec2InternalTransition)(nil)
+	if inst.StateReason != nil && inst.StateReason.Code == ec2ReasonSpotInstanceTermination {
+		why = &ec2InternalTransition{spotStatus: ec2SpotStatusTerminatedByExperiment}
+	}
+	at := p.tc.Now()
+	if t, parseErr := time.Parse(time.RFC3339, inst.TerminatedTime); parseErr == nil {
+		at = t
+	}
+	return p.onSpotInstanceTerminated(reqCtx, inst, why.spotTerminationStatus(), at)
 }

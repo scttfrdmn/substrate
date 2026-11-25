@@ -457,15 +457,17 @@ func (p *EC2Plugin) fulfillSpotRequest(
 // refuses — its AMI deregistered since, say — leaves it open with bad-parameters. A cancelled
 // request launches nothing, which is the reason a consumer cancels before terminating. status is
 // the status code the request records — instance-terminated-by-user for a caller's termination —
-// and at the time of the termination.
+// and at the time of the termination, which that status carries.
 func (p *EC2Plugin) onSpotInstanceTerminated(reqCtx *RequestContext, inst EC2Instance, status string, at time.Time) error {
 	r, err := p.getSpotRequest(reqCtx, inst.SpotInstanceRequestID)
 	if err != nil || r == nil || r.InstanceID != inst.InstanceID {
 		return err
 	}
-	nowTime := at.UTC()
+	// The termination's status carries the termination's time; whether a replacement launches,
+	// and the launch with its fulfilled status, are the clock's reading now.
+	r.setStatus(status, at.UTC().Format(time.RFC3339))
+	nowTime := p.tc.Now().UTC()
 	now := nowTime.Format(time.RFC3339)
-	r.setStatus(status, now)
 	expired := false
 	if r.ValidUntil != "" {
 		if until, parseErr := time.Parse(time.RFC3339, r.ValidUntil); parseErr == nil && !nowTime.Before(until) {
