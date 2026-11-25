@@ -132,6 +132,11 @@ type stsSessionExtras struct {
 	sourceIdentity string
 }
 
+// stsUnresolvedSessionPolicy stands in a session's policies for a managed policy whose document
+// substrate cannot read. It has no statements, so it allows nothing: the session intersects with
+// "nothing known" rather than escaping the policy it was given.
+var stsUnresolvedSessionPolicy = PolicyDocument{Version: "2012-10-17"}
+
 // stsSessionPolicyMaxChars and stsSessionPolicyMaxARNs are the documented session-policy limits:
 // "The plaintext that you use for both inline and managed session policies can't exceed 2,048
 // characters", and "You can provide up to 10 managed policy ARNs".
@@ -146,7 +151,8 @@ const (
 //
 // A customer managed policy ARN that names no policy is refused with MalformedPolicyDocument, in the
 // wording AWS returns (observed through the AWS CLI). An AWS managed policy outside substrate's
-// bundled catalog is accepted and not applied. The other messages are substrate's own.
+// bundled catalog is accepted as a policy that allows nothing. The other messages are substrate's
+// own.
 func (p *STSPlugin) stsSessionPolicies(goCtx context.Context, req *AWSRequest) ([]PolicyDocument, *AWSError, error) {
 	text := req.Params["Policy"]
 	var arns []string
@@ -175,11 +181,16 @@ func (p *STSPlugin) stsSessionPolicies(goCtx context.Context, req *AWSRequest) (
 			docs = append(docs, mp.Document)
 			continue
 		}
-		// An AWS managed policy substrate does not bundle is valid on AWS, so it is accepted —
-		// and, with no document to read, it neither narrows the session nor fails the call. Only
-		// the catalog bundled in iam_managed.go narrows a session.
+		// An AWS managed policy substrate does not bundle is valid on AWS, so it is accepted. With
+		// no document to read, it fails safe: it stands in the session's policies as a document
+		// that allows nothing, so the session keeps only what its other, resolvable session
+		// policies allow — and nothing if there are none. Treating it as absent instead would leave
+		// a session passed only that policy with all of the role's permissions. Only the catalog
+		// bundled in iam_managed.go resolves.
 		if strings.HasPrefix(arn, "arn:aws:iam::aws:policy/") {
-			p.logger.Debug("sts: session policy names an unbundled AWS managed policy; not applied", "arn", arn)
+			p.logger.Warn("sts: session policy names an AWS managed policy substrate does not bundle; "+
+				"it allows nothing in the session", "arn", arn)
+			docs = append(docs, stsUnresolvedSessionPolicy)
 			continue
 		}
 		raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
@@ -440,10 +451,15 @@ func (p *STSPlugin) federatedSession(goCtx context.Context, ctx *RequestContext,
 	if a.sessionCap != nil && a.sessionCap.Before(expiry) {
 		expiry = a.sessionCap.UTC()
 	}
-	var transitive []string
-	if len(a.tags) > 0 {
-		transitive = a.transitiveKeys
+	// A transitive key must name a session tag the token passes; one that names none is refused
+	// rather than dropped. The message is substrate's own.
+	for _, k := range a.transitiveKeys {
+		if _, ok := a.tags[k]; !ok {
+			return STSSessionCredentials{}, stsFederationError("InvalidIdentityToken",
+				fmt.Sprintf("The transitive tag key %s names none of the token's session tags.", k), http.StatusBadRequest), nil
+		}
 	}
+	transitive := a.transitiveKeys
 	creds, err := p.mintRoleSession(goCtx, ctx, arnAccountID(a.roleARN), a.roleName, a.role.RoleID, a.sessionName,
 		expiry, stsSessionExtras{policies: policies, tags: a.tags, transitiveKeys: transitive, sourceIdentity: a.sourceIdentity})
 	if err != nil {

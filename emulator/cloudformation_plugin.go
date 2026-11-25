@@ -327,7 +327,7 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 	// one rather than reverting the stack to the caller's own permissions, and a
 	// supplied one replaces it for this update and every operation after it. The
 	// creator is not reassigned: an update does not change who created the stack.
-	att := stack.attribution()
+	att := stack.attribution(context.Background(), p.state)
 	if roleARN := req.Params["RoleARN"]; roleARN != "" {
 		// Validated above, before the template is read.
 		att.roleARN = roleARN
@@ -390,7 +390,7 @@ func (p *CloudFormationPlugin) deleteStack(reqCtx *RequestContext, req *AWSReque
 	// is a success.
 	att := cfnAttribution{}
 	if stack, findErr := p.findStack(reqCtx, name); findErr == nil && stack != nil {
-		att = stack.attribution()
+		att = stack.attribution(context.Background(), p.state)
 	}
 	if roleARN := req.Params["RoleARN"]; roleARN != "" {
 		if roleErr := cfnValidateRoleARN(roleARN); roleErr != nil {
@@ -1150,7 +1150,7 @@ func (p *CloudFormationPlugin) executeChangeSet(reqCtx *RequestContext, req *AWS
 	att := cfnAttribution{creator: reqCtx.Principal}
 	if stack, findErr := p.findStack(reqCtx, cs.StackName); findErr == nil && stack != nil &&
 		stack.Status != cfnStackReviewInProgress {
-		att = stack.attribution()
+		att = stack.attribution(context.Background(), p.state)
 	}
 	if cs.RoleARN != "" {
 		att.roleARN = cs.RoleARN

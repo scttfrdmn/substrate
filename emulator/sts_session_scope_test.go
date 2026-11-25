@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -49,6 +50,12 @@ func tsCall(t *testing.T, ts *emulator.TestServer, method, path, service, access
 // extra, returning the session's access key ID.
 func tsAdminSession(t *testing.T, ts *emulator.TestServer, extra url.Values) string {
 	t.Helper()
+	return tsAdminSessionNamed(t, ts, "admin", extra)
+}
+
+// tsAdminSessionNamed is tsAdminSession for a role of the given name.
+func tsAdminSessionNamed(t *testing.T, ts *emulator.TestServer, role string, extra url.Values) string {
+	t.Helper()
 	const setup = "AKIAIOSFODNN7EXAMPLE"
 	iam := func(op string, params url.Values) {
 		params.Set("Action", op)
@@ -56,10 +63,10 @@ func tsAdminSession(t *testing.T, ts *emulator.TestServer, extra url.Values) str
 		status, body := tsCall(t, ts, http.MethodPost, "/", "iam", setup, params, nil)
 		require.Equal(t, http.StatusOK, status, "%s: %s", op, body)
 	}
-	iam("CreateRole", url.Values{"RoleName": {"admin"}, "AssumeRolePolicyDocument": {`{"Version":"2012-10-17","Statement":[]}`}})
-	iam("AttachRolePolicy", url.Values{"RoleName": {"admin"}, "PolicyArn": {"arn:aws:iam::aws:policy/AdministratorAccess"}})
+	iam("CreateRole", url.Values{"RoleName": {role}, "AssumeRolePolicyDocument": {`{"Version":"2012-10-17","Statement":[]}`}})
+	iam("AttachRolePolicy", url.Values{"RoleName": {role}, "PolicyArn": {"arn:aws:iam::aws:policy/AdministratorAccess"}})
 	form := url.Values{"Action": {"AssumeRole"}, "Version": {"2011-06-15"},
-		"RoleArn": {"arn:aws:iam::123456789012:role/admin"}, "RoleSessionName": {"s1"}}
+		"RoleArn": {"arn:aws:iam::123456789012:role/" + role}, "RoleSessionName": {"s1"}}
 	for k, v := range extra {
 		form[k] = v
 	}
@@ -127,11 +134,24 @@ func TestSessionPolicy_AppliesWhenTheRoleIsGone(t *testing.T) {
 	assert.Contains(t, body, "blocked by session policy")
 }
 
-func TestSessionPolicy_UnbundledAWSManagedPolicyIsAcceptedAndNotApplied(t *testing.T) {
+func TestSessionPolicy_UnbundledAWSManagedPolicyFailsSafe(t *testing.T) {
 	ts := emulator.StartTestServer(t)
-	key := tsAdminSession(t, ts, url.Values{"PolicyArns.member.1.arn": {"arn:aws:iam::aws:policy/NotInSubstratesCatalog"}})
-	status, body := tsCall(t, ts, http.MethodPost, "/", "iam", key, url.Values{"Action": {"ListRoles"}, "Version": {"2010-05-08"}}, nil)
-	assert.Equal(t, http.StatusOK, status, "an unbundled AWS managed policy does not narrow the session: %s", body)
+	listRoles := url.Values{"Action": {"ListRoles"}, "Version": {"2010-05-08"}}
+
+	// Alone, a managed policy substrate cannot read leaves the session nothing.
+	alone := tsAdminSession(t, ts, url.Values{"PolicyArns.member.1.arn": {"arn:aws:iam::aws:policy/NotInSubstratesCatalog"}})
+	status, body := tsCall(t, ts, http.MethodPost, "/", "iam", alone, listRoles, nil)
+	assert.Equal(t, http.StatusForbidden, status, "an unreadable session policy allows nothing: %s", body)
+
+	// Beside a resolvable one, the session keeps what the resolvable one allows.
+	paired := tsAdminSessionNamed(t, ts, "admin2", url.Values{
+		"PolicyArns.member.1.arn": {"arn:aws:iam::aws:policy/NotInSubstratesCatalog"},
+		"PolicyArns.member.2.arn": {"arn:aws:iam::aws:policy/IAMReadOnlyAccess"}})
+	status, body = tsCall(t, ts, http.MethodPost, "/", "iam", paired, listRoles, nil)
+	assert.Equal(t, http.StatusOK, status, body)
+	status, _ = tsCall(t, ts, http.MethodPost, "/", "iam", paired,
+		url.Values{"Action": {"CreateUser"}, "Version": {"2010-05-08"}, "UserName": {"nope"}}, nil)
+	assert.Equal(t, http.StatusForbidden, status)
 }
 
 func TestSessionPolicy_PersistsOnACloudFormationCreator(t *testing.T) {
@@ -293,3 +313,109 @@ func TestSTSFederation_DuplicateSessionTagKeysAreRefused(t *testing.T) {
 	code, _ := fedErrorCode(t, body)
 	assert.Equal(t, "InvalidParameterValue", code)
 }
+
+func TestSessionPolicy_PresignedAndPostPolicyRequestsResolveTheirPrincipal(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	const setup = "AKIAIOSFODNN7EXAMPLE"
+	status, body := tsCall(t, ts, http.MethodPut, "/presign-scope", "s3", setup, nil, nil)
+	require.Equal(t, http.StatusOK, status, body)
+	status, body = tsCall(t, ts, http.MethodPut, "/presign-scope/key", "s3", setup, url.Values{"x": {"y"}}, nil)
+	require.Equal(t, http.StatusOK, status, body)
+
+	denied := tsAdminSession(t, ts, url.Values{"Policy": {`{"Version":"2012-10-17","Statement":[
+		{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}`}})
+	allowed := tsAdminSessionNamed(t, ts, "reader", nil)
+	presigned := func(key string) int {
+		// Signed now on the server's clock, so the URL has not expired.
+		now := ts.TimeController().Now().UTC()
+		u := ts.URL + "/presign-scope/key?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+			"&X-Amz-Credential=" + url.QueryEscape(key+"/"+now.Format("20060102")+"/us-east-1/s3/aws4_request") +
+			"&X-Amz-Date=" + now.Format("20060102T150405Z") +
+			"&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=fakesig"
+		r, err := http.NewRequestWithContext(t.Context(), http.MethodGet, u, nil)
+		require.NoError(t, err)
+		resp, err := http.DefaultClient.Do(r)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		return resp.StatusCode
+	}
+	assert.Equal(t, http.StatusForbidden, presigned(denied), "a presigned GET is decided as its signer")
+	assert.Equal(t, http.StatusOK, presigned(allowed))
+	assert.Equal(t, http.StatusOK, presigned(setup), "a key with no IAM entity stays unenforced")
+
+	// A POST-policy upload's form names its signer the same way.
+	post := func(key string) int {
+		var buf strings.Builder
+		mw := multipartWriter(&buf)
+		require.NoError(t, mw.WriteField("key", "uploaded"))
+		require.NoError(t, mw.WriteField("X-Amz-Credential", key+"/20260402/us-east-1/s3/aws4_request"))
+		require.NoError(t, mw.WriteField("X-Amz-Algorithm", "AWS4-HMAC-SHA256"))
+		require.NoError(t, mw.Close())
+		r, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/presign-scope", strings.NewReader(buf.String()))
+		require.NoError(t, err)
+		r.Header.Set("Content-Type", mw.FormDataContentType())
+		resp, err := http.DefaultClient.Do(r)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		return resp.StatusCode
+	}
+	readOnly := tsAdminSessionNamed(t, ts, "ro", url.Values{"Policy": {`{"Version":"2012-10-17","Statement":[
+		{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`}})
+	assert.Equal(t, http.StatusForbidden, post(readOnly), "a POST-policy upload is decided as its signer")
+}
+
+func TestSessionPolicy_RoleGoneKeepsTheSecondaryPasses(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	key := tsAdminSession(t, ts, url.Values{"Policy": {`{"Version":"2012-10-17","Statement":[
+		{"Effect":"Allow","Action":"ec2:RunInstances","Resource":"*"}]}`}})
+	const setup = "AKIAIOSFODNN7EXAMPLE"
+	for _, op := range []string{"DetachRolePolicy", "DeleteRole"} {
+		form := url.Values{"Action": {op}, "Version": {"2010-05-08"}, "RoleName": {"admin"},
+			"PolicyArn": {"arn:aws:iam::aws:policy/AdministratorAccess"}}
+		status, body := tsCall(t, ts, http.MethodPost, "/", "iam", setup, form, nil)
+		require.Equal(t, http.StatusOK, status, "%s: %s", op, body)
+	}
+	ts.SeedEC2Image("ami-0123456789abcdef0", "scope")
+	form := url.Values{"Action": {"RunInstances"}, "Version": {"2016-11-15"}, "ImageId": {"ami-0123456789abcdef0"},
+		"MinCount": {"1"}, "MaxCount": {"1"}, "InstanceType": {"t3.micro"},
+		"TagSpecification.1.ResourceType": {"instance"}, "TagSpecification.1.Tag.1.Key": {"team"},
+		"TagSpecification.1.Tag.1.Value": {"ci"}}
+	status, body := tsCall(t, ts, http.MethodPost, "/", "ec2", key, form, nil)
+	assert.Equal(t, http.StatusForbidden, status, "the tag-on-create pass still applies the session policy: %s", body)
+	assert.Contains(t, body, "blocked by session policy")
+}
+
+func TestSTSAssumeRole_TransitiveKeyMustNameATag(t *testing.T) {
+	srv := newTrustPolicyTestServer(t)
+	caller := trustSetupCaller(t, srv, "alice")
+	trustCreateRole(t, srv, "tagging", `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+		"Principal":{"AWS":"123456789012"},"Action":["sts:AssumeRole","sts:TagSession"]}]}`)
+	form := url.Values{"Action": {"AssumeRole"}, "Version": {"2011-06-15"},
+		"RoleArn": {"arn:aws:iam::123456789012:role/tagging"}, "RoleSessionName": {"s"},
+		"Tags.member.1.Key": {"team"}, "Tags.member.1.Value": {"ci"}, "TransitiveTagKeys.member.1": {"project"}}
+	r, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(form.Encode()))
+	require.NoError(t, err)
+	r.Host = "sts.amazonaws.com"
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Authorization", trustAuthHeader(caller, "sts"))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	code, _ := fedErrorCode(t, w.Body.String())
+	assert.Equal(t, "InvalidParameterValue", code)
+}
+
+func TestSessionPolicy_CloudFormationCreatorKeepsItsEntityTags(t *testing.T) {
+	state := emulator.NewMemoryStateManager()
+	srv := newIAMTestServerWithState(t, state)
+	idpOK(t, srv, "CreateRole", map[string]string{"RoleName": "admin", "AssumeRolePolicyDocument": `{"Version":"2012-10-17","Statement":[]}`,
+		"Tags.member.1.Key": "dept", "Tags.member.1.Value": "eng"})
+	creator, err := emulator.CFNStackCreatorWithStateForTest(state, &emulator.Principal{
+		ARN: "arn:aws:sts::123456789012:assumed-role/admin/s1", SessionTags: map[string]string{"team": "ci"}})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"dept": "eng", "team": "ci"}, creator.Tags,
+		"the role's own tags under the session's")
+}
+
+// multipartWriter returns a multipart writer over buf.
+func multipartWriter(buf *strings.Builder) *multipart.Writer { return multipart.NewWriter(buf) }

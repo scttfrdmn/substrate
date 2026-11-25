@@ -45,6 +45,15 @@ func stsAssumeRoleSessionParams(principal *Principal, params map[string]string) 
 	}
 	out.requestTags = requestTags
 	requestTransitive := iamMemberList(params, "TransitiveTagKeys")
+	// A transitive key must name a tag this request passes; one that names none is refused rather
+	// than dropped. The message is substrate's own.
+	for _, k := range requestTransitive {
+		if _, ok := requestTags[k]; !ok {
+			return out, stsFederationError("InvalidParameterValue",
+				fmt.Sprintf("TransitiveTagKeys names %s, which is not one of the session tags in Tags.", k),
+				http.StatusBadRequest)
+		}
+	}
 
 	inherited := map[string]string{}
 	var inheritedKeys []string
@@ -72,6 +81,12 @@ func stsAssumeRoleSessionParams(principal *Principal, params map[string]string) 
 		}
 		for k, v := range requestTags {
 			out.tags[k] = v
+		}
+		// The 50-tag limit applies to the session's tags, inherited and passed together.
+		if len(out.tags) > 50 {
+			return out, stsFederationError("ValidationError",
+				"Session tags must number at most 50, with keys of 1 to 128 characters and values of at most 256.",
+				http.StatusBadRequest)
 		}
 		for _, k := range append(inheritedKeys, requestTransitive...) {
 			if _, ok := out.tags[k]; ok && !slices.Contains(out.transitiveKeys, k) {

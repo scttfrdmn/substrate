@@ -174,28 +174,22 @@ func authzSessionPolicyEval(principal *Principal, evalReq EvaluationRequest, den
 // sessionPolicyOnly decides a request whose identity policies CheckAccess cannot read — the role
 // was deleted, or its policies failed to load — against the session's own policies. Those paths
 // fail open for the identity policies, but a session policy is recorded on the credential itself,
-// so it can still narrow the request; a session with none is not enforced, as before.
+// so it still narrows the request, with the same condition context and the same secondary passes
+// as a fully resolved request. A session with no session policies is not enforced, as before.
 func (a *AuthController) sessionPolicyOnly(reqCtx *RequestContext, req *AWSRequest, action string,
 	resources []authzResource, now time.Time, haveClock bool) error {
 	if len(reqCtx.Principal.SessionPolicies) == 0 {
 		return nil
 	}
-	requestTags := make(map[string]string)
-	addRequestTags(requestTags, req)
-	deniedCode := accessDeniedCodeFor(req.Service, "")
-	for _, res := range resources {
-		condCtx := make(map[string]string, len(requestTags)+4)
-		for k, v := range requestTags {
-			condCtx[k] = v
-		}
-		a.authzTimeContext(condCtx, now, haveClock)
-		authzPrincipalContext(condCtx, reqCtx.Principal)
-		if err := authzSessionPolicyCheck(reqCtx.Principal, action, res.ARN, condCtx, nil, deniedCode); err != nil {
-			return err
-		}
-	}
-	return nil
+	return a.decide(reqCtx, req, action, resources, authzAllowAllDocs, nil, accessDeniedCodeFor(req.Service, ""),
+		now, haveClock)
 }
+
+// authzAllowAllDocs is the identity policy set [AuthController.sessionPolicyOnly] decides with: it
+// allows everything, so only the session's policies narrow the request.
+var authzAllowAllDocs = []PolicyDocument{{Version: "2012-10-17", Statement: []PolicyStatement{{
+	Effect: IAMEffectAllow, Action: StringOrSlice{"*"}, Resource: StringOrSlice{"*"},
+}}}}
 
 // principalARN returns principal's ARN, or "" for no principal.
 func principalARN(principal *Principal) string {
@@ -269,6 +263,16 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		a.logger.Warn("authz: failed to load permission boundary", "principal", reqCtx.Principal.ARN, "err", err)
 	}
 
+	return a.decide(reqCtx, req, action, resources, docs, boundary, deniedCode, now, haveClock)
+}
+
+// decide evaluates a request against the principal's identity policies (docs), its permissions
+// boundary and its session policies, for every resource the request names and then in the
+// secondary passes. CheckAccess calls it with what it loaded; [AuthController.sessionPolicyOnly]
+// calls it with an allow-all identity set, so the same contexts and passes apply when only the
+// session's own policies are known.
+func (a *AuthController) decide(reqCtx *RequestContext, req *AWSRequest, action string, resources []authzResource,
+	docs []PolicyDocument, boundary *PolicyDocument, deniedCode string, now time.Time, haveClock bool) error {
 	// An S3 tag set the handler would refuse as unreadable is refused here first, so no
 	// aws:RequestTag condition is evaluated against a set substrate could not read —
 	// failing closed, where reading it as empty would let a Deny on a tag be sidestepped

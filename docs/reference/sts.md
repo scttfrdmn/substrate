@@ -147,7 +147,8 @@ permissions boundary. A refusal says "(blocked by session policy)".
 
 Session policies reach every authorization pass: the main action, the tag-on-create passes for
 EC2 and ELB, S3's copy source and create side effects, and IAM's own check. They also apply when the
-role has been deleted or its policies cannot be read, which leaves its identity policies unenforced.
+role has been deleted or its policies cannot be read. That case leaves the identity policies
+unenforced, but it uses the same condition context and the same passes.
 The session's policies, tags, transitive keys and source identity are also recorded in two places:
 - **On every event the session signs.** A replay decides the request as the live run did, so a live
   refusal replays as a refusal.
@@ -159,11 +160,16 @@ Both limits are enforced: 2,048 characters for `Policy` and 10 ARNs for `PolicyA
 answering `ValidationError`. A `Policy` that is not a policy document is `MalformedPolicyDocument`,
 in substrate's own wording. A customer managed `PolicyArns` entry that names no policy is
 `MalformedPolicyDocument` `Policy <arn> does not exist or is not attachable.`, observed from the
-service. An AWS managed policy narrows a session only if it is in the catalog bundled in
-`emulator/iam_managed.go`. Any other `arn:aws:iam::aws:policy/…` is valid on AWS, so it is accepted:
-with no document to read, it neither narrows the session nor fails the call. The documents are read
-when the session is minted, so a later change to a managed policy does not reach an existing
-session.
+service. An AWS managed policy resolves only if it is in the catalog bundled in
+`emulator/iam_managed.go`. Any other `arn:aws:iam::aws:policy/…` is valid on AWS, so it is accepted,
+but substrate has no document for it and **fails safe**: the policy stands in the session as one that
+allows nothing. The session keeps only what its other, resolvable session policies allow, and
+nothing if there are none. The server logs a warning naming the ARN. The documents are read when the
+session is minted, so a later change to a managed policy does not reach an existing session.
+
+Session policies also reach presigned URLs and S3 POST-policy uploads. Their signer's access key is
+read from the `X-Amz-Credential` query parameter or form field, as well as from the `Authorization`
+header, so a presigned request is authorized as the principal that signed it.
 
 ### Seeding what the identity provider decides
 

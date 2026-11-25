@@ -1,12 +1,16 @@
 package emulator
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"sort"
@@ -110,6 +114,53 @@ func extractAccessKeyFromAuth(authHeader string) string {
 	cred := authHeader[idx+len(credPrefix):]
 	if end := strings.IndexAny(cred, "/, "); end > 0 {
 		return cred[:end]
+	}
+	return ""
+}
+
+// requestAccessKey returns the access key ID a request is signed with, wherever SigV4 puts it: the
+// Authorization header; the `X-Amz-Credential` query parameter of a presigned URL; or the
+// `X-Amz-Credential` field of an S3 browser-upload (POST policy) form. It returns "" for an
+// unsigned request, which then resolves no principal and is not enforced, as before.
+//
+// Reading only the header left a presigned request and a POST-policy upload with no principal at
+// all, so every authorization door — identity policies, boundaries and session policies alike —
+// was skipped for them.
+func requestAccessKey(r *http.Request, body []byte) string {
+	if key := extractAccessKeyFromAuth(r.Header.Get("Authorization")); key != "" {
+		return key
+	}
+	if key := accessKeyFromCredential(r.URL.Query().Get("X-Amz-Credential")); key != "" {
+		return key
+	}
+	if r.Method != http.MethodPost || len(body) == 0 {
+		return ""
+	}
+	mediaType, ctParams, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/form-data" || ctParams["boundary"] == "" {
+		return ""
+	}
+	mr := multipart.NewReader(bytes.NewReader(body), ctParams["boundary"])
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			return ""
+		}
+		if strings.EqualFold(part.FormName(), "X-Amz-Credential") {
+			value, readErr := io.ReadAll(io.LimitReader(part, 512))
+			if readErr != nil {
+				return ""
+			}
+			return accessKeyFromCredential(strings.TrimSpace(string(value)))
+		}
+	}
+}
+
+// accessKeyFromCredential returns the access key ID of a SigV4 credential string,
+// `<key>/<date>/<region>/<service>/aws4_request`, or "" when it has none.
+func accessKeyFromCredential(credential string) string {
+	if slash := strings.IndexByte(credential, '/'); slash > 0 {
+		return credential[:slash]
 	}
 	return ""
 }

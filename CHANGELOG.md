@@ -59,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Routing: an unsigned request with no other routing signal and `Action=AssumeRoleWithWebIdentity` or `AssumeRoleWithSAML` reaches STS instead of answering `ServiceNotAvailable` (#1613).
 - IAM: a trust-policy `"AWS"` principal never matches an OIDC or SAML provider; only a `Federated` entry does (#1613).
-- STS: `AssumeRole` with `Policy` or `PolicyArns` now mints a narrowed session where it ignored them; an unknown customer managed `PolicyArns` entry is `MalformedPolicyDocument`, and an unbundled AWS managed one is accepted and not applied (#1613).
+- Authorization: a presigned URL or S3 POST-policy upload is authorized as its signer, whose key is read from `X-Amz-Credential`; it was unenforced (#1613).
+- STS: `AssumeRole` with `Policy` or `PolicyArns` now mints a narrowed session where it ignored them; an unknown customer managed `PolicyArns` entry is `MalformedPolicyDocument`, and an AWS managed one substrate does not bundle is accepted as a policy that allows nothing (#1613).
 - STS: `AssumeRole` refuses a `DurationSeconds` above the role's `MaxSessionDuration` (3600 unless set), and needs `sts:TagSession`/`sts:SetSourceIdentity` in an enforced trust policy when tags or a source identity are passed (#1706).
 - STS/IAM: the federation and provider limit, validation, SAML `NoSuchEntity`, malformed-token, missing-`sub`/`exp`, not-yet-valid, SAML-expiry, session-tag, session-policy and seeded `IDPRejectedClaim`/`IDPCommunicationError` messages are substrate's own (#1613).
 

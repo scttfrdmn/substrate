@@ -2071,5 +2071,13 @@ func CFNStackCreatorRoundTripForTest(creator *Principal) (*Principal, error) {
 	if err := json.Unmarshal(raw, &back); err != nil {
 		return nil, err
 	}
-	return back.attribution().creator, nil
+	return back.attribution(context.Background(), nil).creator, nil
+}
+
+// CFNStackCreatorWithStateForTest is CFNStackCreatorRoundTripForTest resolving the creator against
+// state, as a later stack operation does.
+func CFNStackCreatorWithStateForTest(state StateManager, creator *Principal) (*Principal, error) {
+	var s CFNStackState
+	s.setAttribution(cfnAttribution{creator: creator})
+	return s.attribution(context.Background(), state).creator, nil
 }

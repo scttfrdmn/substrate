@@ -498,13 +498,19 @@ type CFNStackState struct {
 // This is the reader that makes a later operation on a stack — an update that omits
 // RoleARN, a delete, a rollback's sweep — run as whatever the stack was created
 // with rather than as whoever happens to be asking now.
-func (s CFNStackState) attribution() cfnAttribution {
+//
+// The creator's tags are its entity's own, read from state as a request's are, with the creating
+// session's tags over them — the same merge [replayPrincipal] makes.
+func (s CFNStackState) attribution(ctx context.Context, state StateManager) cfnAttribution {
 	att := cfnAttribution{roleARN: s.RoleARN}
 	if s.CreatorPrincipalARN != "" {
 		att.creator = &Principal{
 			ARN:      s.CreatorPrincipalARN,
 			Type:     cfnPrincipalType(s.CreatorPrincipalARN),
 			UserName: s.CreatorUserName,
+		}
+		if state != nil {
+			att.creator.Tags = iamPrincipalTags(ctx, state, s.CreatorPrincipalARN)
 		}
 		s.CreatorSession.apply(att.creator)
 	}
