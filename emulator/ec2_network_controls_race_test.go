@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,3 +194,74 @@ func TestEC2NetworkControls_DeleteVpcRemovesItsFlowLogs(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{other, subnetID}, resources)
 }
+
+// TestEC2NetworkControls_AssociationNeedsALiveSubnet pins that an association is written only
+// for a subnet that still exists when the lock is taken, so a DeleteSubnet that ran between
+// CreateSubnet's two writes leaves no orphan association.
+func TestEC2NetworkControls_AssociationNeedsALiveSubnet(t *testing.T) {
+	t.Parallel()
+	state := emulator.NewMemoryStateManager()
+	p := &emulator.EC2Plugin{}
+	require.NoError(t, p.Initialize(context.Background(), emulator.PluginConfig{
+		State: state, Logger: emulator.NewDefaultLogger(0, false),
+		Options: map[string]any{"time_controller": emulator.NewTimeController(fixedNetworkControlsTime)},
+	}))
+	reqCtx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", IDs: emulator.NewIDMint("req-assoc")}
+	resp, err := p.HandleRequest(reqCtx, &emulator.AWSRequest{Operation: "CreateVpc", Params: map[string]string{"CidrBlock": "10.87.0.0/16"}})
+	require.NoError(t, err)
+	var vpc struct {
+		ID string `xml:"vpc>vpcId"`
+	}
+	require.NoError(t, xml.Unmarshal(resp.Body, &vpc))
+
+	const gone = "subnet-0eeeeeeeeeeeeeee"
+	require.NoError(t, p.AssociateSubnetWithDefaultNetworkACLForTest(reqCtx, gone, vpc.ID))
+	raw, err := state.Get(context.Background(), "ec2", "aclassoc:123456789012/us-east-1/"+gone)
+	require.NoError(t, err)
+	assert.Nil(t, raw, "no association for a subnet that no longer exists")
+}
+
+// TestEC2NetworkControls_SubnetAssociationLookup pins NetworkAclAssociationId's lookup: a stored
+// association, a derived one for a subnet an older build wrote in a VPC that exists, and none for
+// a subnet in a VPC that does not, or for no subnet at all.
+func TestEC2NetworkControls_SubnetAssociationLookup(t *testing.T) {
+	t.Parallel()
+	state := emulator.NewMemoryStateManager()
+	ts := newEC2TestServerWithState(t, state)
+	call := ec2CallHTTP(t, func(p map[string]string) *http.Response { return ec2Request(t, ts, p) })
+	vpcID := ec2CreateVPC(t, ts, "10.88.0.0/16")
+	stored := ec2CreateSubnetIn(t, ts, vpcID, "10.88.1.0/24")
+	put := func(key string, v any) {
+		data, err := json.Marshal(v)
+		require.NoError(t, err)
+		require.NoError(t, state.Put(context.Background(), "ec2", key, data))
+	}
+	const legacy, orphan = "subnet-0fffffffffffffff", "subnet-0999999999999999"
+	put("subnet:123456789012/us-east-1/"+legacy, emulator.EC2Subnet{SubnetID: legacy, VPCID: vpcID,
+		AccountID: "123456789012", Region: "us-east-1"})
+	put("subnet:123456789012/us-east-1/"+orphan, emulator.EC2Subnet{SubnetID: orphan, VPCID: "vpc-0999999999999999",
+		AccountID: "123456789012", Region: "us-east-1"})
+
+	lookup := func(id string) string {
+		got, err := emulator.EC2LookupSubnetNetworkACLAssociationForTest(state, "123456789012", "us-east-1", id)
+		require.NoError(t, err)
+		return got
+	}
+	want := func(id string) string {
+		acls, _ := naclList(t, call, ec2OneFilter("DescribeNetworkAcls", "association.subnet-id", id))
+		require.Len(t, acls, 1)
+		for _, a := range acls[0].Associations {
+			if a.SubnetID == id {
+				return a.ID
+			}
+		}
+		return ""
+	}
+	assert.Equal(t, want(stored), lookup(stored))
+	assert.Equal(t, want(legacy), lookup(legacy), "the association DescribeNetworkAcls synthesizes")
+	assert.Empty(t, lookup(orphan), "a subnet in a VPC that does not exist has no association")
+	assert.Empty(t, lookup("subnet-0123012301230123"))
+}
+
+// fixedNetworkControlsTime is the simulated clock's start for the plugin-level test above.
+var fixedNetworkControlsTime = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)

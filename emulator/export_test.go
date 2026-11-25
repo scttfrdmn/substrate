@@ -2093,3 +2093,17 @@ func CFNStackCreatorWithStateForTest(state StateManager, creator *Principal) (*P
 	s.setAttribution(cfnAttribution{creator: creator})
 	return s.attribution(context.Background(), state).creator, nil
 }
+
+// EC2LookupSubnetNetworkACLAssociationForTest wraps ec2LookupSubnetNetworkACLAssociation, the
+// value of CloudFormation's subnet NetworkAclAssociationId attribute. No request reads it for a
+// subnet in a VPC that does not exist, which is the case a test needs to pin.
+func EC2LookupSubnetNetworkACLAssociationForTest(state StateManager, accountID, region, subnetID string) (string, error) {
+	return ec2LookupSubnetNetworkACLAssociation(context.Background(), state, accountID, region, subnetID)
+}
+
+// AssociateSubnetWithDefaultNetworkACLForTest calls associateSubnetWithDefaultNetworkACL for a
+// subnet ID directly, so a test can stand in for the DeleteSubnet that ran between CreateSubnet's
+// subnet write and its association, which no sequence of requests can interleave on purpose.
+func (p *EC2Plugin) AssociateSubnetWithDefaultNetworkACLForTest(reqCtx *RequestContext, subnetID, vpcID string) error {
+	return p.associateSubnetWithDefaultNetworkACL(context.Background(), reqCtx, subnetID, vpcID)
+}

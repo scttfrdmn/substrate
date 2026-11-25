@@ -51,8 +51,9 @@ import (
 //     across the whole creation, and [EC2Plugin.createDefaultNetworkACL] runs under it;
 //   - [EC2Plugin.associateSubnetWithDefaultNetworkACL], which CreateSubnet and
 //     CreateDefaultSubnet call, takes it around the default-ACL lookup and the write;
-//   - CreateTags and DeleteTags take it before [EC2Plugin.tagMu] for an ID whose record other
-//     operations also rewrite under it ([ec2SGMuTagPrefixes]), see [EC2Plugin.lockTagWrite].
+//   - every tag write — CreateTags, DeleteTags, the tagging API and CloudFormation's stamps —
+//     takes it before [EC2Plugin.tagMu] for an ID whose record other operations also rewrite
+//     under it ([ec2TagWriteTakesSGMu]), see [EC2Plugin.lockTagWrite].
 //
 // The order is igwMu, then defaultVPCMu, then sgMu, then tagMu, and nothing holding a later lock
 // takes an earlier one.
@@ -247,10 +248,18 @@ func (p *EC2Plugin) createDefaultNetworkACL(ctx context.Context, reqCtx *Request
 // associateSubnetWithDefaultNetworkACL draws an association ID for a new subnet and associates
 // it with its VPC's default ACL, under [EC2Plugin.sgMu]. It is called after the subnet's own
 // draw. A subnet whose VPC does not exist — CreateSubnet does not check — is given no association
-// and draws nothing.
+// and draws nothing, and so is one a concurrent DeleteSubnet removed after it was written, which
+// the lock makes this check see.
 func (p *EC2Plugin) associateSubnetWithDefaultNetworkACL(ctx context.Context, reqCtx *RequestContext, subnetID, vpcID string) error {
 	p.sgMu.Lock()
 	defer p.sgMu.Unlock()
+	subnet, err := p.state.Get(ctx, ec2Namespace, ec2StatePrefix("subnet", reqCtx.AccountID, reqCtx.Region)+subnetID)
+	if err != nil {
+		return fmt.Errorf("ec2 subnet network ACL association subnet: %w", err)
+	}
+	if subnet == nil {
+		return nil
+	}
 	aclID, err := p.vpcDefaultNetworkACLID(ctx, reqCtx, vpcID)
 	if err != nil || aclID == "" {
 		return err
@@ -298,21 +307,46 @@ func ec2LookupDefaultNetworkACL(ctx context.Context, state StateManager, account
 }
 
 // ec2LookupSubnetNetworkACLAssociation returns the ID of subnetID's network ACL association: the
-// stored one, or the derived ID of a subnet an older build wrote. It is the value of
-// CloudFormation's subnet NetworkAclAssociationId attribute.
+// stored one, the derived ID of a subnet an older build wrote in a VPC that exists — the
+// association [EC2Plugin.loadNetworkACLScope] synthesizes for it — or "" for a subnet that has
+// none. It is the value of CloudFormation's subnet NetworkAclAssociationId attribute.
 func ec2LookupSubnetNetworkACLAssociation(ctx context.Context, state StateManager, accountID, region, subnetID string) (string, error) {
 	data, err := state.Get(ctx, ec2Namespace, ec2NetworkACLAssociationKey(accountID, region, subnetID))
 	if err != nil {
 		return "", fmt.Errorf("ec2 network ACL association: %w", err)
 	}
 	if data == nil {
-		return ec2DerivedNetworkACLAssociationID(accountID, region, subnetID), nil
+		return ec2DerivedSubnetAssociation(ctx, state, accountID, region, subnetID)
 	}
 	var a EC2NetworkACLAssociation
 	if err := json.Unmarshal(data, &a); err != nil {
 		return "", fmt.Errorf("ec2 network ACL association unmarshal: %w", err)
 	}
 	return a.AssociationID, nil
+}
+
+// ec2DerivedSubnetAssociation returns the derived association ID of a subnet with no stored
+// association when the subnet and its VPC both exist, and "" otherwise.
+func ec2DerivedSubnetAssociation(ctx context.Context, state StateManager, accountID, region, subnetID string) (string, error) {
+	raw, err := state.Get(ctx, ec2Namespace, ec2StatePrefix("subnet", accountID, region)+subnetID)
+	if err != nil {
+		return "", fmt.Errorf("ec2 network ACL association subnet: %w", err)
+	}
+	if raw == nil {
+		return "", nil
+	}
+	var subnet EC2Subnet
+	if err := json.Unmarshal(raw, &subnet); err != nil {
+		return "", fmt.Errorf("ec2 network ACL association subnet unmarshal: %w", err)
+	}
+	vpc, err := state.Get(ctx, ec2Namespace, ec2StatePrefix("vpc", accountID, region)+subnet.VPCID)
+	if err != nil {
+		return "", fmt.Errorf("ec2 network ACL association vpc: %w", err)
+	}
+	if vpc == nil {
+		return "", nil
+	}
+	return ec2DerivedNetworkACLAssociationID(accountID, region, subnetID), nil
 }
 
 // deleteSubnetNetworkACLAssociation removes a deleted subnet's association.
@@ -493,21 +527,32 @@ func (p *EC2Plugin) syntheticNetworkACLs(reqCtx *RequestContext, ids []string) (
 	return out, nil
 }
 
-// ec2SGMuTagPrefixes are the ID prefixes whose records operations other than tagging rewrite
-// under [EC2Plugin.sgMu]: a VPC (AssociateDhcpOptions, ModifyVpcAttribute), a network ACL (its
-// entries), a DHCP option set and a flow log (their deletes). A tag write naming one takes sgMu
-// as well, so neither write can overwrite the other's change with a stale copy.
-var ec2SGMuTagPrefixes = []string{"vpc-", "acl-", "dopt-", "fl-"}
+// ec2TagWriteTakesSGMu reports whether id names a record that operations other than tagging
+// rewrite or delete under [EC2Plugin.sgMu]: a VPC (AssociateDhcpOptions, ModifyVpcAttribute,
+// DeleteVpc), a subnet (DeleteSubnet), a security group (its rule changes and delete), a network
+// ACL (its entries and delete), a DHCP option set and a flow log (their deletes). A tag write
+// naming one takes sgMu as well, so neither write can overwrite the other's change with a stale
+// copy, and a tag write cannot write back a record a delete has just removed.
+func ec2TagWriteTakesSGMu(id string) bool {
+	prefix, _, ok := strings.Cut(id, "-")
+	if !ok {
+		return false
+	}
+	switch prefix {
+	case "vpc", "subnet", "sg", "acl", "dopt", "fl":
+		return true
+	default:
+		return false
+	}
+}
 
-// lockTagWrite takes the locks a tag write naming ids needs — [EC2Plugin.sgMu] when any ID has a
-// prefix in [ec2SGMuTagPrefixes], then [EC2Plugin.tagMu] — and returns the function that releases
-// them. sgMu is taken first, the order every holder of both follows.
+// lockTagWrite takes the locks a tag write naming ids needs — [EC2Plugin.sgMu] when any ID is
+// one [ec2TagWriteTakesSGMu] names, then [EC2Plugin.tagMu] — and returns the function that
+// releases them. sgMu is taken first, the order every holder of both follows.
 func (p *EC2Plugin) lockTagWrite(ids []string) func() {
 	needSG := false
 	for _, id := range ids {
-		for _, prefix := range ec2SGMuTagPrefixes {
-			needSG = needSG || strings.HasPrefix(id, prefix)
-		}
+		needSG = needSG || ec2TagWriteTakesSGMu(id)
 	}
 	if needSG {
 		p.sgMu.Lock()

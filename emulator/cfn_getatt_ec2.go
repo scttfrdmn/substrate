@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
 
 // cfn_getatt_ec2.go answers the Fn::GetAtt attributes of the EC2 types CDK templates read most:
@@ -38,13 +39,14 @@ var cfnEC2IDAttribute = map[string]string{
 
 // recordEC2Attributes records on dr the published attributes of an EC2 resource that only EC2's
 // record holds. A type it does not cover, a record it cannot read, and a value the record does not
-// carry all record nothing, so the attribute keeps resolving as it did.
+// carry all record nothing, so the attribute keeps resolving as it did. A network ACL lookup that
+// fails on a state error is returned, rather than leaving the attribute silently empty.
 //
 // The metadata map is copied before it is written, because an updater returns the record the
 // previous deployment holds, which a rollback still compares against.
-func (d *StackDeployer) recordEC2Attributes(ctx context.Context, dr *DeployedResource) {
+func (d *StackDeployer) recordEC2Attributes(ctx context.Context, dr *DeployedResource) error {
 	if d.state == nil || dr.PhysicalID == "" {
-		return
+		return nil
 	}
 	acct, region := d.identity.accountID, d.identity.region
 	var attrs map[string]string
@@ -63,9 +65,11 @@ func (d *StackDeployer) recordEC2Attributes(ctx context.Context, dr *DeployedRes
 				"DefaultSecurityGroup": ec2LookupDefaultSecurityGroup(ctx, d.state,
 					&RequestContext{AccountID: acct, Region: region}, dr.PhysicalID),
 			}
-			if acl, err := ec2LookupDefaultNetworkACL(ctx, d.state, acct, region, dr.PhysicalID); err == nil {
-				attrs["DefaultNetworkAcl"] = acl
+			acl, err := ec2LookupDefaultNetworkACL(ctx, d.state, acct, region, dr.PhysicalID)
+			if err != nil {
+				return fmt.Errorf("cfn %s DefaultNetworkAcl: %w", dr.LogicalID, err)
 			}
+			attrs["DefaultNetworkAcl"] = acl
 		}
 	case "AWS::EC2::Subnet":
 		var subnet EC2Subnet
@@ -76,9 +80,11 @@ func (d *StackDeployer) recordEC2Attributes(ctx context.Context, dr *DeployedRes
 				"AvailabilityZone":   subnet.AvailabilityZone,
 				"AvailabilityZoneId": cfnAvailabilityZoneID(region, subnet.AvailabilityZone),
 			}
-			if assoc, err := ec2LookupSubnetNetworkACLAssociation(ctx, d.state, acct, region, dr.PhysicalID); err == nil {
-				attrs["NetworkAclAssociationId"] = assoc
+			assoc, err := ec2LookupSubnetNetworkACLAssociation(ctx, d.state, acct, region, dr.PhysicalID)
+			if err != nil {
+				return fmt.Errorf("cfn %s NetworkAclAssociationId: %w", dr.LogicalID, err)
 			}
+			attrs["NetworkAclAssociationId"] = assoc
 		}
 	case "AWS::EC2::Instance":
 		var inst EC2Instance
@@ -93,7 +99,7 @@ func (d *StackDeployer) recordEC2Attributes(ctx context.Context, dr *DeployedRes
 		}
 	}
 	if len(attrs) == 0 {
-		return
+		return nil
 	}
 	dr.Metadata = cfnCopyMetadata(dr.Metadata)
 	for k, v := range attrs {
@@ -101,6 +107,7 @@ func (d *StackDeployer) recordEC2Attributes(ctx context.Context, dr *DeployedRes
 			dr.Metadata[k] = v
 		}
 	}
+	return nil
 }
 
 // readEC2Record decodes one EC2 state record into v, reporting whether there was one to decode.

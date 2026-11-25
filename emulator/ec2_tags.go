@@ -644,8 +644,9 @@ func ec2ApplyTagsThroughOwner(
 func (p *EC2Plugin) tagRecord(
 	ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
-	p.tagMu.Lock()
-	defer p.tagMu.Unlock()
+	// The key's last segment is the resource's ID for every type the tagging API reaches, so the
+	// same locks as CreateTags' are taken (#1614).
+	defer p.lockTagWrite([]string{ec2StateKeyTail(key)})()
 	raw, err := loadTagRecord(ctx, p.state, ec2Namespace, key)
 	if err != nil {
 		return err
