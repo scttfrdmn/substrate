@@ -137,7 +137,8 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 				"AttributeName": "Policy", "AttributeValue": policy,
 			}}
 	},
-	"AWS::Events::Rule": jsonBodyDeleter("eventbridge", "DeleteRule", "Name"),
+	"AWS::Events::Rule":     cfnDeleteEventsRule,
+	"AWS::Events::EventBus": jsonBodyDeleter("eventbridge", "DeleteEventBus", "Name"),
 
 	// --- Compute ------------------------------------------------------------
 	"AWS::Lambda::Function": pathDeleter("lambda", "/2015-03-31/functions/"),
@@ -517,6 +518,9 @@ type cfnDeletePreStepFunc func(d *StackDeployer, dr DeployedResource,
 // dispatched after a failed detach would be refused anyway, and reporting the detach's
 // own error names what actually went wrong.
 var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
+	// DeleteRule refuses a rule that still has targets (#1613).
+	"AWS::Events::Rule": cfnDeleteEventsRuleTargets,
+
 	// DeleteInstanceProfile is refused while the profile holds a role, and DeleteRole
 	// is now refused while a profile holds it — correctly, per both references. So the
 	// stack could not converge from either side until something made the detach call

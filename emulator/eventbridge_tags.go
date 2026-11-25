@@ -1,35 +1,30 @@
 package emulator
 
-// EventBridge tagging: TagResource, UntagResource, ListTagsForResource, PutRule's Tags, and the ARN
-// rule that decides which resource a ResourceARN names (#1607).
-//
-// All three operations were unrouted, and Terraform's aws_cloudwatch_event_rule calls
-// ListTagsForResource on every refresh, so a rule substrate had created could not be read back.
+// EventBridge tagging: TagResource, UntagResource, ListTagsForResource, PutRule's and
+// CreateEventBus's Tags, the ARN rule that decides which resource a ResourceARN names (#1607), and
+// the Resource Groups Tagging API provider for rules and buses (#1640).
 //
 // # What can be tagged
 //
-// "In EventBridge, rules and event buses can be tagged." Rules are modeled and carry their tags on
-// the rule record ([EBRule.Tags]). Event buses are not modeled as records — substrate routes no
-// CreateEventBus, and ListEventBuses answers the default bus from no stored state — so an event-bus
-// ARN names nothing substrate can hold tags on, and is answered ResourceNotFoundException ("An entity
-// that you specified does not exist."). That is exactly true of a custom bus, which cannot exist here;
-// for the default bus it is a documented gap rather than AWS's answer. Any other resource type in an
-// EventBridge ARN is not taggable at all and is a ValidationError, the common-errors fallback this
-// plugin uses for a malformed request (see eventbridge_errors.go).
+// "In EventBridge, rules and event buses can be tagged." Both carry their tags on their own record
+// ([EBRule.Tags], [EBEventBus.Tags]). The default bus has a record only once something has been
+// written to it, so tagging it creates one; until then it is synthesized and untagged. Any other
+// resource type in an EventBridge ARN is not taggable at all and is a ValidationError, the
+// common-errors fallback this plugin uses for a malformed request (see eventbridge_errors.go).
 //
-// # The ARN, not the caller, names the rule
+// # The ARN, not the caller, names the resource
 //
 // The account and Region come from the ARN, the rule #826 set for every resolver. A rule ARN is
 // arn:{partition}:events:{region}:{account}:rule/{name} for the default bus and rule/{bus}/{name}
-// for a custom one; substrate mints the first form for every rule and keys rules by name, so the
-// second form resolves by name and must name the bus the rule is stored on.
+// for a custom one, and each form names the rule on that bus ([ebRuleRef.key]). A bus ARN is
+// event-bus/{name}.
 //
 // # Quota and validation
 //
 // "You can associate as many as 50 tags with a resource." TagResource's page publishes no code for
 // exceeding it; PutRule's publishes LimitExceededException, "The request failed because it attempted
-// to create resource beyond the allowed service quota", and the tag ceiling is that quota, so both
-// operations answer it — for TagResource that is substrate's reading. A Tag's Key is 1 to 128
+// to create resource beyond the allowed service quota", and the tag ceiling is that quota, so every
+// tag write answers it — for TagResource that is substrate's reading. A Tag's Key is 1 to 128
 // characters and its Value 0 to 256 (API_Tag); a tag outside them is a ValidationError.
 //
 // Tags are stored sorted by key, so ListTagsForResource answers in an order that does not depend on
@@ -39,6 +34,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -53,15 +49,16 @@ const (
 	ebMaxTagValueLen = 256
 )
 
-// ebRuleNotFound reports that a rule does not exist.
+// ebRuleNotFound reports that a rule does not exist on its bus.
 //
 // ResourceNotFoundException at 400, the status every EventBridge page that publishes the code gives
-// it, glossed "An entity that you specified does not exist." Substrate answered 404 until #1607. The
-// message is substrate's own: no page publishes AWS's text for it.
-func ebRuleNotFound(name string) *AWSError {
+// it, glossed "An entity that you specified does not exist." The wording is AWS's as observed in
+// two reports of PutTargets naming a rule on the wrong bus: "Rule SendToApi-30d74a6 does not exist
+// on EventBus default." (Stack Overflow 76683058) and pulumi/pulumi-aws#1323.
+func ebRuleNotFound(ref ebRuleRef) *AWSError {
 	return &AWSError{
 		Code:       "ResourceNotFoundException",
-		Message:    fmt.Sprintf("no rule named %q is stored in this account and Region", name),
+		Message:    fmt.Sprintf("Rule %s does not exist on EventBus %s.", ref.name, ref.bus),
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
@@ -113,104 +110,300 @@ func ebMergeTags(existing, add []EBTag, removeKeys []string) []EBTag {
 	return out
 }
 
-// ebRuleTarget is the rule a tagging ARN names.
-type ebRuleTarget struct {
-	accountID, region, bus, name string
+// ebTagTarget is the rule or bus a tagging ARN names.
+type ebTagTarget struct {
+	// ref is the rule, or for a bus its account, Region and bus with no name.
+	ref ebRuleRef
+
+	// isBus reports that the ARN names the bus itself.
+	isBus bool
 }
 
-// ebParseTagARN resolves a ResourceARN to the rule it names; see this file's preamble.
-func ebParseTagARN(arn string) (ebRuleTarget, *AWSError) {
+// key is the state key of the record the target's tags live on.
+func (t ebTagTarget) key() string {
+	if t.isBus {
+		return ebBusKey(t.ref.accountID, t.ref.region, t.ref.bus)
+	}
+	return t.ref.key()
+}
+
+// notFound is the refusal for a target with no record.
+func (t ebTagTarget) notFound() *AWSError {
+	if t.isBus {
+		return ebBusNotFound(t.ref.bus)
+	}
+	return ebRuleNotFound(t.ref)
+}
+
+// inScope reports whether the target is in accountID and region, an empty region matching any.
+// EventBridge is regional and substrate models no cross-account access, so a tag operation on an
+// ARN naming another account's or Region's resource finds nothing, as the Resource Groups Tagging
+// API states for its own writes: "You can only tag resources that are located in the specified AWS
+// Region for the AWS account" (API_TagResources).
+func (t ebTagTarget) inScope(accountID, region string) bool {
+	return t.ref.accountID == accountID && (region == "" || t.ref.region == region)
+}
+
+// ebRequestTagTarget parses a tag operation's ResourceARN and refuses one outside the caller's
+// account and Region with the target's own not-found answer.
+func ebRequestTagTarget(ctx *RequestContext, arn string) (ebTagTarget, *AWSError) {
+	target, arnErr := ebParseTagARN(arn)
+	if arnErr != nil {
+		return target, arnErr
+	}
+	if !target.inScope(ctx.AccountID, ctx.Region) {
+		return target, target.notFound()
+	}
+	return target, nil
+}
+
+// ebParseTagARN resolves a ResourceARN to the rule or bus it names; see this file's preamble.
+func ebParseTagARN(arn string) (ebTagTarget, *AWSError) {
 	if arn == "" {
-		return ebRuleTarget{}, ebValidationError("ResourceARN is required")
+		return ebTagTarget{}, ebValidationError("ResourceARN is required")
 	}
 	parts := strings.SplitN(arn, ":", 6)
 	if len(parts) < 6 || parts[0] != "arn" || parts[2] != "events" || parts[3] == "" || parts[4] == "" {
-		return ebRuleTarget{}, ebValidationError(fmt.Sprintf("ResourceARN %q is not an EventBridge ARN", arn))
+		return ebTagTarget{}, ebValidationError(fmt.Sprintf("ResourceARN %q is not an EventBridge ARN", arn))
 	}
 	resource := parts[5]
+	ref := ebRuleRef{accountID: parts[4], region: parts[3], bus: ebDefaultBus}
 	switch {
 	case strings.HasPrefix(resource, "rule/"):
 		segs := strings.Split(strings.TrimPrefix(resource, "rule/"), "/")
-		t := ebRuleTarget{accountID: parts[4], region: parts[3]}
 		switch len(segs) {
 		case 1:
-			t.name = segs[0]
+			ref.name = segs[0]
 		case 2:
-			t.bus, t.name = segs[0], segs[1]
+			ref.bus, ref.name = segs[0], segs[1]
 		}
-		if t.name == "" || (len(segs) == 2 && t.bus == "") {
-			return ebRuleTarget{}, ebValidationError(fmt.Sprintf("ResourceARN %q does not name a rule", arn))
+		if ref.name == "" || ref.bus == "" {
+			return ebTagTarget{}, ebValidationError(fmt.Sprintf("ResourceARN %q does not name a rule", arn))
 		}
-		return t, nil
+		return ebTagTarget{ref: ref}, nil
 	case strings.HasPrefix(resource, "event-bus/"):
-		return ebRuleTarget{}, &AWSError{
-			Code:       "ResourceNotFoundException",
-			Message:    fmt.Sprintf("substrate stores no record for event bus %q, so it holds no tags", strings.TrimPrefix(resource, "event-bus/")),
-			HTTPStatus: http.StatusBadRequest,
+		ref.bus = strings.TrimPrefix(resource, "event-bus/")
+		if ref.bus == "" {
+			return ebTagTarget{}, ebValidationError(fmt.Sprintf("ResourceARN %q does not name an event bus", arn))
 		}
+		return ebTagTarget{ref: ref, isBus: true}, nil
 	default:
-		return ebRuleTarget{}, ebValidationError(fmt.Sprintf("ResourceARN %q names neither a rule nor an event bus, the two taggable EventBridge resources", arn))
+		return ebTagTarget{}, ebValidationError(fmt.Sprintf("ResourceARN %q names neither a rule nor an event bus, the two taggable EventBridge resources", arn))
 	}
 }
 
-// ebBusName returns the bus name an EventBusName value carries, which PutRule accepts as a name or
-// an event-bus ARN.
+// ebRequestBus returns the bus a request's EventBusName (or DescribeEventBus's Name) names in the
+// caller's account and Region. A name is the caller's, and an absent value is the default bus. An
+// event-bus ARN names the bus in the ARN's own account and Region (#826); substrate models no
+// cross-account or cross-Region bus access, so an ARN naming another account or Region is a bus this
+// caller cannot reach, answered ResourceNotFoundException as a bus that does not exist is.
+func ebRequestBus(ctx *RequestContext, v string) (string, *AWSError) {
+	if !strings.HasPrefix(v, "arn:") {
+		return ebBusName(v), nil
+	}
+	parts := strings.SplitN(v, ":", 6)
+	if len(parts) < 6 || parts[2] != "events" || !strings.HasPrefix(parts[5], "event-bus/") || parts[5] == "event-bus/" {
+		return "", ebValidationError(fmt.Sprintf("%q is not an event-bus ARN", v))
+	}
+	if parts[3] != ctx.Region || parts[4] != ctx.AccountID {
+		return "", ebBusNotFound(v)
+	}
+	return strings.TrimPrefix(parts[5], "event-bus/"), nil
+}
+
+// ebBusName returns the bus name an EventBusName value carries, a name or an event-bus ARN, without
+// regard to the ARN's account and Region. An absent value is the default bus. Requests resolve
+// through [ebRequestBus]; this serves CloudFormation, whose values are the stack's own.
 func ebBusName(v string) string {
 	if i := strings.LastIndex(v, ":event-bus/"); i >= 0 {
 		return v[i+len(":event-bus/"):]
 	}
 	if v == "" {
-		return "default"
+		return ebDefaultBus
 	}
 	return v
 }
 
-// loadRule reads a rule record, answering nil for an absent one.
-func (p *EventBridgePlugin) loadRule(goCtx context.Context, accountID, region, name string) (*EBRule, error) {
-	data, err := p.state.Get(goCtx, eventbridgeNamespace, ebRuleKey(accountID, region, name))
+// loadRule reads a rule record, answering nil for an absent one. The record's EventBusName is the
+// bus its key names: a record written before rules were keyed per bus is stored at the default
+// bus's key whatever bus its request named, and it is that default-bus rule.
+func (p *EventBridgePlugin) loadRule(goCtx context.Context, ref ebRuleRef) (*EBRule, error) {
+	data, err := p.state.Get(goCtx, eventbridgeNamespace, ref.key())
 	if err != nil {
-		return nil, fmt.Errorf("eventbridge load rule %s: %w", name, err)
+		return nil, fmt.Errorf("eventbridge load rule %s: %w", ref.name, err)
 	}
 	if data == nil {
 		return nil, nil
 	}
 	var rule EBRule
 	if err := json.Unmarshal(data, &rule); err != nil {
-		return nil, fmt.Errorf("eventbridge decode rule %s: %w", name, err)
+		return nil, fmt.Errorf("eventbridge decode rule %s: %w", ref.name, err)
+	}
+	rule.EventBusName = ref.bus
+	if rule.ARN == "" {
+		rule.ARN = ref.arn()
 	}
 	return &rule, nil
 }
 
 // saveRule writes a rule record back.
-func (p *EventBridgePlugin) saveRule(goCtx context.Context, accountID, region string, rule *EBRule) error {
+func (p *EventBridgePlugin) saveRule(goCtx context.Context, ref ebRuleRef, rule *EBRule) error {
 	data, err := json.Marshal(rule)
 	if err != nil {
 		return fmt.Errorf("eventbridge encode rule %s: %w", rule.Name, err)
 	}
-	if err := p.state.Put(goCtx, eventbridgeNamespace, ebRuleKey(accountID, region, rule.Name), data); err != nil {
+	if err := p.state.Put(goCtx, eventbridgeNamespace, ref.key(), data); err != nil {
 		return fmt.Errorf("eventbridge store rule %s: %w", rule.Name, err)
 	}
 	return nil
 }
 
-// resolveTaggedRule loads the rule a ResourceARN names, refusing a malformed ARN and an absent rule.
-func (p *EventBridgePlugin) resolveTaggedRule(arn string) (*EBRule, ebRuleTarget, error) {
-	target, arnErr := ebParseTagARN(arn)
-	if arnErr != nil {
-		return nil, target, arnErr
-	}
-	rule, err := p.loadRule(context.Background(), target.accountID, target.region, target.name)
-	if err != nil {
-		return nil, target, err
-	}
-	if rule == nil || (target.bus != "" && ebBusName(rule.EventBusName) != target.bus) {
-		return nil, target, ebRuleNotFound(target.name)
-	}
-	return rule, target, nil
+// ebTaggedRecord is a rule or bus record loaded for a tag read or write; exactly one is set.
+type ebTaggedRecord struct {
+	rule *EBRule
+	bus  *EBEventBus
 }
 
-// tagResource handles TagResource: it merges tags onto a rule.
-func (p *EventBridgePlugin) tagResource(req *AWSRequest) (*AWSResponse, error) {
+// tags returns the record's tags.
+func (r ebTaggedRecord) tags() []EBTag {
+	if r.rule != nil {
+		return r.rule.Tags
+	}
+	return r.bus.Tags
+}
+
+// arn returns the record's ARN.
+func (r ebTaggedRecord) arn() string {
+	if r.rule != nil {
+		return r.rule.ARN
+	}
+	return r.bus.ARN
+}
+
+// everTagged returns the record's previously-tagged flag.
+func (r ebTaggedRecord) everTagged() bool {
+	if r.rule != nil {
+		return r.rule.EverTagged
+	}
+	return r.bus.EverTagged
+}
+
+// set replaces the record's tags and previously-tagged flag.
+func (r ebTaggedRecord) set(tags []EBTag, ever bool) {
+	if r.rule != nil {
+		r.rule.Tags, r.rule.EverTagged = tags, ever
+		return
+	}
+	r.bus.Tags, r.bus.EverTagged = tags, ever
+}
+
+// ebLoadTaggedRecord reads the rule or bus stored at key, reporting false when there is none. The
+// default bus is always found ([ebLoadBusAt]).
+func ebLoadTaggedRecord(ctx context.Context, state StateManager, key string) (ebTaggedRecord, bool, error) {
+	if strings.HasPrefix(key, ebBusKeyPrefix) {
+		bus, found, err := ebLoadBusAt(ctx, state, key)
+		return ebTaggedRecord{bus: bus}, found, err
+	}
+	if !strings.HasPrefix(key, ebRuleKeyPrefix) {
+		return ebTaggedRecord{}, false, fmt.Errorf("eventbridge: %s is not a taggable record key", key)
+	}
+	raw, err := state.Get(ctx, eventbridgeNamespace, key)
+	if err != nil {
+		return ebTaggedRecord{}, false, fmt.Errorf("eventbridge load rule %s: %w", key, err)
+	}
+	if raw == nil {
+		return ebTaggedRecord{}, false, nil
+	}
+	var rule EBRule
+	if err := json.Unmarshal(raw, &rule); err != nil {
+		return ebTaggedRecord{}, false, fmt.Errorf("eventbridge decode rule %s: %w", key, err)
+	}
+	return ebTaggedRecord{rule: &rule}, true, nil
+}
+
+// ebStoreTaggedRecord writes a record loaded by [ebLoadTaggedRecord] back to key.
+func ebStoreTaggedRecord(ctx context.Context, state StateManager, key string, rec ebTaggedRecord) error {
+	var v any = rec.rule
+	if rec.rule == nil {
+		v = rec.bus
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("eventbridge encode %s: %w", key, err)
+	}
+	if err := state.Put(ctx, eventbridgeNamespace, key, data); err != nil {
+		return fmt.Errorf("eventbridge store %s: %w", key, err)
+	}
+	return nil
+}
+
+// ebMergeTagsAt merges add and remove into the rule or bus stored at key and stamps its tag history.
+// With quota enforced and tags to add, the merged set is held to the 50-tag ceiling, reported as a
+// [taggingQuotaError] naming the resource's ARN. An absent record is [errTagResourceNotFound]. It
+// takes the state rather than the plugin so the tagging plugin's direct path, used when no
+// EventBridge plugin is registered, runs the same code; the plugin's callers hold
+// [EventBridgePlugin.ruleMu].
+func ebMergeTagsAt(
+	ctx context.Context, state StateManager, key string, add []EBTag, remove []string, quota tagQuotaMode,
+) error {
+	rec, found, err := ebLoadTaggedRecord(ctx, state, key)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: %s/%s", errTagResourceNotFound, eventbridgeNamespace, key)
+	}
+	before := rec.tags()
+	merged := ebMergeTags(before, add, remove)
+	if quota == enforceTagQuota && len(add) > 0 {
+		if quotaErr := ebCheckTagQuota(rec.arn(), len(merged)); quotaErr != nil {
+			return taggingQuotaRefusal(quotaErr)
+		}
+	}
+	if len(merged) == 0 {
+		merged = nil
+	}
+	rec.set(merged, taggingEverTagged(rec.everTagged(), len(before), len(add)))
+	return ebStoreTaggedRecord(ctx, state, key, rec)
+}
+
+// ebTagMapAt is [ebMergeTagsAt] for the tagging API's map of tags to add. With quota enforced the
+// tags are held to API_Tag's lengths too, as EventBridge's own TagResource holds them.
+func ebTagMapAt(ctx context.Context, state StateManager, key string, add map[string]string, remove []string, quota tagQuotaMode) error {
+	tags := make([]EBTag, 0, len(add))
+	for _, k := range taggingSortedKeys(add) {
+		tags = append(tags, EBTag{Key: k, Value: add[k]})
+	}
+	if quota == enforceTagQuota {
+		if tagErr := ebValidateTags(tags); tagErr != nil {
+			return taggingQuotaRefusal(tagErr)
+		}
+	}
+	return ebMergeTagsAt(ctx, state, key, tags, remove, quota)
+}
+
+// ebOwnTagWrite runs a tag write for EventBridge's own TagResource or UntagResource, answering the
+// target's own not-found and the quota refusal as the [AWSError] the operation publishes.
+func (p *EventBridgePlugin) ebOwnTagWrite(ctx *RequestContext, arn string, add []EBTag, remove []string) error {
+	target, arnErr := ebRequestTagTarget(ctx, arn)
+	if arnErr != nil {
+		return arnErr
+	}
+	p.ruleMu.Lock()
+	defer p.ruleMu.Unlock()
+	err := ebMergeTagsAt(context.Background(), p.state, target.key(), add, remove, enforceTagQuota)
+	var quota *taggingQuotaError
+	switch {
+	case errors.Is(err, errTagResourceNotFound):
+		return target.notFound()
+	case errors.As(err, &quota):
+		return quota.awsErr
+	}
+	return err
+}
+
+// tagResource handles TagResource: it merges tags onto a rule or bus.
+func (p *EventBridgePlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		ResourceARN string  `json:"ResourceARN"`
 		Tags        []EBTag `json:"Tags"`
@@ -224,28 +417,15 @@ func (p *EventBridgePlugin) tagResource(req *AWSRequest) (*AWSResponse, error) {
 	if tagErr := ebValidateTags(body.Tags); tagErr != nil {
 		return nil, tagErr
 	}
-
-	p.ruleMu.Lock()
-	defer p.ruleMu.Unlock()
-	rule, target, err := p.resolveTaggedRule(body.ResourceARN)
-	if err != nil {
-		return nil, err
-	}
-	merged := ebMergeTags(rule.Tags, body.Tags, nil)
-	if quotaErr := ebCheckTagQuota(body.ResourceARN, len(merged)); quotaErr != nil {
-		return nil, quotaErr
-	}
-	rule.EverTagged = taggingEverTagged(rule.EverTagged, len(rule.Tags), len(body.Tags))
-	rule.Tags = merged
-	if err := p.saveRule(context.Background(), target.accountID, target.region, rule); err != nil {
+	if err := p.ebOwnTagWrite(ctx, body.ResourceARN, body.Tags, nil); err != nil {
 		return nil, err
 	}
 	return ebJSONResponse(http.StatusOK, struct{}{})
 }
 
-// untagResource handles UntagResource: it removes the named keys from a rule. A key the rule does
-// not carry is not an error; the page publishes no code for one.
-func (p *EventBridgePlugin) untagResource(req *AWSRequest) (*AWSResponse, error) {
+// untagResource handles UntagResource: it removes the named keys from a rule or bus. A key the
+// resource does not carry is not an error; the page publishes no code for one.
+func (p *EventBridgePlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		ResourceARN string   `json:"ResourceARN"`
 		TagKeys     []string `json:"TagKeys"`
@@ -256,36 +436,34 @@ func (p *EventBridgePlugin) untagResource(req *AWSRequest) (*AWSResponse, error)
 	if body.TagKeys == nil {
 		return nil, ebValidationError("TagKeys is required")
 	}
-
-	p.ruleMu.Lock()
-	defer p.ruleMu.Unlock()
-	rule, target, err := p.resolveTaggedRule(body.ResourceARN)
-	if err != nil {
-		return nil, err
-	}
-	rule.EverTagged = taggingEverTagged(rule.EverTagged, len(rule.Tags), 0)
-	rule.Tags = ebMergeTags(rule.Tags, nil, body.TagKeys)
-	if err := p.saveRule(context.Background(), target.accountID, target.region, rule); err != nil {
+	if err := p.ebOwnTagWrite(ctx, body.ResourceARN, nil, body.TagKeys); err != nil {
 		return nil, err
 	}
 	return ebJSONResponse(http.StatusOK, struct{}{})
 }
 
-// listTagsForResource handles ListTagsForResource. An untagged rule answers `{"Tags":[]}`: the
+// listTagsForResource handles ListTagsForResource. An untagged resource answers `{"Tags":[]}`: the
 // response's one member is documented without a condition, and a caller converging tags compares the
 // list it reads.
-func (p *EventBridgePlugin) listTagsForResource(req *AWSRequest) (*AWSResponse, error) {
+func (p *EventBridgePlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		ResourceARN string `json:"ResourceARN"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, ebInvalidBody()
 	}
-	rule, _, err := p.resolveTaggedRule(body.ResourceARN)
+	target, arnErr := ebRequestTagTarget(ctx, body.ResourceARN)
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	rec, found, err := ebLoadTaggedRecord(context.Background(), p.state, target.key())
 	if err != nil {
 		return nil, err
 	}
-	tags := rule.Tags
+	if !found {
+		return nil, target.notFound()
+	}
+	tags := rec.tags()
 	if tags == nil {
 		tags = []EBTag{}
 	}
@@ -294,32 +472,90 @@ func (p *EventBridgePlugin) listTagsForResource(req *AWSRequest) (*AWSResponse, 
 	}{Tags: tags})
 }
 
-// scanEventBridgeRules reports every EventBridge rule in the caller's account and Region, with its
-// tags, for the Resource Groups Tagging API's GetResources (#1607).
-//
-// It lives beside the rule's tag operations rather than in tagging_plugin.go so the prefix it scans,
-// [ebRuleKeyPrefix], and the record it decodes are read next to the code that writes them. The colon
-// in the prefix keeps the rule-name index, "ebrule_names:", out of the scan.
-func (p *TaggingPlugin) scanEventBridgeRules(goCtx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	keys, err := p.state.List(goCtx, eventbridgeNamespace, taggingScanPrefix(ebRuleKeyPrefix, reqCtx))
-	if err != nil {
-		return nil, fmt.Errorf("list eventbridge rules: %w", err)
+// ----- Tagging API provider ------------------------------------------------
+
+// EventBridge answers the Resource Groups Tagging API for its rules and buses (#1640): GetResources
+// through [EventBridgePlugin.listTaggedResources], and TagResources and UntagResources through
+// [EventBridgePlugin.tagResourceByARN], under [EventBridgePlugin.ruleMu], the lock every write to a
+// rule or bus holds. A refusal EventBridge's own TagResource would answer is carried out as a
+// [taggingQuotaError], so the tagging API reports the owning service's own code.
+
+// ebTagStateKey resolves a rule or bus ARN to its record's state key through [ebParseTagARN], which
+// EventBridge's own three tagging operations parse through. An ARN it refuses is the unsupported-type
+// answer, and one outside accountID and region ([ebTagTarget.inScope]) names no resource the caller
+// can tag, [errTagResourceNotFound]. The tagging plugin's direct path knows the caller's account and
+// not its Region, so it passes an empty region. resource is the ARN's resource portion, for the
+// message.
+func ebTagStateKey(arn, resource, accountID, region string) (string, error) {
+	target, arnErr := ebParseTagARN(arn)
+	if arnErr != nil {
+		return "", unsupportedTagResource("EventBridge %q is not a rule or event-bus ARN: %s", resource, arnErr.Code)
 	}
+	if !target.inScope(accountID, region) {
+		return "", fmt.Errorf("%w: %s is outside the caller's account and Region", errTagResourceNotFound, arn)
+	}
+	return target.key(), nil
+}
+
+// ebListTaggedResources reports the caller's EventBridge rules and buses, under the ARN each record
+// carries. The default bus is reported only once a write has given it a record, which every tag
+// write does, so a default bus that has never been tagged is, correctly, absent (#938).
+func ebListTaggedResources(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	var out []resourceTagMapping
-	for _, k := range keys {
-		raw, err := p.state.Get(goCtx, eventbridgeNamespace, k)
+	for _, prefix := range []string{ebRuleKeyPrefix, ebBusKeyPrefix} {
+		keys, err := state.List(ctx, eventbridgeNamespace, taggingScanPrefix(prefix, reqCtx))
 		if err != nil {
-			return out, fmt.Errorf("get eventbridge rule %s: %w", k, err)
+			return out, fmt.Errorf("list eventbridge %s records: %w", prefix, err)
 		}
-		var rule EBRule
-		if raw == nil || json.Unmarshal(raw, &rule) != nil {
-			continue
+		for _, k := range keys {
+			rec, found, err := ebLoadTaggedRecord(ctx, state, k)
+			if err != nil {
+				return out, err
+			}
+			if !found {
+				continue
+			}
+			tags := make([]taggingTag, 0, len(rec.tags()))
+			for _, t := range rec.tags() {
+				tags = append(tags, taggingTag(t))
+			}
+			out = append(out, resourceTagMapping{ResourceARN: rec.arn(), Tags: tags, everTagged: rec.everTagged()})
 		}
-		tags := make([]taggingTag, 0, len(rule.Tags))
-		for _, t := range rule.Tags {
-			tags = append(tags, taggingTag(t))
-		}
-		out = append(out, resourceTagMapping{ResourceARN: rule.ARN, Tags: tags, everTagged: rule.EverTagged})
 	}
 	return out, nil
+}
+
+// listTaggedResources implements [taggableResourceLister].
+func (p *EventBridgePlugin) listTaggedResources(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	return ebListTaggedResources(ctx, p.state, reqCtx)
+}
+
+// tagResourceByARN implements [resourceTagger]. EventBridge's own TagResource publishes no rule
+// about the reserved prefix, so an `aws:` key is refused with the tagging API's own answer
+// ([taggingReservedKeyRefusal]).
+func (p *EventBridgePlugin) tagResourceByARN(
+	reqCtx *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
+) error {
+	parts, ok := taggingSplitARN(arn)
+	if !ok {
+		return taggingResolveFailed(fmt.Errorf("invalid ARN: %q", arn))
+	}
+	key, err := ebTagStateKey(arn, parts[5], reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return taggingResolveFailed(err)
+	}
+	if refusal := taggingReservedKeyRefusal(add, remove); refusal != nil {
+		return taggingQuotaRefusal(refusal)
+	}
+	return p.tagRecord(context.Background(), key, add, remove, quota)
+}
+
+// tagRecord implements [resourceTagger], through [ebTagMapAt] under the lock EventBridge's own tag
+// operations hold.
+func (p *EventBridgePlugin) tagRecord(
+	ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode,
+) error {
+	p.ruleMu.Lock()
+	defer p.ruleMu.Unlock()
+	return ebTagMapAt(ctx, p.state, key, add, remove, quota)
 }

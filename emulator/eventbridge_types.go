@@ -1,5 +1,7 @@
 package emulator
 
+import "time"
+
 // eventbridgeNamespace is the state namespace used by EventBridgePlugin.
 const eventbridgeNamespace = "eventbridge"
 
@@ -124,27 +126,112 @@ type EBEvent struct {
 	EventID string `json:"EventId"`
 }
 
-// ebRuleKeyPrefix is the colon-terminated prefix every rule record is stored under; see [ebRuleKey].
+// ebRuleKeyPrefix is the colon-terminated prefix every rule record is stored under; see [ebRuleRef.key].
 // The colon matters because "ebrule" is also a prefix of "ebrule_names", the rule-name index.
 const ebRuleKeyPrefix = "ebrule:"
 
-// ebRuleARN constructs the ARN for an EventBridge rule.
-func ebRuleARN(region, accountID, ruleName string) string {
-	return "arn:aws:events:" + region + ":" + accountID + ":rule/" + ruleName
+// ebDefaultBus is the name of the event bus every account has in every Region.
+const ebDefaultBus = "default"
+
+// ebRuleARN constructs the ARN for an EventBridge rule on bus: rule/{name} on the default bus and
+// rule/{bus}/{name} on a custom one, the two forms EventBridge mints.
+func ebRuleARN(region, accountID, bus, ruleName string) string {
+	if bus == "" || bus == ebDefaultBus {
+		return "arn:aws:events:" + region + ":" + accountID + ":rule/" + ruleName
+	}
+	return "arn:aws:events:" + region + ":" + accountID + ":rule/" + bus + "/" + ruleName
 }
 
-// ebEventBusARN constructs the ARN for an event bus in the caller's account and
-// Region. A nil context yields the parser's defaults, so a plugin driven directly
-// by a unit test gets the same ARN an HTTP caller would.
-func ebEventBusARN(reqCtx *RequestContext, busName string) string {
-	region, accountID := defaultRegion, defaultAccountID
-	if reqCtx != nil {
-		if reqCtx.Region != "" {
-			region = reqCtx.Region
-		}
-		if reqCtx.AccountID != "" {
-			accountID = reqCtx.AccountID
-		}
-	}
+// ebBusARN constructs the ARN of the event bus named busName in an account and Region.
+func ebBusARN(region, accountID, busName string) string {
 	return "arn:aws:events:" + region + ":" + accountID + ":event-bus/" + busName
+}
+
+// EBEventBus is an emulated EventBridge event bus: a custom bus CreateEventBus made, or the default
+// bus once a write (PutPermission, TagResource) has given it state of its own. An unwritten default
+// bus has no record and is synthesized on read ([EventBridgePlugin.loadBus]).
+type EBEventBus struct {
+	// Name is the bus name.
+	Name string `json:"Name"`
+
+	// ARN is the bus ARN, arn:aws:events:{region}:{account}:event-bus/{name}.
+	ARN string `json:"Arn"`
+
+	// Description is the bus description, at most 512 characters.
+	Description string `json:"Description,omitempty"`
+
+	// KmsKeyIdentifier is the customer managed key the bus encrypts events with, as given.
+	KmsKeyIdentifier string `json:"KmsKeyIdentifier,omitempty"`
+
+	// DeadLetterConfig names the SQS queue EventBridge uses as the bus's dead-letter queue.
+	DeadLetterConfig *EBDeadLetterConfig `json:"DeadLetterConfig,omitempty"`
+
+	// LogConfig is the bus's logging configuration, as given.
+	LogConfig *EBLogConfig `json:"LogConfig,omitempty"`
+
+	// Policy is the bus's resource policy JSON, written by PutPermission and RemovePermission.
+	Policy string `json:"Policy,omitempty"`
+
+	// Tags are the bus's tags, sorted by key. No bus response carries them; ListTagsForResource is
+	// their read path.
+	Tags []EBTag `json:"Tags,omitempty"`
+
+	// CreatedAt is when CreateEventBus made the bus, on the simulated clock. It is zero for the
+	// default bus, whose creation predates anything substrate observed.
+	CreatedAt time.Time `json:"created_at,omitzero"`
+
+	// UpdatedAt is when the bus was last written, on the simulated clock.
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+
+	// EverTagged records that this bus has carried a tag; see [taggingEverTagged] (#938).
+	EverTagged bool `json:"ever_tagged,omitempty"`
+}
+
+// EBDeadLetterConfig is EventBridge's DeadLetterConfig type.
+type EBDeadLetterConfig struct {
+	// Arn is the ARN of the SQS queue used as the dead-letter queue.
+	Arn string `json:"Arn,omitempty"`
+}
+
+// EBLogConfig is EventBridge's LogConfig type.
+type EBLogConfig struct {
+	// IncludeDetail is FULL or NONE.
+	IncludeDetail string `json:"IncludeDetail,omitempty"`
+
+	// Level is OFF, ERROR, INFO or TRACE.
+	Level string `json:"Level,omitempty"`
+}
+
+// ebEventBusWire is the EventBus shape ListEventBuses renders. CreationTime and LastModifiedTime
+// are absent for the default bus until a write gives it a record.
+type ebEventBusWire struct {
+	Name             string        `json:"Name"`
+	ARN              string        `json:"Arn"`
+	Description      string        `json:"Description,omitempty"`
+	Policy           string        `json:"Policy,omitempty"`
+	CreationTime     *EpochSeconds `json:"CreationTime,omitempty"`
+	LastModifiedTime *EpochSeconds `json:"LastModifiedTime,omitempty"`
+}
+
+// ebDescribeEventBusWire is DescribeEventBus's response: the EventBus members plus the
+// configuration ListEventBuses does not publish.
+type ebDescribeEventBusWire struct {
+	ebEventBusWire
+	KmsKeyIdentifier string              `json:"KmsKeyIdentifier,omitempty"`
+	DeadLetterConfig *EBDeadLetterConfig `json:"DeadLetterConfig,omitempty"`
+	LogConfig        *EBLogConfig        `json:"LogConfig,omitempty"`
+}
+
+// ebBusToWire projects a stored bus onto the EventBus shape.
+func ebBusToWire(b *EBEventBus) ebEventBusWire {
+	w := ebEventBusWire{Name: b.Name, ARN: b.ARN, Description: b.Description, Policy: b.Policy}
+	if !b.CreatedAt.IsZero() {
+		c := EpochSeconds(b.CreatedAt)
+		w.CreationTime = &c
+	}
+	if !b.UpdatedAt.IsZero() {
+		u := EpochSeconds(b.UpdatedAt)
+		w.LastModifiedTime = &u
+	}
+	return w
 }

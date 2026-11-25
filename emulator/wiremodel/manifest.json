@@ -135,7 +135,7 @@
     },
     "events": {
       "apiVersion": "2015-10-07",
-      "operations": 12
+      "operations": 21
     },
     "firehose": {
       "apiVersion": "2015-08-04",

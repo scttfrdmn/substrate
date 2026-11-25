@@ -103,8 +103,12 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::Transfer::Server": {"Domain": "Always"},
 	"AWS::FSx::FileSystem": {"BackupId": "Always", "FileSystemType": "Always", "KmsKeyId": "Always",
 		"SecurityGroupIds": "Always", "SubnetIds": "Always"},
-	"AWS::MSK::Cluster":            {"ClusterName": "Always"},
-	"AWS::EC2::LaunchTemplate":     {"LaunchTemplateName": "Always"},
+	"AWS::MSK::Cluster":        {"ClusterName": "Always"},
+	"AWS::EC2::LaunchTemplate": {"LaunchTemplateName": "Always"},
+	// EventSourceName is listed No interruption, but UpdateEventBus carries no such member, so a
+	// change cannot be applied in place and is a replacement here.
+	"AWS::Events::EventBus":        {"EventSourceName": "Always", "Name": "Always"},
+	"AWS::Events::Rule":            {"Name": "Always"},
 	"AWS::Backup::BackupSelection": {"BackupPlanId": "Always", "BackupSelection": "Always"},
 	// The types #1545 gives an update path whose page lists Replacement properties the rows
 	// above do not already hold. KMS's three are Replacement on the page, which a change set

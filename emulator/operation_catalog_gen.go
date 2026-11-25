@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1162 routed operations.
+// 68 plugins, 1171 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -628,18 +628,27 @@ var routedOperations = map[string][]string{
 		"StartJobRun",
 	},
 	"eventbridge": {
+		"CreateEventBus",
+		"DeleteEventBus",
 		"DeleteRule",
+		"DescribeEventBus",
 		"DescribeRule",
+		"DisableRule",
+		"EnableRule",
 		"ListEventBuses",
+		"ListRuleNamesByTarget",
 		"ListRules",
 		"ListTagsForResource",
 		"ListTargetsByRule",
 		"PutEvents",
+		"PutPermission",
 		"PutRule",
 		"PutTargets",
+		"RemovePermission",
 		"RemoveTargets",
 		"TagResource",
 		"UntagResource",
+		"UpdateEventBus",
 	},
 	// APIGatewayProxyPlugin serves a deployed API's own routes: it parses the API id
 	// from the Host header and the stage and resource from the path, then invokes the

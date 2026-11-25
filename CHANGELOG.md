@@ -23,11 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - S3: `CreateBucket`'s `x-amz-bucket-object-lock-enabled` and CloudFormation's `ObjectLockEnabled` enable Object Lock and versioning, `PutObjectLockConfiguration` without a `Rule` enables it on a versioned bucket, and `GetObjectLockConfiguration` reports it; default retention, retention and legal hold stay unmodeled (#1658, #1693).
 - CloudWatch: `PutDashboard`, `GetDashboard`, `ListDashboards` and `DeleteDashboards`, global per account; several validation messages are substrate's own (#1613).
 - CloudFormation: `AWS::S3::Bucket` applies `ObjectLockEnabled` on create, and `WebsiteConfiguration`, `LoggingConfiguration`, `AccelerateConfiguration` and `ReplicationConfiguration`; `AWS::CloudWatch::Dashboard` deploys, updates in place and deletes (#1613).
+- EventBridge: `CreateEventBus`, `DescribeEventBus`, `UpdateEventBus` and `DeleteEventBus`, with a synthesized `default` bus in every account and Region; `ListEventBuses` answers from the records and pages on `NamePrefix`, `Limit` and `NextToken` (#1613).
+- EventBridge: `PutPermission` and `RemovePermission` edit the bus `Policy` that `DescribeEventBus` reports, for `aws_cloudwatch_event_permission` and `aws_cloudwatch_event_bus_policy` (#1613).
+- EventBridge: `EnableRule`, `DisableRule` and `ListRuleNamesByTarget` (#1613).
+- EventBridge: rules and buses answer the Resource Groups Tagging API's `GetResources`, `TagResources` and `UntagResources`; an `aws:` key is refused (#1640).
+- CloudFormation: `AWS::Events::EventBus`, with `Policy`, `Tags` and in-place updates; `AWS::Events::Rule` is created on its `EventBusName`, passes `RoleArn`, `Tags` and `Targets`, and updates in place, moving to a changed `EventBusName` with its targets (#1613).
 
 ### Changed
 
 - S3: a `Grantee` in `GetBucketAcl`, `GetObjectAcl` and `GetBucketLogging` is written with `xsi:type` and the `xmlns:xsi` declaration, so botocore reads its type (#1613).
 - Dependencies: `golang.org/x/text` 0.44.0 with `test/e2e` and `test/iac` tidied, the CDK example on TypeScript 7.0.2, and CI typechecks the CDK app; `@types/node` stays on Node 24's major (#1678, #1663, #1662).
+- EventBridge: rules are keyed per bus, so two buses can each hold a rule of one name, and every rule operation honors `EventBusName` (#1613).
+- EventBridge: a missing rule answers `Rule X does not exist on EventBus Y.`, a missing bus `Event bus X does not exist.`, a taken name `Event bus X already exists.` and a bus with rules `EventBus can't be deleted since it has rules.`, AWS's observed wording; the other bus and permission messages are substrate's own (#1613).
 
 ### Fixed
 
@@ -35,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 
+- EventBridge: a rule on a custom bus has the ARN `rule/{bus}/{name}`, and `PutRule` refuses a bus that does not exist; create it with `CreateEventBus` first. Rules from earlier state are default-bus rules (#1613).
+- EventBridge: tagging an event-bus ARN now tags the bus instead of answering `ResourceNotFoundException`, and `GetResources` reports tagged buses (#1640).
+- EventBridge: a rule name outside `[.\-_A-Za-z0-9]{1,64}` is refused `ValidationError`. A default-bus rule an earlier build stored under such a name is no longer listed or addressable; reset state to clear it (#1613).
+- EventBridge: a bus ARN naming another account or Region answers `ResourceNotFoundException`, and `ListRules` and `ListRuleNamesByTarget` on a missing bus do too; a `PutEvents` entry naming either fails on its own (#1613).
+- EventBridge: the tag operations refuse a rule or bus ARN in another account or Region with `ResourceNotFoundException`, and the tagging API with `InvalidParameterException` (#1640).
+- CloudFormation: an `AWS::Events::Rule` with `Targets` now puts them, and a stack delete removes them before the rule (#1613).
 - Kinesis: `DeleteStream` refuses a stream with registered consumers with `ResourceInUseException` unless `EnforceConsumerDeletion` is true (#1613).
 - Organizations: after `DeleteOrganization`, every call from that management account answers `AWSOrganizationsNotInUseException` until `CreateOrganization`; other accounts still auto-create (#1627).
 - Organizations: an explicit `CreateOrganization` enables no policy type at the root; the auto-created organization still enables SCPs (#1627).

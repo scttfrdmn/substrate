@@ -119,10 +119,14 @@ func taggingSortedKeys(m map[string]string) []string {
 
 // taggingARNOwner returns the name of the plugin that owns resources whose ARN carries service as
 // its service segment. They are the same for every service but CloudWatch, whose ARNs say
-// "cloudwatch" and whose plugin is "monitoring".
+// "cloudwatch" and whose plugin is "monitoring", and EventBridge, whose ARNs say "events" and whose
+// plugin is "eventbridge".
 func taggingARNOwner(service string) string {
-	if service == "cloudwatch" {
+	switch service {
+	case "cloudwatch":
 		return monitoringNamespace
+	case "events":
+		return eventbridgeNamespace
 	}
 	return service
 }
