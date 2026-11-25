@@ -130,6 +130,10 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::Events::EventBus":        {"EventSourceName": "Always", "Name": "Always"},
 	"AWS::Events::Rule":            {"Name": "Always"},
 	"AWS::Backup::BackupSelection": {"BackupPlanId": "Always", "BackupSelection": "Always"},
+	// ExperimentOptions is No interruption, but its AccountTargeting is Replacement (#1619), so a
+	// change to the object replaces only when that member changed: Conditionally, which keeps the
+	// in-place path ([StackDeployer.updateFISExperimentTemplate] decides).
+	"AWS::FIS::ExperimentTemplate": {"ExperimentOptions": "Conditionally"},
 	// The types #1545 gives an update path whose page lists Replacement properties the rows
 	// above do not already hold. KMS's three are Replacement on the page, which a change set
 	// reports; the update itself fails on them first (cfnCreateOnlyProperties).

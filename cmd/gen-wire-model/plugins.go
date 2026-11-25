@@ -49,6 +49,7 @@ var pluginModels = []pluginModel{
 	{plugin: "eventbridge", models: []string{"events"}},
 	{plugin: "execute-api", unmodelled: "the execute-api data plane invokes a deployed API; botocore models no request shape for it"},
 	{plugin: "firehose", models: []string{"firehose"}},
+	{plugin: "fis", models: []string{"fis"}},
 	{plugin: "fsx", models: []string{"fsx"}},
 	{plugin: "glue", models: []string{"glue"}},
 	{plugin: "health", models: []string{"health"}},

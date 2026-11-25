@@ -1194,6 +1194,11 @@ type ec2InstanceItem struct {
 	// `pending` from RunInstances and `applied` from DescribeInstances; see
 	// [ec2InstanceMetadataOptionsFor] for which members and why.
 	MetadataOptions *ec2InstanceMetadataOptionsXML `xml:"metadataOptions"`
+
+	// StateTransitionReason and StateReason are Instance's reason and stateReason, recorded by
+	// a transition another service made (see ec2_internal_actions.go) and omitted otherwise.
+	StateTransitionReason string              `xml:"reason,omitempty"`
+	StateReason           *ec2StateReasonItem `xml:"stateReason,omitempty"`
 }
 
 // ec2InstanceItemFor builds one instance's response item, shared by RunInstances and
@@ -1246,6 +1251,7 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 	// two describes of one instance report one id (#1291). The stored value is the name
 	// or ARN supplied; see ec2_instance_profile.go for what decides the id and the ARN.
 	item.IamInstanceProfile = p.ec2InstanceProfileItem(reqCtx, inst.IamInstanceProfile)
+	item.StateTransitionReason, item.StateReason = inst.StateTransitionReason, ec2StateReasonItemFor(inst)
 	// Echo launch-time tags (from TagSpecifications) — real EC2 populates tagSet in
 	// the RunInstances response, not just DescribeInstances (#351).
 	for _, t := range inst.Tags {
@@ -1574,6 +1580,14 @@ func (p *EC2Plugin) terminateForAutoScaling(reqCtx *RequestContext, ids []string
 // terminateInstanceIDs terminates ids, honoring termination protection when honorProtection
 // is set — always, for a TerminateInstances request.
 func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, honorProtection bool) (*AWSResponse, error) {
+	return p.terminateInstanceIDsBecause(reqCtx, ids, honorProtection, nil)
+}
+
+// terminateInstanceIDsBecause is [EC2Plugin.terminateInstanceIDs] recording why the instances
+// were terminated; nil records a caller's own termination (see ec2_internal_actions.go).
+func (p *EC2Plugin) terminateInstanceIDsBecause(
+	reqCtx *RequestContext, ids []string, honorProtection bool, why *ec2InternalTransition,
+) (*AWSResponse, error) {
 	type stateChange struct {
 		InstanceID   string `xml:"instanceId"`
 		CurrentState struct {
@@ -1630,8 +1644,22 @@ func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, h
 			continue
 		}
 		prev := inst.State
+		if prev.Name == ec2StateTerminated {
+			// Already terminated: the record, its reasons, its countdown and its Spot request
+			// are left as the first termination settled them (see ec2_internal_actions.go). Both
+			// states are the one a describe would report now, shutting-down while a seeded
+			// countdown runs, read without spending an observation.
+			seen := p.peekInstanceState(inst)
+			sc := stateChange{InstanceID: inst.InstanceID}
+			sc.CurrentState.Code, sc.CurrentState.Name = seen.Code, seen.Name
+			sc.PreviousState.Code, sc.PreviousState.Name = seen.Code, seen.Name
+			resp.Items = append(resp.Items, sc)
+			continue
+		}
+		at := why.when(p.tc.Now())
 		inst.State = EC2InstanceState{Code: 48, Name: ec2StateTerminated}
-		inst.TerminatedTime = p.tc.Now().UTC().Format(time.RFC3339)
+		inst.TerminatedTime = at.UTC().Format(time.RFC3339)
+		why.apply(&inst, at)
 		// The countdown restarts at the transition rather than at seed time, so a seeded instance
 		// that has already settled into `running` observes `shutting-down` from here (#514).
 		if err := p.resetInstanceObservations(inst.InstanceID); err != nil {
@@ -1660,7 +1688,7 @@ func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, h
 		// A Spot Instance's request is settled — closed, or for an active persistent request a
 		// replacement launched — after the instance itself is written terminated (#1436).
 		if inst.SpotInstanceRequestID != "" {
-			if err := p.onSpotInstanceTerminated(reqCtx, inst); err != nil {
+			if err := p.onSpotInstanceTerminated(reqCtx, inst, why.spotTerminationStatus(), at); err != nil {
 				return nil, err
 			}
 		}
@@ -1725,6 +1753,7 @@ func (p *EC2Plugin) stopInstances(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 80, Name: ec2StateStopped}
+		ec2ClearStateReason(&inst)
 		newData, err := json.Marshal(inst)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 stopInstances marshal: %w", err)
@@ -1784,6 +1813,7 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 16, Name: ec2StateRunning}
+		ec2ClearStateReason(&inst)
 		newData, err := json.Marshal(inst)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 startInstances marshal: %w", err)

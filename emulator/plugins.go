@@ -260,6 +260,7 @@ func RegisterDefaultPlugins(
 		// Application Auto Scaling checks a DynamoDB or ECS target's resource and creates a target
 		// tracking policy's CloudWatch alarms, both through the registry.
 		{&ApplicationAutoScalingPlugin{}, "application-autoscaling", registryOpt},
+		{&FISPlugin{}, "fis", registryOpt},
 	}
 	for _, r := range registrations {
 		if err := w.register(ctx, r.plugin, r.name, r.extra); err != nil {

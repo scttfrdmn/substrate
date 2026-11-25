@@ -31,7 +31,7 @@ onUnmounted(() => window.removeEventListener('hashchange', redirect))
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **71 built-in service plugins** routing **1312 operations**. This
+Substrate ships **72 built-in service plugins** routing **1329 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -81,44 +81,45 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 31 | [EventBridge](/reference/eventbridge) | `eventbridge` | JSON | 21 |
 | 32 | [API Gateway (execute-api)](/reference/execute-api) | `execute-api` | REST/JSON | 0 |
 | 33 | [Kinesis Data Firehose](/reference/firehose) | `firehose` | JSON | 6 |
-| 34 | [FSx](/reference/fsx) | `fsx` | JSON | 3 |
-| 35 | [Glue](/reference/glue) | `glue` | JSON | 33 |
-| 36 | [Health](/reference/health) | `health` | JSON | 4 |
-| 37 | [IAM](/reference/iam) | `iam` | Query | 109 |
-| 38 | [Kinesis Data Streams](/reference/kinesis) | `kinesis` | JSON | 29 |
-| 39 | [KMS](/reference/kms) | `kms` | JSON | 25 |
-| 40 | [Lambda](/reference/lambda) | `lambda` | REST/JSON | 42 |
-| 41 | [CloudWatch Logs](/reference/logs) | `logs` | JSON | 16 |
-| 42 | [CloudWatch](/reference/monitoring) | `monitoring` | CBOR / JSON / Query | 18 |
-| 43 | [MSK](/reference/msk) | `msk` | REST/JSON | 9 |
-| 44 | [HealthOmics](/reference/omics) | `omics` | REST/JSON | 5 |
-| 45 | [OpenSearch](/reference/opensearch) | `opensearch` | REST/JSON | 0 |
-| 46 | [Organizations](/reference/organizations) | `organizations` | JSON | 39 |
-| 47 | [Price List Query API](/reference/pricing) | `pricing` | JSON | 3 |
-| 48 | [QuickSight](/reference/quicksight) | `quicksight` | REST/JSON | 4 |
-| 49 | [RAM](/reference/ram) | `ram` | REST/JSON | 8 |
-| 50 | [RDS](/reference/rds) | `rds` | Query | 23 |
-| 51 | [Redshift](/reference/redshift) | `redshift` | Query | 10 |
-| 52 | [Redshift Data API](/reference/redshift-data) | `redshift-data` | JSON | 3 |
-| 53 | [Route 53](/reference/route53) | `route53` | REST/XML | 19 |
-| 54 | [S3](/reference/s3) | `s3` | REST/XML | 68 |
-| 55 | [SageMaker](/reference/sagemaker) | `sagemaker` | JSON | 10 |
-| 56 | [EventBridge Scheduler](/reference/scheduler) | `scheduler` | REST/JSON | 12 |
-| 57 | [Secrets Manager](/reference/secretsmanager) | `secretsmanager` | JSON | 16 |
-| 58 | [Cloud Map](/reference/servicediscovery) | `servicediscovery` | JSON | 26 |
-| 59 | [Service Quotas](/reference/servicequotas) | `servicequotas` | JSON | 9 |
-| 60 | [SES](/reference/ses) | `ses` | Query | 21 |
-| 61 | [SES v2](/reference/sesv2) | `sesv2` | REST/JSON | 5 |
-| 62 | [SNS](/reference/sns) | `sns` | Query | 18 |
-| 63 | [SQS](/reference/sqs) | `sqs` | JSON | 17 |
-| 64 | [SSM](/reference/ssm) | `ssm` | JSON | 15 |
-| 65 | [SSO / Identity Store](/reference/sso) | `sso` | JSON | 12 |
-| 66 | [Step Functions](/reference/states) | `states` | JSON | 18 |
-| 67 | [STS](/reference/sts) | `sts` | Query | 5 |
-| 68 | [Resource Groups Tagging](/reference/tagging) | `tagging` | JSON | 3 |
-| 69 | [Timestream](/reference/timestream) | `timestream` | JSON | 12 |
-| 70 | [Transfer Family](/reference/transfer) | `transfer` | JSON | 12 |
-| 71 | [WAFv2](/reference/wafv2) | `wafv2` | JSON | 13 |
+| 34 | [FIS](/reference/fis) | `fis` | REST/JSON | 17 |
+| 35 | [FSx](/reference/fsx) | `fsx` | JSON | 3 |
+| 36 | [Glue](/reference/glue) | `glue` | JSON | 33 |
+| 37 | [Health](/reference/health) | `health` | JSON | 4 |
+| 38 | [IAM](/reference/iam) | `iam` | Query | 109 |
+| 39 | [Kinesis Data Streams](/reference/kinesis) | `kinesis` | JSON | 29 |
+| 40 | [KMS](/reference/kms) | `kms` | JSON | 25 |
+| 41 | [Lambda](/reference/lambda) | `lambda` | REST/JSON | 42 |
+| 42 | [CloudWatch Logs](/reference/logs) | `logs` | JSON | 16 |
+| 43 | [CloudWatch](/reference/monitoring) | `monitoring` | CBOR / JSON / Query | 18 |
+| 44 | [MSK](/reference/msk) | `msk` | REST/JSON | 9 |
+| 45 | [HealthOmics](/reference/omics) | `omics` | REST/JSON | 5 |
+| 46 | [OpenSearch](/reference/opensearch) | `opensearch` | REST/JSON | 0 |
+| 47 | [Organizations](/reference/organizations) | `organizations` | JSON | 39 |
+| 48 | [Price List Query API](/reference/pricing) | `pricing` | JSON | 3 |
+| 49 | [QuickSight](/reference/quicksight) | `quicksight` | REST/JSON | 4 |
+| 50 | [RAM](/reference/ram) | `ram` | REST/JSON | 8 |
+| 51 | [RDS](/reference/rds) | `rds` | Query | 23 |
+| 52 | [Redshift](/reference/redshift) | `redshift` | Query | 10 |
+| 53 | [Redshift Data API](/reference/redshift-data) | `redshift-data` | JSON | 3 |
+| 54 | [Route 53](/reference/route53) | `route53` | REST/XML | 19 |
+| 55 | [S3](/reference/s3) | `s3` | REST/XML | 68 |
+| 56 | [SageMaker](/reference/sagemaker) | `sagemaker` | JSON | 10 |
+| 57 | [EventBridge Scheduler](/reference/scheduler) | `scheduler` | REST/JSON | 12 |
+| 58 | [Secrets Manager](/reference/secretsmanager) | `secretsmanager` | JSON | 16 |
+| 59 | [Cloud Map](/reference/servicediscovery) | `servicediscovery` | JSON | 26 |
+| 60 | [Service Quotas](/reference/servicequotas) | `servicequotas` | JSON | 9 |
+| 61 | [SES](/reference/ses) | `ses` | Query | 21 |
+| 62 | [SES v2](/reference/sesv2) | `sesv2` | REST/JSON | 5 |
+| 63 | [SNS](/reference/sns) | `sns` | Query | 18 |
+| 64 | [SQS](/reference/sqs) | `sqs` | JSON | 17 |
+| 65 | [SSM](/reference/ssm) | `ssm` | JSON | 15 |
+| 66 | [SSO / Identity Store](/reference/sso) | `sso` | JSON | 12 |
+| 67 | [Step Functions](/reference/states) | `states` | JSON | 18 |
+| 68 | [STS](/reference/sts) | `sts` | Query | 5 |
+| 69 | [Resource Groups Tagging](/reference/tagging) | `tagging` | JSON | 3 |
+| 70 | [Timestream](/reference/timestream) | `timestream` | JSON | 12 |
+| 71 | [Transfer Family](/reference/transfer) | `transfer` | JSON | 12 |
+| 72 | [WAFv2](/reference/wafv2) | `wafv2` | JSON | 13 |
 <!-- END GENERATED COVERAGE MATRIX -->
 
 ---

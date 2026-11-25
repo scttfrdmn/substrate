@@ -163,6 +163,12 @@ type EC2Instance struct {
 	// false, and its interfaces are synthesized from what it recorded; see
 	// [ec2LegacyInterfaces].
 	InterfacesStandalone bool `json:"interfaces_standalone,omitempty"`
+
+	// StateReason and StateTransitionReason are Instance's stateReason and reason for the most
+	// recent transition, recorded when another service made it (#1619) and cleared by a
+	// caller's own stop, start or terminate; see ec2_internal_actions.go.
+	StateReason           *EC2StateReason `json:"state_reason,omitempty"`
+	StateTransitionReason string          `json:"state_transition_reason,omitempty"`
 }
 
 // EC2NetworkInterface is one interface attached to an instance at launch, from a

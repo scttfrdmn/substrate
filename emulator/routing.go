@@ -322,6 +322,13 @@ var pluginRouting = map[string]PluginRouting{
 		SigningNames: []string{"firehose"},
 		Source:       "botocore firehose service-2.json",
 	},
+	"fis": {
+		Display:      "FIS",
+		Protocol:     "REST/JSON",
+		Hosts:        []string{"fis.us-east-1.amazonaws.com"},
+		SigningNames: []string{"fis"},
+		Source:       "botocore fis service-2.json",
+	},
 	"fsx": {
 		Display:      "FSx",
 		Protocol:     "JSON",

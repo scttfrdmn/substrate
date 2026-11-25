@@ -98,6 +98,8 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	// #1613.
 	"AWS::Events::EventBus": (*StackDeployer).updateEventsEventBus,
 	"AWS::Events::Rule":     (*StackDeployer).updateEventsRule,
+	// #1619.
+	"AWS::FIS::ExperimentTemplate": (*StackDeployer).updateFISExperimentTemplate,
 	// An alias the CDK points at a new currentVersion on each code change (#1613).
 	"AWS::Lambda::Alias": (*StackDeployer).updateLambdaAlias,
 	// The identity providers (#1613); their Url and Name are Replacement.

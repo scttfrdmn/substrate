@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 71 plugins, 1312 routed operations.
+// 72 plugins, 1329 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -702,6 +702,25 @@ var routedOperations = map[string][]string{
 		"ListDeliveryStreams",
 		"PutRecord",
 		"PutRecordBatch",
+	},
+	"fis": {
+		"CreateExperimentTemplate",
+		"DeleteExperimentTemplate",
+		"GetAction",
+		"GetExperiment",
+		"GetExperimentTemplate",
+		"GetTargetResourceType",
+		"ListActions",
+		"ListExperimentResolvedTargets",
+		"ListExperimentTemplates",
+		"ListExperiments",
+		"ListTagsForResource",
+		"ListTargetResourceTypes",
+		"StartExperiment",
+		"StopExperiment",
+		"TagResource",
+		"UntagResource",
+		"UpdateExperimentTemplate",
 	},
 	"fsx": {
 		"CreateFileSystem",

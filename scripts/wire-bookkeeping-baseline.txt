@@ -265,6 +265,10 @@ emulator/eventstore.go	Event	AccountID	account_id
 emulator/eventstore.go	Event	Region	region
 emulator/firehose_types.go	FirehoseDeliveryStream	AccountID	AccountId
 emulator/firehose_types.go	FirehoseDeliveryStream	Region	Region
+emulator/fis_types.go	FISExperiment	AccountID	account_id
+emulator/fis_types.go	FISExperiment	Region	region
+emulator/fis_types.go	FISTemplate	AccountID	account_id
+emulator/fis_types.go	FISTemplate	Region	region
 emulator/fsx_plugin.go	FSxFileSystem	AccountID	account_id
 emulator/fsx_plugin.go	FSxFileSystem	Region	region
 emulator/glue_types.go	GlueConnection	AccountID	AccountID

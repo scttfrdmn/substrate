@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Application Auto Scaling: new plugin for scalable targets, scaling policies, scheduled actions and tags, recorded without scaling; target tracking policies create their CloudWatch alarms (#1614).
 - CloudFormation: `AWS::ApplicationAutoScaling::ScalableTarget` and `::ScalingPolicy`, so the CDK's DynamoDB autoscaling app deploys in strict mode (#1661).
 - EC2: network interfaces are resources, with `CreateNetworkInterface`, `AttachNetworkInterface`, `DetachNetworkInterface`, `DeleteNetworkInterface`, `ModifyNetworkInterfaceAttribute`, a primary interface per instance, and `network-interface` tags (#1522).
+- FIS: new plugin; experiments run on the simulated clock, stop, terminate and Spot-interrupt EC2 instances, and end in a seeded state at `/v1/fis/experiment-result` (#1619).
 
 ### Fixed
 
