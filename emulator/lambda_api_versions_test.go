@@ -196,6 +196,18 @@ func TestLambdaOperationNameIsResolvedFromTheAPIVersion(t *testing.T) {
 			wantOp: "PutFunctionEventInvokeConfig", wantName: "fn"},
 		{name: "event-invoke-config under the functions date", method: http.MethodPut,
 			path: "/2015-03-31/functions/fn/event-invoke-config", wantOp: "Unknown"},
+		{name: "get an event-invoke-config", method: http.MethodGet,
+			path: "/2019-09-25/functions/fn/event-invoke-config", wantOp: "GetFunctionEventInvokeConfig", wantName: "fn"},
+		{name: "update an event-invoke-config", method: http.MethodPost,
+			path: "/2019-09-25/functions/fn/event-invoke-config", wantOp: "UpdateFunctionEventInvokeConfig", wantName: "fn"},
+		{name: "delete an event-invoke-config", method: http.MethodDelete,
+			path: "/2019-09-25/functions/fn/event-invoke-config", wantOp: "DeleteFunctionEventInvokeConfig", wantName: "fn"},
+		{name: "list event-invoke-configs", method: http.MethodGet,
+			path: "/2019-09-25/functions/fn/event-invoke-config/list", wantOp: "ListFunctionEventInvokeConfigs", wantName: "fn"},
+		{name: "list event-invoke-configs takes GET only", method: http.MethodPost,
+			path: "/2019-09-25/functions/fn/event-invoke-config/list", wantOp: "Unknown"},
+		{name: "event-invoke-config takes no PATCH", method: http.MethodPatch,
+			path: "/2019-09-25/functions/fn/event-invoke-config", wantOp: "Unknown"},
 		// The layer family (#1272), all under 2018-10-31.
 		{name: "publish a layer version", method: http.MethodPost,
 			path: "/2018-10-31/layers/lib/versions", wantOp: "PublishLayerVersion", wantName: "lib"},
@@ -369,7 +381,9 @@ func TestLambdaAuthzQualifierParamIsTheQualifiedARN(t *testing.T) {
 		// function, so the parameter cannot step around a Deny on it.
 		{name: "UpdateFunctionCode ignores it", method: "PUT", path: "/2015-03-31/functions/fn/code", qualifier: "x", want: fn},
 		{name: "UpdateFunctionConfiguration ignores it", method: "PUT", path: "/2015-03-31/functions/fn/configuration", qualifier: "x", want: fn},
-		{name: "PutFunctionEventInvokeConfig ignores it", method: "PUT", path: "/2019-09-25/functions/fn/event-invoke-config", qualifier: "x", want: fn},
+		{name: "PutFunctionEventInvokeConfig takes it", method: "PUT", path: "/2019-09-25/functions/fn/event-invoke-config", qualifier: "x", want: fn + ":x"},
+		{name: "GetFunctionEventInvokeConfig takes it", method: "GET", path: "/2019-09-25/functions/fn/event-invoke-config", qualifier: "x", want: fn + ":x"},
+		{name: "ListFunctionEventInvokeConfigs ignores it", method: "GET", path: "/2019-09-25/functions/fn/event-invoke-config/list", qualifier: "x", want: fn},
 		{name: "GetFunctionCodeSigningConfig ignores it", method: "GET", path: "/2020-06-30/functions/fn/code-signing-config", qualifier: "x", want: fn},
 		{name: "PublishVersion ignores it", method: "POST", path: "/2015-03-31/functions/fn/versions", qualifier: "x", want: fn},
 	}
@@ -420,7 +434,7 @@ func TestLambdaAuthzQualifierCannotBypassADenyOnTheFunction(t *testing.T) {
 	t.Parallel()
 	const fn = "arn:aws:lambda:us-east-1:123456789012:function:fn"
 	denied := []string{"lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration",
-		"lambda:PutFunctionEventInvokeConfig", "lambda:GetFunctionCodeSigningConfig"}
+		"lambda:ListFunctionEventInvokeConfigs", "lambda:GetFunctionCodeSigningConfig"}
 	doc := emulator.PolicyDocument{Version: "2012-10-17", Statement: []emulator.PolicyStatement{
 		{Effect: "Allow", Action: emulator.StringOrSlice{"lambda:*"}, Resource: emulator.StringOrSlice{"*"}},
 		{Effect: "Deny", Action: emulator.StringOrSlice(denied), Resource: emulator.StringOrSlice{fn}},
@@ -430,7 +444,7 @@ func TestLambdaAuthzQualifierCannotBypassADenyOnTheFunction(t *testing.T) {
 	cases := []struct{ op, method, path string }{
 		{"UpdateFunctionCode", http.MethodPut, "/2015-03-31/functions/fn/code"},
 		{"UpdateFunctionConfiguration", http.MethodPut, "/2015-03-31/functions/fn/configuration"},
-		{"PutFunctionEventInvokeConfig", http.MethodPut, "/2019-09-25/functions/fn/event-invoke-config"},
+		{"ListFunctionEventInvokeConfigs", http.MethodGet, "/2019-09-25/functions/fn/event-invoke-config/list"},
 		{"GetFunctionCodeSigningConfig", http.MethodGet, "/2020-06-30/functions/fn/code-signing-config"},
 	}
 	for _, tc := range cases {

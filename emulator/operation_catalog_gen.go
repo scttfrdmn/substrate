@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1223 routed operations.
+// 68 plugins, 1227 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -887,12 +887,14 @@ var routedOperations = map[string][]string{
 		"DeleteAlias",
 		"DeleteEventSourceMapping",
 		"DeleteFunction",
+		"DeleteFunctionEventInvokeConfig",
 		"DeleteLayerVersion",
 		"GetAlias",
 		"GetEventSourceMapping",
 		"GetFunction",
 		"GetFunctionCodeSigningConfig",
 		"GetFunctionConfiguration",
+		"GetFunctionEventInvokeConfig",
 		"GetLayerVersion",
 		"GetLayerVersionByArn",
 		"GetLayerVersionPolicy",
@@ -901,6 +903,7 @@ var routedOperations = map[string][]string{
 		"InvokeAsync",
 		"ListAliases",
 		"ListEventSourceMappings",
+		"ListFunctionEventInvokeConfigs",
 		"ListFunctions",
 		"ListLayerVersions",
 		"ListLayers",
@@ -917,6 +920,7 @@ var routedOperations = map[string][]string{
 		"UpdateEventSourceMapping",
 		"UpdateFunctionCode",
 		"UpdateFunctionConfiguration",
+		"UpdateFunctionEventInvokeConfig",
 	},
 	"logs": {
 		"AssociateKmsKey",

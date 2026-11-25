@@ -479,7 +479,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 	return all, nil
 }
 
-// scanLambdaFunctions lists the caller's functions.
+// scanLambdaFunctions lists the caller's functions and event-source mappings.
 //
 // Narrowed by both halves of the scope, because since #943 [lambdaFunctionStateKey] carries both:
 // the key was "function:{name}" until then and could not tell two callers' functions of one name
@@ -510,7 +510,9 @@ func (p *TaggingPlugin) scanLambdaFunctions(_ context.Context, reqCtx *RequestCo
 			everTagged:  fn.EverTagged,
 		})
 	}
-	return out, nil
+	// Event-source mappings, resource type lambda:event-source-mapping (#1660).
+	mappings, err := lambdaTaggedEventSourceMappings(goCtx, p.state, reqCtx.AccountID, reqCtx.Region)
+	return append(out, mappings...), err
 }
 
 // scanSQSQueues lists the caller's queues.

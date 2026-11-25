@@ -80,6 +80,17 @@ type LambdaFunction struct {
 	// False when the function was created via S3 reference (not directly uploaded).
 	ZipStored bool `json:"ZipStored,omitempty"`
 
+	// ImageConfig overrides the container image's settings; nil when the function sets none. It is
+	// answered as ImageConfigResponse for an image-packaged function.
+	ImageConfig *LambdaImageConfig `json:"ImageConfig,omitempty"`
+
+	// EphemeralStorageSize is EphemeralStorage.Size in MB, zero for the default 512.
+	EphemeralStorageSize int `json:"EphemeralStorageSize,omitempty"`
+
+	// LoggingConfig holds the members of the function's LoggingConfig that differ from the
+	// defaults; nil when all of them are defaults.
+	LoggingConfig *LambdaLoggingConfig `json:"LoggingConfig,omitempty"`
+
 	// EverTagged records that this function has carried a tag; see [taggingEverTagged] (#938).
 	EverTagged bool `json:"ever_tagged,omitempty"`
 }
@@ -116,16 +127,31 @@ type LambdaResourcePolicy struct {
 	Statement []LambdaPermissionStatement `json:"Statement"`
 }
 
-// LambdaEventInvokeConfig holds asynchronous invocation configuration for a function.
+// LambdaEventInvokeConfig holds the asynchronous invocation configuration of a function, version or
+// alias. It is recorded intent: substrate invokes nothing asynchronously, so nothing retries and no
+// destination receives a record.
 type LambdaEventInvokeConfig struct {
 	// FunctionName is the name of the Lambda function.
 	FunctionName string `json:"FunctionName"`
 
-	// MaximumRetryAttempts is the maximum number of retries for async invocations.
-	MaximumRetryAttempts int `json:"MaximumRetryAttempts"`
+	// Qualifier is the version or alias the configuration belongs to, empty for $LATEST.
+	Qualifier string `json:"Qualifier,omitempty"`
 
-	// MaximumEventAgeInSeconds is the maximum age for queued events in seconds.
-	MaximumEventAgeInSeconds int `json:"MaximumEventAgeInSeconds"`
+	// MaximumRetryAttempts is the maximum number of retries for async invocations, nil when unset.
+	MaximumRetryAttempts *int `json:"MaximumRetryAttempts,omitempty"`
+
+	// MaximumEventAgeInSeconds is the maximum age for queued events in seconds, nil when unset.
+	MaximumEventAgeInSeconds *int `json:"MaximumEventAgeInSeconds,omitempty"`
+
+	// OnSuccessDestination is DestinationConfig.OnSuccess.Destination, empty when unset.
+	OnSuccessDestination string `json:"OnSuccessDestination,omitempty"`
+
+	// OnFailureDestination is DestinationConfig.OnFailure.Destination, empty when unset.
+	OnFailureDestination string `json:"OnFailureDestination,omitempty"`
+
+	// LastModified is when the configuration was last written, on the simulated clock. A record
+	// written before #1685 carries none.
+	LastModified time.Time `json:"LastModified,omitzero"`
 }
 
 // lambdaFunctionARN constructs the ARN for a Lambda function.
@@ -188,6 +214,17 @@ func lambdaZipStateKey(accountID, region, name string) string {
 // lambdaInvokeConfigStateKey names the record one function's event-invoke configuration lives in.
 func lambdaInvokeConfigStateKey(accountID, region, name string) string {
 	return "function_invoke_config:" + accountID + "/" + region + "/" + name
+}
+
+// lambdaQualifiedInvokeConfigStateKey names the record the event-invoke configuration of one
+// version or alias lives in. An empty qualifier, or $LATEST, is the function's own,
+// [lambdaInvokeConfigStateKey]; the colon cannot appear in a function name, as for
+// [lambdaQualifiedPolicyStateKey].
+func lambdaQualifiedInvokeConfigStateKey(accountID, region, name, qualifier string) string {
+	if qualifier == "" || qualifier == lambdaLatestVersion {
+		return lambdaInvokeConfigStateKey(accountID, region, name)
+	}
+	return lambdaInvokeConfigStateKey(accountID, region, name) + ":" + qualifier
 }
 
 // LambdaFunctionVersion is a published version of a function: an immutable snapshot of the
