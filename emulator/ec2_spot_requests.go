@@ -68,6 +68,9 @@ var ec2SpotStatusMessages = map[string]string{
 	ec2SpotStatusPriceTooLow:          "Your maximum price is below the current Spot price.",
 	ec2SpotStatusBadParameters:        "One or more parameters for your Spot request are not valid.",
 	ec2SpotStatusScheduleExpired:      "Your Spot request expired because it was not fulfilled before the specified date.",
+	// The two an experiment's interruption records (#1619); see ec2_internal_actions.go.
+	ec2SpotStatusTerminatedByExperiment: "Spot Instance terminated by an AWS FIS experiment.",
+	ec2SpotStatusStoppedByExperiment:    "Spot Instance stopped by an AWS FIS experiment.",
 }
 
 // ec2SpotSeedableStatuses are the outcomes the control plane may seed: the two status codes
@@ -452,15 +455,19 @@ func (p *EC2Plugin) fulfillSpotRequest(
 // "is opened again" and is fulfilled again at once, since substrate models no capacity wait.
 // A seeded shortfall leaves it open with that status instead, and a replacement the launch
 // refuses — its AMI deregistered since, say — leaves it open with bad-parameters. A cancelled
-// request launches nothing, which is the reason a consumer cancels before terminating.
-func (p *EC2Plugin) onSpotInstanceTerminated(reqCtx *RequestContext, inst EC2Instance) error {
+// request launches nothing, which is the reason a consumer cancels before terminating. status is
+// the status code the request records — instance-terminated-by-user for a caller's termination —
+// and at the time of the termination, which that status carries.
+func (p *EC2Plugin) onSpotInstanceTerminated(reqCtx *RequestContext, inst EC2Instance, status string, at time.Time) error {
 	r, err := p.getSpotRequest(reqCtx, inst.SpotInstanceRequestID)
 	if err != nil || r == nil || r.InstanceID != inst.InstanceID {
 		return err
 	}
+	// The termination's status carries the termination's time; whether a replacement launches,
+	// and the launch with its fulfilled status, are the clock's reading now.
+	r.setStatus(status, at.UTC().Format(time.RFC3339))
 	nowTime := p.tc.Now().UTC()
 	now := nowTime.Format(time.RFC3339)
-	r.setStatus(ec2SpotStatusTerminatedByUser, now)
 	expired := false
 	if r.ValidUntil != "" {
 		if until, parseErr := time.Parse(time.RFC3339, r.ValidUntil); parseErr == nil && !nowTime.Before(until) {

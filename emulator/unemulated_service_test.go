@@ -58,10 +58,10 @@ func TestUnemulatedService_ErrorEnvelopeFollowsTheRequest(t *testing.T) {
 			wantCT:  "application/json",
 		},
 		{
-			name:    "FIS with no body is REST-JSON",
+			name:    "AppConfig with no body is REST-JSON",
 			method:  http.MethodGet,
-			path:    "/experiments",
-			headers: map[string]string{"Authorization": unemulatedAuth("fis")},
+			path:    "/applications",
+			headers: map[string]string{"Authorization": unemulatedAuth("appconfig")},
 			want:    restJSON,
 			wantCT:  "application/json",
 		},

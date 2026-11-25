@@ -425,6 +425,7 @@ func (p *TaggingPlugin) resourceDescriptors() []resourceDescriptor {
 		{typePrefix: "sns", scan: p.scanSNSTopics},
 		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
 		{typePrefix: "events", scan: p.taggingStateScan(ebListTaggedResources)},
+		{typePrefix: "fis", scan: p.taggingStateScan(fisListTaggedResources)},
 		{typePrefix: "ssm", scan: p.scanSSMParameters},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindLoadBalancer)},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindTargetGroup)},

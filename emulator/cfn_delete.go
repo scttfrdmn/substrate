@@ -86,6 +86,9 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::Backup::BackupPlan":      pathDeleter("backup", "/backup/plans/"),
 	"AWS::Backup::BackupSelection": backupSelectionDeleter,
 
+	// --- FIS (#1619) -----------------------------------------------------------------
+	"AWS::FIS::ExperimentTemplate": pathDeleter(fisNamespace, "/experimentTemplates/"),
+
 	// --- Transfer and CodeDeploy (#1203) ---------------------------------------
 	// These three were stubs until #1203. CodeDeploy's two deletes succeed for an absent
 	// resource, so they need no not-found code; Transfer's answers ResourceNotFoundException.

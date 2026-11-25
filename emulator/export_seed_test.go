@@ -12,3 +12,9 @@ func (ts *TestServer) RedirectSeedsForTest(tb testing.TB, state StateManager) {
 	ts.tb = tb
 	ts.state = state
 }
+
+// ControlPlaneStateForTest replaces the store ts's control-plane handlers write seeds to, so an
+// external test can see a seed endpoint report a failing store (#1619). The plugins keep theirs.
+func (ts *TestServer) ControlPlaneStateForTest(state StateManager) {
+	ts.srv.state = state
+}

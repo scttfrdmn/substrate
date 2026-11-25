@@ -145,6 +145,10 @@
       "apiVersion": "2015-08-04",
       "operations": 6
     },
+    "fis": {
+      "apiVersion": "2020-12-01",
+      "operations": 17
+    },
     "fsx": {
       "apiVersion": "2018-03-01",
       "operations": 3

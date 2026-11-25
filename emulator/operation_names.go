@@ -97,6 +97,9 @@ var operationResolvers = map[string]func(req *AWSRequest) string{
 		op, _, _ := parseEMRServerlessOperation(requestMethod(req), req.Path)
 		return op
 	},
+	"fis": func(req *AWSRequest) string {
+		return parseFISOperation(requestMethod(req), req.Path)
+	},
 	"msk": func(req *AWSRequest) string {
 		op, _ := parseKafkaOperation(requestMethod(req), req.Path)
 		return op

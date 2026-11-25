@@ -75,6 +75,13 @@ type EC2Plugin struct {
 	// sgMu and before tagMu: where sgMu is held too, sgMu is taken first, and a tag write naming a
 	// network interface takes it before tagMu ([EC2Plugin.lockTagWrite]).
 	addrMu sync.Mutex
+
+	// instMu serializes the read-check-write of an instance's state: TerminateInstances (and every
+	// internal termination), StopInstances, StartInstances, and another service's stop and start
+	// ([EC2Plugin.transitionInternally]), so a stop cannot write back an instance a concurrent
+	// termination ended (#1619). It is taken before every other lock here: a termination it guards
+	// settles interfaces under addrMu and may launch a Spot replacement, which takes sgMu.
+	instMu sync.Mutex
 }
 
 // Name returns the service name "ec2".
@@ -1194,6 +1201,11 @@ type ec2InstanceItem struct {
 	// `pending` from RunInstances and `applied` from DescribeInstances; see
 	// [ec2InstanceMetadataOptionsFor] for which members and why.
 	MetadataOptions *ec2InstanceMetadataOptionsXML `xml:"metadataOptions"`
+
+	// StateTransitionReason and StateReason are Instance's reason and stateReason, recorded by
+	// a transition another service made (see ec2_internal_actions.go) and omitted otherwise.
+	StateTransitionReason string              `xml:"reason,omitempty"`
+	StateReason           *ec2StateReasonItem `xml:"stateReason,omitempty"`
 }
 
 // ec2InstanceItemFor builds one instance's response item, shared by RunInstances and
@@ -1246,6 +1258,7 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 	// two describes of one instance report one id (#1291). The stored value is the name
 	// or ARN supplied; see ec2_instance_profile.go for what decides the id and the ARN.
 	item.IamInstanceProfile = p.ec2InstanceProfileItem(reqCtx, inst.IamInstanceProfile)
+	item.StateTransitionReason, item.StateReason = inst.StateTransitionReason, ec2StateReasonItemFor(inst)
 	// Echo launch-time tags (from TagSpecifications) — real EC2 populates tagSet in
 	// the RunInstances response, not just DescribeInstances (#351).
 	for _, t := range inst.Tags {
@@ -1574,6 +1587,16 @@ func (p *EC2Plugin) terminateForAutoScaling(reqCtx *RequestContext, ids []string
 // terminateInstanceIDs terminates ids, honoring termination protection when honorProtection
 // is set — always, for a TerminateInstances request.
 func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, honorProtection bool) (*AWSResponse, error) {
+	return p.terminateInstanceIDsBecause(reqCtx, ids, honorProtection, nil)
+}
+
+// terminateInstanceIDsBecause is [EC2Plugin.terminateInstanceIDs] recording why the instances
+// were terminated; nil records a caller's own termination (see ec2_internal_actions.go).
+func (p *EC2Plugin) terminateInstanceIDsBecause(
+	reqCtx *RequestContext, ids []string, honorProtection bool, why *ec2InternalTransition,
+) (*AWSResponse, error) {
+	p.instMu.Lock()
+	defer p.instMu.Unlock()
 	type stateChange struct {
 		InstanceID   string `xml:"instanceId"`
 		CurrentState struct {
@@ -1630,8 +1653,26 @@ func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, h
 			continue
 		}
 		prev := inst.State
+		if prev.Name == ec2StateTerminated {
+			// Already terminated: the record, its reasons, TerminatedTime and its countdown are
+			// left as the first termination wrote them, and only the settlement that termination
+			// may not have finished is repeated ([EC2Plugin.resettleTerminated]). Both states are
+			// the one a describe would report now, shutting-down while a seeded countdown runs,
+			// read without spending an observation.
+			if err := p.resettleTerminated(reqCtx, inst); err != nil {
+				return nil, err
+			}
+			seen := p.peekInstanceState(inst)
+			sc := stateChange{InstanceID: inst.InstanceID}
+			sc.CurrentState.Code, sc.CurrentState.Name = seen.Code, seen.Name
+			sc.PreviousState.Code, sc.PreviousState.Name = seen.Code, seen.Name
+			resp.Items = append(resp.Items, sc)
+			continue
+		}
+		at := why.when(p.tc.Now())
 		inst.State = EC2InstanceState{Code: 48, Name: ec2StateTerminated}
-		inst.TerminatedTime = p.tc.Now().UTC().Format(time.RFC3339)
+		inst.TerminatedTime = at.UTC().Format(time.RFC3339)
+		why.apply(&inst, at)
 		// The countdown restarts at the transition rather than at seed time, so a seeded instance
 		// that has already settled into `running` observes `shutting-down` from here (#514).
 		if err := p.resetInstanceObservations(inst.InstanceID); err != nil {
@@ -1644,12 +1685,11 @@ func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, h
 		if err := p.state.Put(context.Background(), ec2Namespace, keys[i], newData); err != nil {
 			return nil, fmt.Errorf("ec2 terminateInstances state.Put: %w", err)
 		}
-		// Its interfaces are deleted or detached and its addresses released (#1522, #1592),
-		// once: an instance already terminated settled them the first time.
-		if prev.Name != ec2StateTerminated {
-			if err := p.settleInstanceInterfaces(reqCtx, inst); err != nil {
-				return nil, err
-			}
+		// Its interfaces are deleted or detached and its addresses released (#1522, #1592). An
+		// instance already terminated took the branch above, which repeats this only when the
+		// first termination left an interface attached.
+		if err := p.settleInstanceInterfaces(reqCtx, inst); err != nil {
+			return nil, err
 		}
 		// Settle the instance's volumes: delete those whose attachment says to, and
 		// release the rest. A volume left in-use on a terminated instance would be a
@@ -1660,7 +1700,7 @@ func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, h
 		// A Spot Instance's request is settled — closed, or for an active persistent request a
 		// replacement launched — after the instance itself is written terminated (#1436).
 		if inst.SpotInstanceRequestID != "" {
-			if err := p.onSpotInstanceTerminated(reqCtx, inst); err != nil {
+			if err := p.onSpotInstanceTerminated(reqCtx, inst, why.spotTerminationStatus(), at); err != nil {
 				return nil, err
 			}
 		}
@@ -1689,6 +1729,8 @@ func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, h
 }
 
 func (p *EC2Plugin) stopInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	p.instMu.Lock()
+	defer p.instMu.Unlock()
 	ids := extractIndexedParams(req.Params, "InstanceId")
 	type stateChange struct {
 		InstanceID   string `xml:"instanceId"`
@@ -1725,6 +1767,7 @@ func (p *EC2Plugin) stopInstances(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 80, Name: ec2StateStopped}
+		ec2ClearStateReason(&inst)
 		newData, err := json.Marshal(inst)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 stopInstances marshal: %w", err)
@@ -1748,6 +1791,8 @@ func (p *EC2Plugin) stopInstances(reqCtx *RequestContext, req *AWSRequest) (*AWS
 }
 
 func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	p.instMu.Lock()
+	defer p.instMu.Unlock()
 	ids := extractIndexedParams(req.Params, "InstanceId")
 	type stateChange struct {
 		InstanceID   string `xml:"instanceId"`
@@ -1784,6 +1829,7 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 		prev := inst.State
 		inst.State = EC2InstanceState{Code: 16, Name: ec2StateRunning}
+		ec2ClearStateReason(&inst)
 		newData, err := json.Marshal(inst)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 startInstances marshal: %w", err)
@@ -1792,6 +1838,9 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 			return nil, fmt.Errorf("ec2 startInstances state.Put: %w", err)
 		}
 		if err := p.resetInstanceObservations(id); err != nil {
+			return nil, err
+		}
+		if err := p.onSpotInstanceStarted(reqCtx, inst); err != nil {
 			return nil, err
 		}
 		// `pending`, published as this operation's own `currentState` (code 0) (#514).

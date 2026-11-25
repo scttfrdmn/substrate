@@ -631,6 +631,10 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Post("/v1/autoscaling/launch-failure", s.handleAutoScalingSeedLaunchFailure)
 		cp.Delete("/v1/autoscaling/launch-failure", s.handleAutoScalingClearLaunchFailure)
 
+		// FIS experiment-result control-plane endpoints (#1619).
+		cp.Post("/v1/fis/experiment-result", s.handleFISSeedExperimentResult)
+		cp.Delete("/v1/fis/experiment-result", s.handleFISClearExperimentResult)
+
 		// ELB account-limit control-plane endpoints (#885).
 		cp.Post("/v1/elb/account-limits", s.handleELBSeedAccountLimit)
 		cp.Delete("/v1/elb/account-limits", s.handleELBClearAccountLimit)

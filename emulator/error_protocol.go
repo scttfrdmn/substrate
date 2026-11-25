@@ -216,6 +216,7 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	"efs":             errProtoRESTJSON,
 	"emrserverless":   errProtoRESTJSON,
 	"execute-api":     errProtoRESTJSON,
+	"fis":             errProtoRESTJSON,
 	"lambda":          errProtoRESTJSON,
 	"msk":             errProtoRESTJSON,
 	"omics":           errProtoRESTJSON,

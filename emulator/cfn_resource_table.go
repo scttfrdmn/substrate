@@ -195,6 +195,8 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	// v0.135.0 — DynamoDB and ECS autoscaling, which the CDK emits (#1661).
 	"AWS::ApplicationAutoScaling::ScalableTarget": (*StackDeployer).deployApplicationAutoScalingScalableTarget,
 	"AWS::ApplicationAutoScaling::ScalingPolicy":  (*StackDeployer).deployApplicationAutoScalingScalingPolicy,
+	// FIS experiment templates (#1619).
+	"AWS::FIS::ExperimentTemplate": (*StackDeployer).deployFISExperimentTemplate,
 }
 
 // cfnEmulatedType reports whether substrate's CloudFormation emulates a resource type.
