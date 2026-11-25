@@ -270,6 +270,7 @@ func (p *ApplicationAutoScalingPlugin) registerScalableTarget(ctx *RequestContex
 	} else if in.RoleARN != nil {
 		t.RoleARN = *in.RoleARN
 	}
+	oldMin, oldMax := t.MinCapacity, t.MaxCapacity
 	if in.MinCapacity != nil {
 		t.MinCapacity = *in.MinCapacity
 	}
@@ -279,6 +280,11 @@ func (p *ApplicationAutoScalingPlugin) registerScalableTarget(ctx *RequestContex
 	if t.MinCapacity > t.MaxCapacity {
 		return nil, aasValidation(fmt.Sprintf("Maximum capacity (%d) cannot be less than minimum capacity (%d).",
 			t.MaxCapacity, t.MinCapacity))
+	}
+	if found && (t.MinCapacity != oldMin || t.MaxCapacity != oldMax) {
+		if err := p.redefineTrackingAlarms(ctx, t, oldMin, oldMax); err != nil {
+			return nil, err
+		}
 	}
 	if s := in.SuspendedState; s != nil {
 		if t.SuspendedState == nil {
@@ -309,10 +315,15 @@ func (p *ApplicationAutoScalingPlugin) registerScalableTarget(ctx *RequestContex
 // registerScalableTarget). The other namespaces' resources are not emulated, or not checked, so
 // their targets register whatever they name. Without a registry nothing is checked.
 //
-// Only an answer that the resource is absent becomes the ValidationException; any other failure
-// of the owning plugin is returned as it is.
+// Only an answer that the resource is absent becomes the "doesn't exist" ValidationException. Any
+// other refusal of the owning plugin is a ValidationException too, in substrate's wording, so an
+// Application Auto Scaling caller sees an Application Auto Scaling code; an internal failure is
+// returned as it is. When the owning plugin is not registered, nothing is checked.
 func (p *ApplicationAutoScalingPlugin) checkResourceExists(ctx *RequestContext, namespace, resourceID string) error {
 	if p.registry == nil {
+		return nil
+	}
+	if _, ok := p.registry.Plugin(namespace); !ok {
 		return nil
 	}
 	switch namespace {
@@ -345,7 +356,8 @@ func (p *ApplicationAutoScalingPlugin) checkResourceExists(ctx *RequestContext, 
 }
 
 // aasRouteJSON sends a JSON request to another plugin. An AWS refusal whose code is in absent is
-// reported as found false; any other failure is returned.
+// reported as found false; any other refusal is a ValidationException, and an internal failure is
+// returned wrapped.
 func (p *ApplicationAutoScalingPlugin) aasRouteJSON(ctx *RequestContext, service, op, contentType string, body any,
 	absent ...string,
 ) ([]byte, bool, error) {
@@ -358,8 +370,12 @@ func (p *ApplicationAutoScalingPlugin) aasRouteJSON(ctx *RequestContext, service
 		Headers: map[string]string{"Content-Type": contentType}, Params: map[string]string{},
 	})
 	var awsErr *AWSError
-	if errors.As(err, &awsErr) && slices.Contains(absent, awsErr.Code) {
-		return nil, false, nil
+	if errors.As(err, &awsErr) {
+		if slices.Contains(absent, awsErr.Code) {
+			return nil, false, nil
+		}
+		// The message is substrate's own.
+		return nil, false, aasValidation(fmt.Sprintf("Unable to check the %s resource: %s", service, awsErr.Message))
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("application-autoscaling %s %s: %w", service, op, err)

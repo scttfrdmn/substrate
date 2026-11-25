@@ -29,7 +29,8 @@ table's provisioned throughput, a policy is never evaluated, and a scheduled act
 what Application Auto Scaling does to a resource is the workload, which is outside substrate's
 [scope](/scope). `DescribeScalingActivities` therefore always answers an empty list.
 
-A policy's configuration is stored as it was sent (compacted) and answered back by
+A policy that changes `PolicyType` keeps only the configuration the new type carries, so the new
+type's configuration is required. A policy's configuration is stored as it was sent (compacted) and answered back by
 `DescribeScalingPolicies`, which reports only the configuration the policy's type uses.
 
 ## A target tracking policy creates its CloudWatch alarms
@@ -42,7 +43,11 @@ guide). Substrate creates them through the CloudWatch plugin with `PutMetricAlar
 `DescribeAlarms` lists exactly the alarms the policy's `Alarms` member names, and deleting the
 policy or deregistering its target deletes them once the record no longer names them. A re-put of
 the policy keeps the names and redefines the alarms; changing the policy to another type deletes
-them. A `PutScalingPolicy` that fails after creating alarms deletes the ones it created.
+them. A `PutScalingPolicy` that fails after creating alarms deletes the ones it created, and one
+that fails while redefining a policy's alarms puts their previous definitions back. A change to a
+target's `MinCapacity` or `MaxCapacity` redefines its policies' alarms, so a DynamoDB target's
+provisioned-capacity alarms follow the range. An alarm's kind is read from the part of its name
+after `TargetTracking-{ResourceId}-`.
 
 The alarms' definitions are substrate's approximation, because AWS publishes their names and not
 their metric, threshold or evaluation settings. The high alarm breaches above `TargetValue` over 3
@@ -84,7 +89,9 @@ through the owning plugin: a new DynamoDB target's table (and index) must exist,
 `ValidationException` `DynamoDB resource doesn't exist: {ResourceId}`, and a new ECS target's service
 must be active, or it is `ValidationException` `ECS service doesn't exist: {ResourceId}`. The ECS
 message contains the phrase the Terraform AWS provider retries on; the rest of both messages is
-substrate's own. Targets in other namespaces register whatever they name.
+substrate's own. Any other refusal of the owning plugin is a `ValidationException` in substrate's
+wording. When the DynamoDB or ECS plugin is not registered, nothing is checked. Targets in other
+namespaces register whatever they name.
 
 ## A scalable target is reachable through the tagging API
 
@@ -108,8 +115,12 @@ return the policy ARN.
 
 Both underlying operations create or update. A stack's create refuses a target or policy that
 already exists rather than adopting it, so deleting the stack cannot deregister another owner's
-target (the reason is substrate's own). A change to a No interruption property updates the target or
-policy in place under the same physical ID, and a change to a Replacement property
+target (the reason is substrate's own); the policy the stack already holds under the logical ID is
+its own, so a replacement that keeps its name and target updates it in place. A change to a No
+interruption property updates the target or policy in place under the same physical ID: a target's
+`Tags` through `TagResource` and `UntagResource`, and a removed `SuspendedState` or `RoleARN` reset
+to every flag false and to the service-linked role. A target update whose scheduled actions fail
+deletes the actions it added. A change to a Replacement property
 (`ResourceId`, `ScalableDimension`, `ServiceNamespace`, and a policy's `PolicyName` or
 `ScalingTargetId`) replaces it. Deleting a stack deregisters the target, which deletes its policies.
 The CDK's DynamoDB `autoScaleReadCapacity`/`autoScaleWriteCapacity` output deploys in strict mode.

@@ -127,8 +127,12 @@ func (p *ApplicationAutoScalingPlugin) putScalingPolicy(ctx *RequestContext, req
 	if idx >= 0 {
 		pol = t.Policies[idx]
 	}
-	if in.PolicyType != "" {
+	stored := pol
+	if in.PolicyType != "" && in.PolicyType != pol.PolicyType {
+		// A policy that changes type carries only the new type's configuration: the stored
+		// configuration of the old type no longer describes it.
 		pol.PolicyType = in.PolicyType
+		pol.StepConfig, pol.TargetConfig, pol.Predictive = nil, nil, nil
 	}
 	if step != nil {
 		pol.StepConfig = step
@@ -164,6 +168,10 @@ func (p *ApplicationAutoScalingPlugin) putScalingPolicy(ctx *RequestContext, req
 		}
 		if err := p.putTrackingAlarms(ctx, t, pol); err != nil {
 			p.deleteAlarms(ctx, created)
+			if created == nil && stored.PolicyType == "TargetTrackingScaling" {
+				// A re-put that failed partway redefined some of the policy's alarms; put them back.
+				p.restoreTrackingAlarms(ctx, t, stored)
+			}
 			return nil, err
 		}
 	} else if len(pol.Alarms) > 0 {
@@ -310,7 +318,7 @@ func (p *ApplicationAutoScalingPlugin) putTrackingAlarms(ctx *RequestContext, t 
 			float64(t.MinCapacity), aasTargetDimensions(t)},
 	}
 	for _, alarm := range pol.Alarms {
-		spec, ok := specs[aasAlarmKind(alarm.AlarmName)]
+		spec, ok := specs[aasAlarmKind(t, alarm.AlarmName)]
 		if !ok {
 			continue
 		}
@@ -343,14 +351,45 @@ func (p *ApplicationAutoScalingPlugin) putTrackingAlarms(ctx *RequestContext, t 
 	return nil
 }
 
-// aasAlarmKind returns which of [aasAlarmSuffixes] an alarm name carries.
-func aasAlarmKind(name string) string {
-	for _, kind := range []string{"ProvisionedCapacityHigh", "ProvisionedCapacityLow", "AlarmHigh", "AlarmLow"} {
-		if strings.Contains(name, "-"+kind+"-") {
-			return kind
+// aasAlarmKind returns which of [aasAlarmSuffixes] an alarm of target t carries, read from the
+// part of the name after "TargetTracking-{ResourceId}-" and before the 36-character UUID, so a
+// resource ID that itself contains a suffix's text cannot be mistaken for one.
+func aasAlarmKind(t *aasTarget, name string) string {
+	rest, ok := strings.CutPrefix(name, "TargetTracking-"+t.ResourceID+"-")
+	if !ok || len(rest) < 38 || rest[len(rest)-37] != '-' {
+		return ""
+	}
+	return rest[:len(rest)-37]
+}
+
+// restoreTrackingAlarms puts back the definitions pol's alarms had before a failed re-put. It is
+// best effort: the request is already failing with the error that caused it.
+func (p *ApplicationAutoScalingPlugin) restoreTrackingAlarms(ctx *RequestContext, t *aasTarget, pol aasPolicy) {
+	if err := p.putTrackingAlarms(ctx, t, pol); err != nil && p.logger != nil {
+		p.logger.Warn("application-autoscaling: restore policy alarms", "policy", pol.PolicyName, "error", err)
+	}
+}
+
+// redefineTrackingAlarms re-puts the alarms of t's target tracking policies after its capacity range
+// changed, because a DynamoDB target's provisioned-capacity alarms are defined on it. If one fails,
+// the alarms already redefined are put back on the old range and the error is returned.
+func (p *ApplicationAutoScalingPlugin) redefineTrackingAlarms(ctx *RequestContext, t *aasTarget, oldMin, oldMax int32) error {
+	for i, pol := range t.Policies {
+		if pol.PolicyType != "TargetTrackingScaling" || len(pol.Alarms) == 0 {
+			continue
+		}
+		if err := p.putTrackingAlarms(ctx, t, pol); err != nil {
+			old := *t
+			old.MinCapacity, old.MaxCapacity = oldMin, oldMax
+			for _, done := range t.Policies[:i+1] {
+				if done.PolicyType == "TargetTrackingScaling" {
+					p.restoreTrackingAlarms(ctx, &old, done)
+				}
+			}
+			return err
 		}
 	}
-	return ""
+	return nil
 }
 
 // aasTargetDimensions returns the CloudWatch dimensions that identify t's resource for the metrics

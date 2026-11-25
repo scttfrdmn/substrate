@@ -47,7 +47,9 @@ func cfnAASRequest(operation string, body map[string]interface{}) (*AWSRequest, 
 
 // cfnAASTargetBody renders the RegisterScalableTarget body a declaration describes. Tags are sent
 // only on a create, because RegisterScalableTarget ignores them on an update ("To tag an existing
-// scalable target, use the TagResource operation").
+// scalable target, use the TagResource operation"). On an update (withTags false), a SuspendedState
+// or RoleARN the previous declaration set and this one removes is reset — every flag false, and the
+// namespace's service-linked role — because RegisterScalableTarget leaves an omitted member as it was.
 func cfnAASTargetBody(props map[string]interface{}, cctx *cfnContext, namespace, dimension, resourceID string, withTags bool) map[string]interface{} {
 	body := map[string]interface{}{
 		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
@@ -66,7 +68,43 @@ func cfnAASTargetBody(props map[string]interface{}, cctx *cfnContext, namespace,
 	if tags := cfnTagMap(cfnResolveStructured(props["Tags"], cctx), cctx); withTags && len(tags) > 0 {
 		body["Tags"] = tags
 	}
+	if !withTags && cctx.priorProps != nil {
+		if _, had := cctx.priorProps["SuspendedState"]; had && body["SuspendedState"] == nil {
+			body["SuspendedState"] = map[string]interface{}{
+				"DynamicScalingInSuspended": false, "DynamicScalingOutSuspended": false, "ScheduledScalingSuspended": false,
+			}
+		}
+		if _, had := cctx.priorProps["RoleARN"]; had && body["RoleARN"] == nil {
+			if role := aasServiceLinkedRoleARN(cctx.accountID, namespace); role != "" {
+				body["RoleARN"] = role
+			}
+		}
+	}
 	return body
+}
+
+// cfnAASTagDiff returns the tags to add and the keys to remove to take a target from the previous
+// declaration's Tags to this one's.
+func cfnAASTagDiff(props map[string]interface{}, cctx *cfnContext) (map[string]string, []string) {
+	now := cfnTagMap(cfnResolveStructured(props["Tags"], cctx), cctx)
+	var before map[string]string
+	if cctx.priorProps != nil {
+		before = cfnTagMap(cfnResolveStructured(cctx.priorProps["Tags"], cctx), cctx)
+	}
+	add := map[string]string{}
+	for k, v := range now {
+		if old, ok := before[k]; !ok || old != v {
+			add[k] = v
+		}
+	}
+	var remove []string
+	for k := range before {
+		if _, ok := now[k]; !ok {
+			remove = append(remove, k)
+		}
+	}
+	sort.Strings(remove)
+	return add, remove
 }
 
 // cfnAASCall dispatches an Application Auto Scaling request and decodes its answer into out, which
@@ -176,15 +214,69 @@ func (d *StackDeployer) updateApplicationAutoScalingScalableTarget(
 		dr.Error = err.Error()
 		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
 	}
+	if add, remove := cfnAASTagDiff(props, cctx); prior.ARN != "" && (len(add) > 0 || len(remove) > 0) {
+		if len(add) > 0 {
+			c, err := d.cfnAASCall(ctx, "TagResource", map[string]interface{}{"ResourceARN": prior.ARN, "Tags": add}, nil, streamID)
+			cost += c
+			if err != nil {
+				dr.Error = err.Error()
+				return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+			}
+		}
+		if len(remove) > 0 {
+			c, err := d.cfnAASCall(ctx, "UntagResource", map[string]interface{}{"ResourceARN": prior.ARN, "TagKeys": remove}, nil, streamID)
+			cost += c
+			if err != nil {
+				dr.Error = err.Error()
+				return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+			}
+		}
+	}
 	previous, _ := cfnMetadataList(prior, "ScheduledActionNames")
 	names, c, err := d.syncScheduledActions(ctx, props, namespace, dimension, resourceID, previous, streamID, cctx)
 	cost += c
 	if err != nil {
+		// The actions this update added are deleted again, so the rollback — which re-applies the
+		// previous declaration — finds only the actions that declaration names. The record keeps
+		// the union, so any of them this cleanup could not delete is still the stack's to delete.
+		had := map[string]bool{}
+		for _, n := range previous {
+			had[n] = true
+		}
+		var left []string
+		for _, n := range names {
+			if had[n] {
+				continue
+			}
+			c, delErr := d.cfnAASCall(ctx, "DeleteScheduledAction", map[string]interface{}{
+				"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID,
+				"ScheduledActionName": n,
+			}, nil, streamID)
+			cost += c
+			if delErr != nil && !cfnDeleteIsAbsent(delErr) {
+				left = append(left, n)
+			}
+		}
+		dr.Metadata["ScheduledActionNames"] = cfnAASUnion(previous, left)
 		dr.Error = err.Error()
 		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
 	}
 	dr.Metadata["ScheduledActionNames"] = names
 	return dr, cost, nil
+}
+
+// cfnAASUnion returns the sorted, deduplicated union of two name lists.
+func cfnAASUnion(a, b []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range append(append([]string{}, a...), b...) {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // syncScheduledActions puts each ScheduledActions entry on the target, and deletes the actions the
@@ -314,14 +406,23 @@ func (d *StackDeployer) deployApplicationAutoScalingScalingPolicy(
 	dr.Metadata = map[string]interface{}{
 		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID, "PolicyName": name,
 	}
-	exists, cost, err := d.cfnAASListed(ctx, "DescribeScalingPolicies", "ScalingPolicies", map[string]interface{}{
+	var listed struct {
+		ScalingPolicies []struct {
+			PolicyARN string `json:"PolicyARN"`
+		} `json:"ScalingPolicies"`
+	}
+	cost, err := d.cfnAASCall(ctx, "DescribeScalingPolicies", map[string]interface{}{
 		"ServiceNamespace": namespace, "ScalableDimension": dimension, "ResourceId": resourceID, "PolicyNames": []string{name},
-	}, streamID)
+	}, &listed, streamID)
 	if err != nil {
 		dr.Error = err.Error()
 		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
 	}
-	if exists {
+	// The policy this stack already holds under the logical ID is its own: a replacement that keeps
+	// the policy's name and target — a ScalingTargetId swapped for the explicit three members — is
+	// the same policy, updated in place.
+	own := len(listed.ScalingPolicies) == 1 && cctx.priorPhysicalID != "" && listed.ScalingPolicies[0].PolicyARN == cctx.priorPhysicalID
+	if len(listed.ScalingPolicies) > 0 && !own {
 		dr.Error = fmt.Sprintf("scaling policy %s already exists on %s", name, cfnScalableTargetID(resourceID, dimension, namespace))
 		return dr, cost, nil
 	}

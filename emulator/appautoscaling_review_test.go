@@ -211,4 +211,147 @@ func TestApplicationAutoScaling_FailuresUndoAndPassThrough(t *testing.T) {
 	var awsErr *emulator.AWSError
 	assert.False(t, errors.As(err, &awsErr), "a store failure is not a ValidationException: %v", err)
 	assert.Error(t, err)
+
+	// Without a DynamoDB plugin there is nothing to ask, and the target registers.
+	p := &emulator.ApplicationAutoScalingPlugin{}
+	registry = emulator.NewPluginRegistry()
+	require.NoError(t, p.Initialize(context.Background(), emulator.PluginConfig{State: emulator.NewMemoryStateManager(),
+		Logger:  emulator.NewDefaultLogger(slog.LevelError, false),
+		Options: map[string]any{"time_controller": emulator.NewTimeController(time.Unix(1_800_000_000, 0)), "registry": registry}}))
+	registry.Register(p)
+	_, err = registry.RouteRequest(&emulator.RequestContext{RequestID: "req-x", AccountID: "123456789012", Region: "us-east-1",
+		IDs: emulator.NewIDMint("req-x")}, &emulator.AWSRequest{Service: "application-autoscaling", Operation: "RegisterScalableTarget",
+		Body:    []byte(`{"ServiceNamespace":"dynamodb","ResourceId":"table/x","ScalableDimension":"dynamodb:table:ReadCapacityUnits","MinCapacity":1,"MaxCapacity":2}`),
+		Headers: map[string]string{}, Params: map[string]string{}})
+	assert.NoError(t, err)
+}
+
+// TestCFN_ApplicationAutoScalingUpdates pins the updater: a Tags-only change, a removed
+// SuspendedState and RoleARN reset, a failed scheduled-action sync whose rollback removes what it
+// put, and a policy replacement that keeps its name and target updating in place.
+func TestCFN_ApplicationAutoScalingUpdates(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	tmpl := func(extra, actions, policyTarget string) string {
+		return `{"Resources":{"T":{"Type":"AWS::ApplicationAutoScaling::ScalableTarget","Properties":{"ServiceNamespace":"custom-resource",
+			"ScalableDimension":"custom-resource:ResourceType:Property","ResourceId":"upd","MinCapacity":0,"MaxCapacity":2` + extra + `,
+			"ScheduledActions":[` + actions + `]}},
+			"P":{"Type":"AWS::ApplicationAutoScaling::ScalingPolicy","DependsOn":"T","Properties":{"PolicyName":"p","PolicyType":"StepScaling",` + policyTarget + `,
+			"StepScalingPolicyConfiguration":{"AdjustmentType":"ChangeInCapacity"}}}},
+			"Outputs":{"Policy":{"Value":{"Ref":"P"}}}}`
+	}
+	byRef := `"ScalingTargetId":{"Ref":"T"}`
+	explicit := `"ServiceNamespace":"custom-resource","ScalableDimension":"custom-resource:ResourceType:Property","ResourceId":"upd"`
+	a := `{"ScheduledActionName":"a","Schedule":"rate(1 day)"}`
+	update := func(body, want string) {
+		t.Helper()
+		code, out := cfnStrictCall(t, ts, "UpdateStack", map[string]string{"StackName": "upd", "TemplateBody": body})
+		require.Equal(t, http.StatusOK, code, out)
+		status, reason := cfnStackStatusOf(t, ts, "upd")
+		require.Equal(t, want, status, reason)
+	}
+	target := func() map[string]any {
+		got := aasOK(t, ts, "DescribeScalableTargets", map[string]any{"ServiceNamespace": "custom-resource"})["ScalableTargets"].([]any)
+		require.Len(t, got, 1)
+		return got[0].(map[string]any)
+	}
+	actionNames := func() []string {
+		var names []string
+		for _, act := range aasOK(t, ts, "DescribeScheduledActions", map[string]any{"ServiceNamespace": "custom-resource"})["ScheduledActions"].([]any) {
+			names = append(names, act.(map[string]any)["ScheduledActionName"].(string))
+		}
+		return names
+	}
+
+	code, body := cfnStrictCall(t, ts, "CreateStack", map[string]string{"StackName": "upd", "TemplateBody": tmpl(
+		`,"Tags":[{"Key":"a","Value":"1"}],"SuspendedState":{"DynamicScalingInSuspended":true},"RoleARN":"arn:aws:iam::123456789012:role/custom"`,
+		a, byRef)})
+	require.Equal(t, http.StatusOK, code, body)
+	status, reason := cfnStackStatusOf(t, ts, "upd")
+	require.Equal(t, "CREATE_COMPLETE", status, reason)
+	arn := target()["ScalableTargetARN"].(string)
+	policyARN := cfnStackOutput(t, ts, "upd", "Policy")
+
+	// Tags change on their own; SuspendedState and RoleARN removed are reset.
+	update(tmpl(`,"Tags":[{"Key":"b","Value":"2"}]`, a, byRef), "UPDATE_COMPLETE")
+	assert.Equal(t, map[string]any{"b": "2"}, aasOK(t, ts, "ListTagsForResource", map[string]any{"ResourceARN": arn})["Tags"])
+	got := target()
+	assert.Equal(t, false, got["SuspendedState"].(map[string]any)["DynamicScalingInSuspended"])
+	assert.Contains(t, got["RoleARN"], "AWSServiceRoleForApplicationAutoScaling_CustomResource")
+
+	// A sync that fails partway rolls back, and the rollback removes the action it had put.
+	update(tmpl(`,"Tags":[{"Key":"b","Value":"2"}]`, a+`,{"ScheduledActionName":"b","Schedule":"rate(2 days)"},{"ScheduledActionName":"c","Schedule":"never"}`, byRef),
+		"UPDATE_ROLLBACK_COMPLETE")
+	assert.ElementsMatch(t, []string{"a"}, actionNames())
+
+	// ScalingTargetId swapped for the explicit three members names the same policy: it updates in
+	// place, keeping its ARN, rather than being refused as one that already exists.
+	update(tmpl(`,"Tags":[{"Key":"b","Value":"2"}]`, a, explicit), "UPDATE_COMPLETE")
+	assert.Equal(t, policyARN, cfnStackOutput(t, ts, "upd", "Policy"))
+	assert.Len(t, aasOK(t, ts, "DescribeScalingPolicies", map[string]any{"ServiceNamespace": "custom-resource"})["ScalingPolicies"], 1)
+}
+
+// TestApplicationAutoScaling_AlarmsFollowTheTarget pins that a capacity change redefines a DynamoDB
+// policy's provisioned-capacity alarms, that an alarm's kind is read from its suffix even when the
+// resource ID contains a kind's text, and that a policy changing type keeps only the new type's
+// configuration.
+func TestApplicationAutoScaling_AlarmsFollowTheTarget(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	aasCreateTable(t, ts, "cap", "")
+	ref := map[string]any{"ServiceNamespace": "dynamodb", "ResourceId": "table/cap", "ScalableDimension": "dynamodb:table:WriteCapacityUnits"}
+	with := func(extra map[string]any) map[string]any {
+		m := map[string]any{}
+		for k, v := range ref {
+			m[k] = v
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	aasOK(t, ts, "RegisterScalableTarget", with(map[string]any{"MinCapacity": 1, "MaxCapacity": 10}))
+	alarms := aasOK(t, ts, "PutScalingPolicy", with(map[string]any{"PolicyName": "w", "PolicyType": "TargetTrackingScaling",
+		"TargetTrackingScalingPolicyConfiguration": map[string]any{"TargetValue": 50,
+			"PredefinedMetricSpecification": map[string]string{"PredefinedMetricType": "DynamoDBWriteCapacityUtilization"}}}))["Alarms"].([]any)
+	high := alarms[2].(map[string]any)["AlarmName"].(string)
+	threshold := func(name string) string {
+		_, body := singleAccountQuery(t, ts, "monitoring", "", map[string]string{"Action": "DescribeAlarms", "Version": "2010-08-01",
+			"AlarmNames.member.1": name})
+		i := strings.Index(body, "<Threshold>")
+		require.Positive(t, i, body)
+		rest := body[i+len("<Threshold>"):]
+		return strings.TrimSuffix(rest[:strings.Index(rest, "</Threshold>")], ".0")
+	}
+	assert.Equal(t, "10", threshold(high))
+	aasOK(t, ts, "RegisterScalableTarget", with(map[string]any{"MaxCapacity": 20}))
+	assert.Equal(t, "20", threshold(high), "the provisioned-capacity alarm follows MaxCapacity")
+
+	// A resource ID holding a kind's text does not confuse the alarm kinds.
+	odd := map[string]any{"ServiceNamespace": "custom-resource", "ResourceId": "x-AlarmLow-y",
+		"ScalableDimension": "custom-resource:ResourceType:Property"}
+	reg := map[string]any{"MinCapacity": 0, "MaxCapacity": 2}
+	pol := map[string]any{"PolicyName": "t", "PolicyType": "TargetTrackingScaling", "TargetTrackingScalingPolicyConfiguration": map[string]any{
+		"TargetValue": 40, "PredefinedMetricSpecification": map[string]string{"PredefinedMetricType": "X"}}}
+	for k, v := range odd {
+		reg[k], pol[k] = v, v
+	}
+	aasOK(t, ts, "RegisterScalableTarget", reg)
+	oddAlarms := aasOK(t, ts, "PutScalingPolicy", pol)["Alarms"].([]any)
+	require.Len(t, oddAlarms, 2)
+	assert.Equal(t, "40", threshold(oddAlarms[0].(map[string]any)["AlarmName"].(string)), "AlarmHigh breaches at the target")
+
+	// Step to tracking and back: the step configuration did not survive the change.
+	step := map[string]any{"PolicyName": "s", "PolicyType": "StepScaling", "StepScalingPolicyConfiguration": map[string]any{"AdjustmentType": "ChangeInCapacity"}}
+	for k, v := range odd {
+		step[k] = v
+	}
+	aasOK(t, ts, "PutScalingPolicy", step)
+	step["PolicyType"] = "TargetTrackingScaling"
+	delete(step, "StepScalingPolicyConfiguration")
+	step["TargetTrackingScalingPolicyConfiguration"] = pol["TargetTrackingScalingPolicyConfiguration"]
+	aasOK(t, ts, "PutScalingPolicy", step)
+	step["PolicyType"] = "StepScaling"
+	delete(step, "TargetTrackingScalingPolicyConfiguration")
+	code, doc, _ := aasCall(t, ts, "PutScalingPolicy", step)
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Equal(t, "ValidationException", aasErrorCode(doc), "a type change needs the new type's configuration")
 }

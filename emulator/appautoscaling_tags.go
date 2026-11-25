@@ -278,7 +278,7 @@ func (p *ApplicationAutoScalingPlugin) tagResourceByARN(
 		return err
 	}
 	if key == "" {
-		return fmt.Errorf("%w: %s", errTagResourceNotFound, arn)
+		return taggingResolveFailed(fmt.Errorf("%w: %s", errTagResourceNotFound, arn))
 	}
 	return aasMergeTags(context.Background(), p.state, key, add, remove, quota)
 }

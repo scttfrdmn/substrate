@@ -438,6 +438,7 @@ func TestApplicationAutoScaling_PagingAndFilters(t *testing.T) {
 	require.Len(t, aasOK(t, ts, "PutScalingPolicy", tracking)["Alarms"], 2)
 	require.Len(t, aasAlarmNames(t, ts), 2)
 	tracking["PolicyType"] = "StepScaling"
+	tracking["StepScalingPolicyConfiguration"] = map[string]any{"AdjustmentType": "ChangeInCapacity"}
 	assert.NotContains(t, aasOK(t, ts, "PutScalingPolicy", tracking), "Alarms")
 	assert.Empty(t, aasAlarmNames(t, ts))
 }
