@@ -92,6 +92,11 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::DynamoDB::Table":  {"ImportSourceSpecification": "Always", "TableName": "Always"},
 	"AWS::IAM::Role":        {"Path": "Always", "RoleName": "Always"},
 	"AWS::Lambda::Function": {"DurableConfig": "Always", "FunctionName": "Always", "PackageType": "Always", "TenancyConfig": "Always"},
+	// #1613's version and alias, each from its own page: every Version property but
+	// FunctionScalingConfig is Replacement, and an alias's FunctionName and Name are.
+	"AWS::Lambda::Version": {"CodeSha256": "Always", "Description": "Always", "FunctionName": "Always",
+		"ProvisionedConcurrencyConfig": "Always", "RuntimePolicy": "Always"},
+	"AWS::Lambda::Alias": {"FunctionName": "Always", "Name": "Always"},
 	// The IAM types v0.129.0 gives an update path (#1545, #1560), each from its own page.
 	"AWS::IAM::User":          {"UserName": "Always"},
 	"AWS::IAM::Group":         {"GroupName": "Always"},

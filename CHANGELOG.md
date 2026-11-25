@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route 53: `ChangeTagsForResource`, `ListTagsForResource` and `ListTagsForResources` for hosted zones and health checks, at most 10 tags each; the over-limit message is substrate's own (#1613).
 - Route 53: health check create, get, list, update, delete and count, with idempotent `CallerReference` and `HealthCheckVersion`; `GetHealthCheckStatus` comes from `POST/DELETE /v1/route53/health-check-status`. The health check and `ListHealthChecks` messages are substrate's own (#1613).
 - CloudFormation: `AWS::Route53::HealthCheck`, with `HealthCheckTags` and `Fn::GetAtt HealthCheckId`, and a `CallerReference` per create attempt (#1613).
+- Lambda: `PublishVersion` snapshots `$LATEST` as an immutable, numbered version; an unchanged function answers its newest version again. The `CodeSha256` mismatch message is substrate's own (#1613).
+- Lambda: `CreateAlias`, `GetAlias`, `UpdateAlias`, `DeleteAlias` and `ListAliases`, with weighted `RoutingConfig` drawn deterministically from the request ID; the messages are substrate's own (#1613).
+- Lambda: `GetFunctionConfiguration`, with `Qualifier` (#1660).
+- Lambda: `GetFunction`, `Invoke`, the permission operations and `DeleteFunction` resolve a version or alias from `Qualifier` or a qualified `FunctionName` (#1613).
+- CloudFormation: `AWS::Lambda::Version` and `AWS::Lambda::Alias`, the alias updated in place. A Version of an unchanged function fails with CloudFormation's observed "A version for this Lambda function exists" wording (#1613).
 
 ### Changed
 
@@ -49,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route 53: record sets keep `SetIdentifier`, `Weight`, `Failover`, `HealthCheckId` and `Region`, and are keyed by name, type and `SetIdentifier`, so weighted and failover records no longer collide (#1613).
 - Route 53: names are matched and listed in Route 53's form, lower-cased with octal escapes, so `*.example.com` and `\052.example.com` are one record set (#1586).
 - CloudFormation: a record set's deploy sends its `SetIdentifier` and routing members, and its stack delete finds it by that identity, sends the stored values, and counts one already gone as deleted (#1586).
+- Lambda: function configurations report `LastUpdateStatus: Successful`, so the Terraform provider's wait after a code update completes (#1660).
+- SNS, S3 notifications, API Gateway, event source mappings and Step Functions invoke the function ARN they name, with its version or alias, instead of a same-named function in the caller's account (#1613).
 
 ### Compatibility
 
@@ -72,6 +79,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route 53: record sets with a `SetIdentifier` get their own key; one stored before this release is found by a `DELETE` naming its `SetIdentifier` (#1613).
 - Route 53: change IDs are stored and `GetChange` answers them; unseeded, every change is `INSYNC` as before (#1613).
 - Route 53: record, hosted zone and alias target names are reported lower-cased, escaped and with a trailing dot; a `CREATE` of an existing apex SOA or NS now answers "already exists" (#1586).
+- Lambda: `ListVersionsByFunction` lists published versions after `$LATEST`, at most 50 per page, and accepts the `Marker` it issues (#1613).
+- Lambda: `Publish: true` on `CreateFunction` and `UpdateFunctionCode` publishes a version and answers its configuration (#1613).
+- Lambda: a `Qualifier` on `AddPermission`, `GetPolicy` and `Invoke` must name an existing version or alias; each has its own resource policy, and `X-Amz-Executed-Version` reports the version that ran (#1613).
+- Lambda: `DeleteFunction` deletes the function's versions and aliases; with a `Qualifier` it deletes one version, refusing one an alias routes to. The messages are substrate's own (#1613).
+- Lambda: an ARN naming another account's function is `AccessDeniedException`/403 on every function operation, the tag operations, event source mappings and Scheduler Lambda targets; cross-account invoke through a resource policy is not modelled (#1613, #1710).
+- Lambda: a full ARN in another Region is `ResourceNotFoundException`/404 in the observed "are not reachable in this region" wording (#1613).
+- Lambda: on the operations that resolve it, a `Qualifier` parameter is authorized against the qualified function ARN, as a qualified `FunctionName` is; other operations are authorized against the function (#1613).
 
 ## [v0.133.0] - 2026-11-24
 

@@ -4008,15 +4008,16 @@ func (p *S3Plugin) fireNotifications(ctx *RequestContext, bucket, key, eventName
 		if !s3KeyFilterMatches(key, lfCfg.Filter) {
 			continue
 		}
-		// Extract function name from ARN.
-		fnName := s3ARNLastComponent(lfCfg.LambdaFunctionArn)
+		// The function ARN may name a version or alias, which the invoke carries as its Qualifier (#1613).
+		fnName := lfCfg.LambdaFunctionArn
+		invokePath, invokeParams := lambdaInvokeTarget(fnName)
 		invokeReq := &AWSRequest{
 			Service:   "lambda",
 			Operation: "POST",
-			Path:      "/2015-03-31/functions/" + fnName + "/invocations",
+			Path:      invokePath,
 			Body:      payloadBytes,
 			Headers:   map[string]string{},
-			Params:    map[string]string{},
+			Params:    invokeParams,
 		}
 		_, invokeErr := p.registry.RouteRequest(ctx, invokeReq)
 		if invokeErr != nil {
@@ -4140,16 +4141,6 @@ func s3KeyFilterMatches(key string, filter *S3NotificationFilter) bool {
 		}
 	}
 	return true
-}
-
-// s3ARNLastComponent extracts the last colon-separated component of an ARN,
-// which for Lambda ARNs is the function name.
-func s3ARNLastComponent(arn string) string {
-	parts := strings.Split(arn, ":")
-	if len(parts) > 0 {
-		return parts[len(parts)-1]
-	}
-	return arn
 }
 
 // s3ARNToQueueURL converts an SQS queue ARN to a local queue URL.

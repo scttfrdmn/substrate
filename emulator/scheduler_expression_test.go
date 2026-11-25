@@ -1,9 +1,12 @@
 package emulator_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,7 +280,8 @@ func TestSchedulerTargetFailure_Classification(t *testing.T) {
 // and refuses one that contradicts an explicit Qualifier as Lambda does (#1501).
 func TestSchedulerUniversalTarget_LambdaInvokeQualifier(t *testing.T) {
 	t.Parallel()
-	const fn = "arn:aws:lambda:us-west-2:210987654321:function:HelloWorld"
+	// The schedule's own account and Region; another account's function is not invoked (#1710).
+	const fn = "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld"
 	for _, tc := range []struct {
 		name, input          string
 		path, qualifier, err string
@@ -309,4 +313,63 @@ func TestSchedulerUniversalTarget_LambdaInvokeQualifier(t *testing.T) {
 			assert.Equal(t, "Event", req.Headers["X-Amz-Invocation-Type"])
 		})
 	}
+
+	// A function outside the schedule's account or Region is recorded as intent, not invoked, by both
+	// target forms: a schedule stored before CreateSchedule refused one can still name it.
+	for _, target := range []struct{ arn, input string }{
+		{"arn:aws:scheduler:::aws-sdk:lambda:invoke", `{"FunctionName":"arn:aws:lambda:us-east-1:210987654321:function:HelloWorld"}`},
+		{"arn:aws:scheduler:::aws-sdk:lambda:invoke", `{"FunctionName":"arn:aws:lambda:us-west-2:123456789012:function:HelloWorld"}`},
+		{"arn:aws:lambda:us-east-1:210987654321:function:HelloWorld", "{}"},
+	} {
+		req, code, intent := emulator.SchedTargetRequestForTest(target.arn, target.input)
+		assert.Nil(t, req, "%s %s", target.arn, target.input)
+		assert.Empty(t, code)
+		assert.Contains(t, intent, "outside the schedule's account and Region")
+	}
+}
+
+// TestScheduler_ALambdaTargetInAnotherAccountIsRefused pins that CreateSchedule and UpdateSchedule
+// refuse a target invoking another account's function, in either target form, as Lambda refuses the
+// invoke itself; substrate does not evaluate the function's resource policy (#1710).
+func TestScheduler_ALambdaTargetInAnotherAccountIsRefused(t *testing.T) {
+	t.Parallel()
+	srv := newSchedulerTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	body := func(arn, input string) string {
+		raw, err := json.Marshal(map[string]any{
+			"ScheduleExpression": "rate(1 hour)", "FlexibleTimeWindow": map[string]any{"Mode": "OFF"},
+			"Target": map[string]any{"Arn": arn, "RoleArn": "arn:aws:iam::123456789012:role/scheduler", "Input": input},
+		})
+		require.NoError(t, err)
+		return string(raw)
+	}
+	const theirs = "arn:aws:lambda:us-east-1:210987654321:function:theirs"
+	const universal = "arn:aws:scheduler:::aws-sdk:lambda:invoke"
+	for _, tc := range []struct {
+		name, arn, input, code string
+		status                 int
+	}{
+		{name: "a templated target", arn: theirs, input: "{}", code: "AccessDeniedException", status: http.StatusForbidden},
+		{name: "a universal target", arn: universal, input: `{"FunctionName":"` + theirs + `"}`,
+			code: "AccessDeniedException", status: http.StatusForbidden},
+		{name: "a partial ARN", arn: universal, input: `{"FunctionName":"210987654321:function:theirs"}`,
+			code: "AccessDeniedException", status: http.StatusForbidden},
+		{name: "another Region", arn: "arn:aws:lambda:us-west-2:123456789012:function:mine", input: "{}",
+			code: "ResourceNotFoundException", status: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/far-"+strings.ReplaceAll(tc.name, " ", "-"), body(tc.arn, tc.input))
+			raw := readSchedulerBody(t, resp)
+			assert.Equal(t, tc.status, resp.StatusCode, "%s", raw)
+			assert.Contains(t, string(raw), tc.code)
+		})
+	}
+
+	const mine = "arn:aws:lambda:us-east-1:123456789012:function:mine"
+	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/near", body(mine, "{}"))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", readSchedulerBody(t, resp))
+	resp = schedulerRequest(t, ts, http.MethodPut, "/schedules/near", body(theirs, "{}"))
+	raw := readSchedulerBody(t, resp)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "an update cannot point the schedule at another account: %s", raw)
 }

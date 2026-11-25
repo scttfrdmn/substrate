@@ -201,15 +201,19 @@ func cfnStackOutputOrEmpty(t *testing.T, ts *emulator.TestServer, stack, logical
 }
 
 // TestCFN_LambdaPermissionQualifierAndConditions pins that a permission on an alias ARN keeps its
-// qualifier, and that GetPolicy reports the principal and conditions in AddPermission's form.
+// qualifier and lands in the alias's own policy, and that GetPolicy reports the principal and
+// conditions in AddPermission's form.
 func TestCFN_LambdaPermissionQualifierAndConditions(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 	code, body := cfnStrictCall(t, ts, "CreateStack", map[string]string{"StackName": "qual", "TemplateBody": `{"Resources":{
 		"Role":{"Type":"AWS::IAM::Role","Properties":{"AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[]}}},
 		"Fn":{"Type":"AWS::Lambda::Function","Properties":{"FunctionName":"qual-fn","Runtime":"python3.12","Handler":"index.handler",
 			"Role":{"Fn::GetAtt":["Role","Arn"]},"Code":{"ZipFile":"def handler(e, c): pass"}}},
+		"Version":{"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"Fn"}}},
+		"Live":{"Type":"AWS::Lambda::Alias","Properties":{"FunctionName":{"Ref":"Fn"},"Name":"live",
+			"FunctionVersion":{"Fn::GetAtt":["Version","Version"]}}},
 		"Account":{"Type":"AWS::Lambda::Permission","Properties":{"Action":"lambda:InvokeFunction",
-			"FunctionName":"arn:aws:lambda:us-east-1:123456789012:function:qual-fn:live","Principal":"111122223333"}},
+			"FunctionName":{"Ref":"Live"},"Principal":"111122223333"}},
 		"Public":{"Type":"AWS::Lambda::Permission","Properties":{"Action":"lambda:InvokeFunctionUrl",
 			"FunctionName":{"Ref":"Fn"},"Principal":"*","FunctionUrlAuthType":"NONE"}},
 		"Scoped":{"Type":"AWS::Lambda::Permission","Properties":{"Action":"lambda:InvokeFunction",
@@ -221,29 +225,38 @@ func TestCFN_LambdaPermissionQualifierAndConditions(t *testing.T) {
 	status, reason := cfnStackStatusOf(t, ts, "qual")
 	require.Equal(t, "CREATE_COMPLETE", status, reason)
 
-	code, raw := lambdaREST(t, ts, http.MethodGet, "/2015-03-31/functions/qual-fn/policy")
-	require.Equal(t, http.StatusOK, code, string(raw))
-	var resp struct{ Policy string }
-	require.NoError(t, json.Unmarshal(raw, &resp))
-	var doc struct {
-		Statement []struct {
-			Sid       string
-			Principal interface{}
-			Resource  string
-			Condition map[string]map[string]string
-		}
+	type statement struct {
+		Sid       string
+		Principal interface{}
+		Resource  string
+		Condition map[string]map[string]string
 	}
-	require.NoError(t, json.Unmarshal([]byte(resp.Policy), &doc), resp.Policy)
+	readPolicy := func(path string) []statement {
+		code, raw := lambdaREST(t, ts, http.MethodGet, path)
+		require.Equal(t, http.StatusOK, code, string(raw))
+		var resp struct{ Policy string }
+		require.NoError(t, json.Unmarshal(raw, &resp))
+		var doc struct{ Statement []statement }
+		require.NoError(t, json.Unmarshal([]byte(resp.Policy), &doc), resp.Policy)
+		return doc.Statement
+	}
+
+	// The alias's statement is in the alias's policy, with the alias ARN as its Resource.
+	aliasStmts := readPolicy("/2015-03-31/functions/qual-fn/policy?Qualifier=live")
+	require.Len(t, aliasStmts, 1)
+	account := aliasStmts[0]
+	assert.Equal(t, map[string]interface{}{"AWS": "arn:aws:iam::111122223333:root"}, account.Principal)
+	assert.True(t, strings.HasSuffix(account.Resource, ":function:qual-fn:live"), "the alias qualifier is kept: %s", account.Resource)
+
+	stmts := readPolicy("/2015-03-31/functions/qual-fn/policy")
 	byPrincipal := map[string]int{}
-	for i, s := range doc.Statement {
+	for i, s := range stmts {
 		raw, err := json.Marshal(s.Principal)
 		require.NoError(t, err)
 		byPrincipal[string(raw)] = i
 	}
-	require.Len(t, doc.Statement, 4, resp.Policy)
-
-	account := doc.Statement[byPrincipal[`{"AWS":"arn:aws:iam::111122223333:root"}`]]
-	assert.True(t, strings.HasSuffix(account.Resource, ":function:qual-fn:live"), "the alias qualifier is kept: %s", account.Resource)
+	require.Len(t, stmts, 3, "the function's own policy holds the three unqualified statements")
+	doc := struct{ Statement []statement }{Statement: stmts}
 
 	public := doc.Statement[byPrincipal[`"*"`]]
 	assert.Equal(t, "NONE", public.Condition["StringEquals"]["lambda:FunctionUrlAuthType"])

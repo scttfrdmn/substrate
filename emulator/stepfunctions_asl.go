@@ -415,8 +415,8 @@ func (p *StepFunctionsPlugin) aslRunMap(
 // "PROD", and arn:aws:states:::lambda:invoke — the optimized-integration resource, which also contains
 // ":lambda:" and so passed the old dispatch test — invoked one named "invoke".
 //
-// A qualifier is dropped rather than honored because the executor invokes through Lambda's
-// unqualified path; invoking a specific version or alias from a Task state is not modeled.
+// A qualifier is kept: [StepFunctionsPlugin.aslInvokeLambda] passes it to Invoke as its Qualifier, so a
+// Task naming an alias ARN runs the version the alias routes to (#1613).
 func aslLambdaFunctionName(resource string) string {
 	// arn:{partition}:lambda:{region}:{account}:function:{name}[:{qualifier}]
 	parts := strings.Split(resource, ":")
@@ -430,25 +430,27 @@ func aslLambdaFunctionName(resource string) string {
 // A Lambda function ARN is dispatched via the plugin registry; every other
 // resource returns a stub empty object.
 func (p *StepFunctionsPlugin) aslInvokeResource(resource string, input interface{}, reqCtx *RequestContext) (interface{}, error) {
-	if funcName := aslLambdaFunctionName(resource); funcName != "" && p.registry != nil {
-		return p.aslInvokeLambda(funcName, input, reqCtx)
+	if aslLambdaFunctionName(resource) != "" && p.registry != nil {
+		return p.aslInvokeLambda(resource, input, reqCtx)
 	}
 	return map[string]interface{}{}, nil
 }
 
-// aslInvokeLambda invokes the named Lambda function via the plugin registry.
-func (p *StepFunctionsPlugin) aslInvokeLambda(funcName string, input interface{}, reqCtx *RequestContext) (interface{}, error) {
+// aslInvokeLambda invokes the Lambda function a Task resource ARN names, with any version or alias
+// the ARN carries, via the plugin registry.
+func (p *StepFunctionsPlugin) aslInvokeLambda(functionARN string, input interface{}, reqCtx *RequestContext) (interface{}, error) {
 	payloadBytes, err := json.Marshal(input)
 	if err != nil {
 		payloadBytes = []byte("{}")
 	}
 
+	invokePath, invokeParams := lambdaInvokeTarget(functionARN)
 	lambdaReq := &AWSRequest{
 		Service:   "lambda",
 		Operation: "POST",
-		Path:      "/2015-03-31/functions/" + funcName + "/invocations",
+		Path:      invokePath,
 		Headers:   map[string]string{},
-		Params:    map[string]string{},
+		Params:    invokeParams,
 		Body:      payloadBytes,
 	}
 

@@ -1640,9 +1640,9 @@ func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRe
 	// bill — at the rate of the API's type (#1202).
 	chargeOnBehalf(reqCtx, executeAPICostRequest(isV2), executeAPICostUnits(isV2, len(req.Body)))
 
-	// Extract function name from ARN.
-	arnParts := strings.Split(lambdaARN, ":")
-	fnName := arnParts[len(arnParts)-1]
+	// The integration names a function ARN, which may carry a version or alias: the invoke takes it
+	// as its Qualifier rather than as the function name (#1613).
+	invokePath, invokeParams := lambdaInvokeTarget(lambdaARN)
 
 	// Both IDs come from the request's mint, in the order apigwProxyRequestIDs fixes.
 	invokeRequestID, eventRequestID := apigwProxyRequestIDs(reqCtx.IDs)
@@ -1661,9 +1661,10 @@ func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRe
 	invokeReq := &AWSRequest{
 		Service:   "lambda",
 		Operation: "POST",
-		Path:      "/2015-03-31/functions/" + fnName + "/invocations",
+		Path:      invokePath,
 		Headers:   map[string]string{"Content-Type": "application/json"},
 		Body:      eventJSON,
+		Params:    invokeParams,
 	}
 	// Derived from the request that reached the integration, so the invocation this
 	// dispatches mints what it minted in the recording (#856). A proxy integration is

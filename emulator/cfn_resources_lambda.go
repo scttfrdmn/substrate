@@ -193,3 +193,212 @@ func cfnLambdaPermissionDeleter(_ *StackDeployer, dr DeployedResource, _ map[str
 		Path:    "/2015-03-31/functions/" + function + "/policy/" + dr.PhysicalID,
 		Headers: map[string]string{}, Params: cfnLambdaQualifier(cfnRefMetadata(dr, "Qualifier"))}
 }
+
+// ----- AWS::Lambda::Version ----------------------------------------------------------------------
+
+// deployLambdaVersion publishes a version of the function through PublishVersion. "Ref returns the
+// ARN of the version", which is the physical ID; Fn::GetAtt Version is the version number and
+// FunctionArn the version's ARN, the type's primary identifier. Every property but
+// FunctionScalingConfig is Update requires: Replacement, so a changed declaration publishes again.
+//
+// PublishVersion answers the newest version again when the function has not changed since it was
+// published, and an AWS::Lambda::Version cannot adopt a version that already exists: CloudFormation
+// fails the resource with "A version for this Lambda function exists ( N ). Modify the function to
+// create a new version." That sentence is observed CloudFormation behavior, quoted in
+// aws/aws-cdk#14428 and on the Serverless Framework's tracker (serverless/serverless#8392); no AWS
+// page publishes it. Without the refusal a replaced Version would adopt the version its predecessor
+// names, and the predecessor's cleanup would then delete it. A version is new exactly when its number
+// exceeds every number the function had before the publish, so the newest is read first.
+func (d *StackDeployer) deployLambdaVersion(
+	ctx context.Context, logicalID string, props map[string]interface{}, streamID string, cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	function, _ := cfnLambdaFunctionName(resolveStringProp(props, "FunctionName", "", cctx))
+	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::Lambda::Version",
+		Metadata: map[string]interface{}{"FunctionName": function}}
+	newest, cost, listErr := d.lambdaNewestVersion(ctx, function, streamID)
+	if listErr != nil {
+		dr.Error = listErr.Error()
+		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+	}
+	body := map[string]interface{}{}
+	for _, name := range []string{"Description", "CodeSha256"} {
+		if v := resolveStringProp(props, name, "", cctx); v != "" {
+			body[name] = v
+		}
+	}
+	req, err := cfnJSONRequest("lambda", http.MethodPost, body)
+	if err != nil {
+		return DeployedResource{}, 0, err
+	}
+	req.Path = "/2015-03-31/functions/" + function + "/versions"
+	resp, publishCost, routeErr := d.dispatch(ctx, req, streamID)
+	cost += publishCost
+	if routeErr != nil {
+		dr.Error = routeErr.Error()
+		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+	}
+	var out struct {
+		FunctionArn string `json:"FunctionArn"`
+		Version     string `json:"Version"`
+	}
+	if resp != nil {
+		if err := json.Unmarshal(resp.Body, &out); err != nil {
+			return DeployedResource{}, cost, fmt.Errorf("cfn deployLambdaVersion decode: %w", err)
+		}
+	}
+	if n, convErr := strconv.Atoi(out.Version); convErr == nil && n <= newest {
+		// No physical ID, so a rollback deletes nothing: the version belongs to whatever named it.
+		dr.Error = "A version for this Lambda function exists ( " + out.Version +
+			" ). Modify the function to create a new version."
+		return dr, cost, nil
+	}
+	dr.PhysicalID, dr.ARN = out.FunctionArn, out.FunctionArn
+	dr.Metadata["Version"], dr.Metadata["FunctionArn"] = out.Version, out.FunctionArn
+	return dr, cost, nil
+}
+
+// lambdaNewestVersion returns the highest version number function has published, 0 for none, by
+// walking ListVersionsByFunction to its last page. A refused listing, an absent function among
+// them, is returned as the error to report on the resource.
+func (d *StackDeployer) lambdaNewestVersion(ctx context.Context, function, streamID string) (int, float64, error) {
+	newest, marker := 0, ""
+	var cost float64
+	for {
+		params := map[string]string{"MaxItems": "50"}
+		if marker != "" {
+			params["Marker"] = marker
+		}
+		resp, c, err := d.dispatch(ctx, &AWSRequest{Service: "lambda", Operation: http.MethodGet,
+			Path: "/2015-03-31/functions/" + function + "/versions", Headers: map[string]string{}, Params: params}, streamID)
+		cost += c
+		if err != nil {
+			return 0, cost, err
+		}
+		var page struct {
+			Versions []struct {
+				Version string `json:"Version"`
+			} `json:"Versions"`
+			NextMarker string `json:"NextMarker"`
+		}
+		if resp != nil {
+			if err := json.Unmarshal(resp.Body, &page); err != nil {
+				return 0, cost, fmt.Errorf("cfn lambdaNewestVersion decode: %w", err)
+			}
+		}
+		for _, v := range page.Versions {
+			if n, convErr := strconv.Atoi(v.Version); convErr == nil {
+				newest = max(newest, n)
+			}
+		}
+		if page.NextMarker == "" {
+			return newest, cost, nil
+		}
+		marker = page.NextMarker
+	}
+}
+
+// cfnLambdaVersionDeleter deletes the version through DeleteFunction's Qualifier.
+func cfnLambdaVersionDeleter(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {
+	function, version := cfnRefMetadata(dr, "FunctionName"), cfnRefMetadata(dr, "Version")
+	if function == "" || version == "" {
+		return nil
+	}
+	return &AWSRequest{Service: "lambda", Operation: http.MethodDelete,
+		Path:    "/2015-03-31/functions/" + function,
+		Headers: map[string]string{}, Params: map[string]string{"Qualifier": version}}
+}
+
+// ----- AWS::Lambda::Alias ------------------------------------------------------------------------
+
+// cfnLambdaAliasBody renders the members CreateAlias and UpdateAlias share. The template's
+// RoutingConfig is a list of {FunctionVersion, FunctionWeight}, and the API's is a map from version
+// to weight; an absent one is an empty map, which UpdateAlias reads as no routing.
+func cfnLambdaAliasBody(props map[string]interface{}, cctx *cfnContext) map[string]interface{} {
+	weights := map[string]float64{}
+	if rc, ok := cfnResolveStructured(props["RoutingConfig"], cctx).(map[string]interface{}); ok {
+		entries, _ := rc["AdditionalVersionWeights"].([]interface{})
+		for _, e := range entries {
+			m, ok := e.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			version := fmt.Sprint(m["FunctionVersion"])
+			if w, err := strconv.ParseFloat(fmt.Sprint(m["FunctionWeight"]), 64); err == nil && version != "" {
+				weights[version] = w
+			}
+		}
+	}
+	return map[string]interface{}{
+		"FunctionVersion": resolveStringProp(props, "FunctionVersion", "", cctx),
+		"Description":     resolveStringProp(props, "Description", "", cctx),
+		"RoutingConfig":   map[string]interface{}{"AdditionalVersionWeights": weights},
+	}
+}
+
+// deployLambdaAlias creates the alias through CreateAlias. "Ref returns the resource ARN", the
+// alias ARN, which is the physical ID and Fn::GetAtt AliasArn.
+func (d *StackDeployer) deployLambdaAlias(
+	ctx context.Context, logicalID string, props map[string]interface{}, streamID string, cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	function, _ := cfnLambdaFunctionName(resolveStringProp(props, "FunctionName", "", cctx))
+	name := resolveStringProp(props, "Name", "", cctx)
+	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::Lambda::Alias",
+		Metadata: map[string]interface{}{"FunctionName": function, "Name": name}}
+	body := cfnLambdaAliasBody(props, cctx)
+	body["Name"] = name
+	req, err := cfnJSONRequest("lambda", http.MethodPost, body)
+	if err != nil {
+		return DeployedResource{}, 0, err
+	}
+	req.Path = "/2015-03-31/functions/" + function + "/aliases"
+	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
+	if routeErr != nil {
+		dr.Error = routeErr.Error()
+		return dr, cost, nil //nolint:nilerr // A refused call is reported on the resource.
+	}
+	var out struct {
+		AliasArn string `json:"AliasArn"`
+	}
+	if resp != nil {
+		if err := json.Unmarshal(resp.Body, &out); err != nil {
+			return DeployedResource{}, cost, fmt.Errorf("cfn deployLambdaAlias decode: %w", err)
+		}
+	}
+	dr.PhysicalID, dr.ARN = out.AliasArn, out.AliasArn
+	dr.Metadata["AliasArn"] = out.AliasArn
+	return dr, cost, nil
+}
+
+// updateLambdaAlias applies a changed AWS::Lambda::Alias through UpdateAlias: Description,
+// FunctionVersion and RoutingConfig are No interruption. All three are sent whether or not they
+// changed, so a removed Description or RoutingConfig is cleared. FunctionName and Name are
+// Replacement and never reach here.
+func (d *StackDeployer) updateLambdaAlias(
+	ctx context.Context, logicalID string, prior DeployedResource,
+	props map[string]interface{}, _ []string, streamID string, cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	dr := prior
+	dr.LogicalID = logicalID
+	dr.Error = ""
+	req, err := cfnJSONRequest("lambda", http.MethodPut, cfnLambdaAliasBody(props, cctx))
+	if err != nil {
+		return DeployedResource{}, 0, err
+	}
+	req.Path = "/2015-03-31/functions/" + cfnRefMetadata(prior, "FunctionName") + "/aliases/" + cfnRefMetadata(prior, "Name")
+	var cost float64
+	if routeErr := d.cfnUpdateDispatch(ctx, req, streamID, &cost); routeErr != nil {
+		dr.Error = routeErr.Error()
+	}
+	return dr, cost, nil
+}
+
+// cfnLambdaAliasDeleter deletes the alias through DeleteAlias.
+func cfnLambdaAliasDeleter(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {
+	function, name := cfnRefMetadata(dr, "FunctionName"), cfnRefMetadata(dr, "Name")
+	if function == "" || name == "" {
+		return nil
+	}
+	return &AWSRequest{Service: "lambda", Operation: http.MethodDelete,
+		Path:    "/2015-03-31/functions/" + function + "/aliases/" + name,
+		Headers: map[string]string{}, Params: map[string]string{}}
+}

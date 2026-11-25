@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1184 routed operations.
+// 68 plugins, 1191 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -851,20 +851,25 @@ var routedOperations = map[string][]string{
 	"lambda": {
 		"AddLayerVersionPermission",
 		"AddPermission",
+		"CreateAlias",
 		"CreateEventSourceMapping",
 		"CreateFunction",
+		"DeleteAlias",
 		"DeleteEventSourceMapping",
 		"DeleteFunction",
 		"DeleteLayerVersion",
+		"GetAlias",
 		"GetEventSourceMapping",
 		"GetFunction",
 		"GetFunctionCodeSigningConfig",
+		"GetFunctionConfiguration",
 		"GetLayerVersion",
 		"GetLayerVersionByArn",
 		"GetLayerVersionPolicy",
 		"GetPolicy",
 		"Invoke",
 		"InvokeAsync",
+		"ListAliases",
 		"ListEventSourceMappings",
 		"ListFunctions",
 		"ListLayerVersions",
@@ -872,11 +877,13 @@ var routedOperations = map[string][]string{
 		"ListTags",
 		"ListVersionsByFunction",
 		"PublishLayerVersion",
+		"PublishVersion",
 		"PutFunctionEventInvokeConfig",
 		"RemoveLayerVersionPermission",
 		"RemovePermission",
 		"TagResource",
 		"UntagResource",
+		"UpdateAlias",
 		"UpdateEventSourceMapping",
 		"UpdateFunctionCode",
 		"UpdateFunctionConfiguration",

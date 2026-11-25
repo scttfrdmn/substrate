@@ -24,7 +24,8 @@ import "strings"
 // Syntax:
 //
 //   - `2014-11-13` — `InvokeAsync`, which AWS marks deprecated and still serializes;
-//   - `2015-03-31` — the function CRUD, `Invoke`, the resource policy, and event source mappings;
+//   - `2015-03-31` — the function CRUD, `Invoke`, the resource policy, versions and aliases, and
+//     event source mappings;
 //   - `2017-03-31` — `TagResource`, `UntagResource` and `ListTags`;
 //   - `2018-10-31` — the nine layer operations (#1272), dated in lambda_layers.go;
 //   - `2019-09-25` — `PutFunctionEventInvokeConfig`;
@@ -66,8 +67,8 @@ const (
 	// lambdaInvokeAsyncAPIVersion dates InvokeAsync, Lambda's oldest routed operation.
 	lambdaInvokeAsyncAPIVersion = "2014-11-13"
 
-	// lambdaFunctionsAPIVersion dates the function CRUD, Invoke, the resource policy and event
-	// source mappings — every routed operation except the four below.
+	// lambdaFunctionsAPIVersion dates the function CRUD, Invoke, the resource policy, versions,
+	// aliases and event source mappings — every routed operation except the four below.
 	lambdaFunctionsAPIVersion = "2015-03-31"
 
 	// lambdaTagsAPIVersion dates TagResource, UntagResource and ListTags.
@@ -227,10 +228,16 @@ func lambdaFunctionOperation(version, method, p string) (op, name, subResource s
 		return "UpdateFunctionCode", fn, ""
 	case sub == "configuration" && method == "PUT":
 		return "UpdateFunctionConfiguration", fn, ""
+	case sub == "configuration" && method == "GET":
+		return "GetFunctionConfiguration", fn, ""
 	case sub == "invocations" && method == "POST":
 		return "Invoke", fn, ""
 	case sub == "versions" && method == "GET":
 		return "ListVersionsByFunction", fn, ""
+	case sub == "versions" && method == "POST":
+		return "PublishVersion", fn, ""
+	case sub == "aliases" || strings.HasPrefix(sub, "aliases/"):
+		return lambdaAliasOperation(method, fn, strings.TrimPrefix(strings.TrimPrefix(sub, "aliases"), "/"))
 	case strings.HasPrefix(sub, "policy"):
 		// POST /policy → AddPermission
 		// GET /policy → GetPolicy
@@ -247,6 +254,32 @@ func lambdaFunctionOperation(version, method, p string) (op, name, subResource s
 			}
 			return "RemovePermission", fn, stmtID
 		}
+	}
+	return lambdaUnknownOperation, "", ""
+}
+
+// lambdaAliasOperation resolves the five operations under
+// `/2015-03-31/functions/{FunctionName}/aliases[/{Name}]`; the alias name is the sub-resource.
+func lambdaAliasOperation(method, fn, alias string) (op, name, subResource string) {
+	if alias == "" {
+		switch method {
+		case "POST":
+			return "CreateAlias", fn, ""
+		case "GET":
+			return "ListAliases", fn, ""
+		}
+		return lambdaUnknownOperation, "", ""
+	}
+	if strings.Contains(alias, "/") {
+		return lambdaUnknownOperation, "", ""
+	}
+	switch method {
+	case "GET":
+		return "GetAlias", fn, alias
+	case "PUT":
+		return "UpdateAlias", fn, alias
+	case "DELETE":
+		return "DeleteAlias", fn, alias
 	}
 	return lambdaUnknownOperation, "", ""
 }
@@ -286,7 +319,45 @@ func lambdaNameFromPath(path string) string {
 // function is written against. Reassembling one from the caller's own account and Region — what a
 // function-path request has to do, because it names only a function name — would silently retarget a
 // cross-account ARN at the caller's own function of that name.
-func lambdaAuthzResourceARN(path, region, accountID string) string {
+//
+// A function-path request names a version or alias either in its FunctionName (`fn:prod`) or in its
+// Qualifier parameter, and both forms are authorized against the same qualified ARN, so a policy
+// denying `function:fn:prod` denies both. qualifier is the request's Qualifier parameter. It counts
+// only for an operation that acts on the version or alias it names ([lambdaQualifiedOperations]); on
+// any other, the operation acts on the function whatever the parameter says, so the function is the
+// resource — qualifying it there would let `?Qualifier=x` step around a Deny on the function. It is
+// also ignored when empty or $LATEST, and when the FunctionName carries a qualifier of its own.
+func lambdaAuthzResourceARN(method, path, qualifier, region, accountID string) string {
+	arn := lambdaAuthzPathARN(path, region, accountID)
+	if qualifier == "" || qualifier == lambdaLatestVersion || lambdaNameFromPath(path) == "" {
+		return arn
+	}
+	if op, _, _ := parseLambdaOperation(method, path); !lambdaQualifiedOperations[op] {
+		return arn
+	}
+	if _, derived := lambdaParseFunctionRef(arn); derived != "" {
+		return arn
+	}
+	return arn + ":" + qualifier
+}
+
+// lambdaQualifiedOperations are the operations whose handler resolves the Qualifier parameter to a
+// version or alias and acts on it. Every other operation ignores the parameter: those whose page
+// publishes none (UpdateFunctionCode, UpdateFunctionConfiguration, GetFunctionCodeSigningConfig and
+// the rest), and PutFunctionEventInvokeConfig, whose page publishes one that substrate does not
+// model, since it keeps one event-invoke configuration per function.
+var lambdaQualifiedOperations = map[string]bool{ //nolint:gochecknoglobals // immutable lookup table
+	"GetFunction":              true,
+	"GetFunctionConfiguration": true,
+	"Invoke":                   true,
+	"DeleteFunction":           true,
+	"AddPermission":            true,
+	"RemovePermission":         true,
+	"GetPolicy":                true,
+}
+
+// lambdaAuthzPathARN is [lambdaAuthzResourceARN]'s resource as the path alone names it.
+func lambdaAuthzPathARN(path, region, accountID string) string {
 	if version, p, ok := lambdaSplitAPIVersion(path); ok &&
 		version == lambdaTagsAPIVersion && strings.HasPrefix(p, "/tags/") {
 		if arn := p[len("/tags/"):]; arn != "" {
@@ -298,8 +369,16 @@ func lambdaAuthzResourceARN(path, region, accountID string) string {
 		version == lambdaLayersAPIVersion && strings.HasPrefix(p, "/layers/") {
 		return lambdaLayerAuthzResourceARN(p, region, accountID)
 	}
-	if name := lambdaNameFromPath(path); name != "" {
-		return "arn:aws:lambda:" + region + ":" + accountID + ":function:" + name
+	name := lambdaNameFromPath(path)
+	switch {
+	case name == "":
+		return "*"
+	case strings.HasPrefix(name, "arn:"):
+		// A FunctionName given as a full ARN is the resource, with any version or alias it carries.
+		return name
+	case strings.Contains(name, ":function:"):
+		// A partial ARN, `account:function:name`, names its account; only the Region is the caller's.
+		return "arn:aws:lambda:" + region + ":" + name
 	}
-	return "*"
+	return "arn:aws:lambda:" + region + ":" + accountID + ":function:" + name
 }

@@ -1184,6 +1184,8 @@ var typePriority = map[string]int{
 	"AWS::SecretsManager::Secret":                 2,
 	"AWS::SSM::Parameter":                         2,
 	"AWS::Lambda::Function":                       3,
+	"AWS::Lambda::Version":                        4,
+	"AWS::Lambda::Alias":                          5,
 	"AWS::SQS::Queue":                             3,
 	"AWS::EC2::RouteTable":                        3,
 	"AWS::EC2::Instance":                          3,

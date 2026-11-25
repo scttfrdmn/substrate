@@ -231,10 +231,10 @@ func buildUniversalCall(rec *SchedulerRecord, spec, input string) schedTargetCal
 		case qualifier == "":
 			qualifier = derived
 		}
-		call.req = schedLambdaInvoke(name, qualifier, in.InvocationType, payload)
-		if acct, region, ok := lambdaARNAccountRegion(in.FunctionName); ok {
-			call.accountID, call.region = acct, region
+		if acct, region, ok := lambdaARNAccountRegion(in.FunctionName); ok && (acct != rec.AccountID || region != rec.Region) {
+			return schedTargetCall{intent: schedForeignFunctionIntent(in.FunctionName)}
 		}
+		call.req = schedLambdaInvoke(name, qualifier, in.InvocationType, payload)
 	default:
 		return schedTargetCall{intent: "the " + routing.Protocol + " action " + sdkID + ":" + action + " has no URI binding in substrate"}
 	}
@@ -478,6 +478,9 @@ func buildTemplatedCall(rec *SchedulerRecord, input string) schedTargetCall {
 		if len(fn) < 2 || fn[0] != "function" {
 			return schedTargetCall{intent: "target " + arn + " names no function"}
 		}
+		if account != rec.AccountID || region != rec.Region {
+			return schedTargetCall{intent: schedForeignFunctionIntent(arn)}
+		}
 		qualifier := ""
 		if len(fn) > 2 {
 			qualifier = fn[2]
@@ -510,6 +513,44 @@ func buildTemplatedCall(rec *SchedulerRecord, input string) schedTargetCall {
 		return schedTargetCall{intent: "templated target service " + service + " is recorded, not dispatched"}
 	}
 	return call
+}
+
+// schedulerCheckLambdaTarget refuses a schedule whose target invokes a Lambda function outside the
+// schedule's account and Region: a templated target naming a function ARN, or the universal
+// `aws-sdk:lambda:invoke` target naming one in its Input's FunctionName. The refusal is
+// [lambdaCheckFunctionScope]'s. Invoking another account's function would take its resource policy
+// to grant the schedule's role lambda:InvokeFunction, and substrate does not evaluate a function's
+// resource policy for a cross-account caller (#1710). An Input that does not decode is left to the
+// dispatch, which reports it.
+func schedulerCheckLambdaTarget(ctx *RequestContext, t *schedulerTargetInput) *AWSError {
+	if t == nil {
+		return nil
+	}
+	ref := ""
+	if parts := strings.Split(t.Arn, ":"); len(parts) >= 3 && parts[0] == "arn" && parts[2] == "lambda" {
+		ref = t.Arn
+	} else if _, spec, ok := strings.Cut(t.Arn, schedulerUniversalPrefix); ok {
+		if sdkID, action, _ := strings.Cut(spec, ":"); sdkID == "lambda" && strings.EqualFold(action, "invoke") {
+			var in struct {
+				FunctionName string `json:"FunctionName"`
+			}
+			if json.Unmarshal([]byte(t.Input), &in) == nil {
+				ref = in.FunctionName
+			}
+		}
+	}
+	if ref == "" {
+		return nil
+	}
+	return lambdaCheckFunctionScope(ctx, ref, "lambda:InvokeFunction")
+}
+
+// schedForeignFunctionIntent is the recorded intent of a dispatch to a function outside the
+// schedule's account and Region, which a schedule stored before CreateSchedule refused one can
+// still name. It is not invoked; see [schedulerCheckLambdaTarget].
+func schedForeignFunctionIntent(ref string) string {
+	return "the function " + ref + " is outside the schedule's account and Region; a cross-account invoke " +
+		"through the function's resource policy is not modeled"
 }
 
 // schedMustJSON marshals a value whose shape cannot fail to marshal.

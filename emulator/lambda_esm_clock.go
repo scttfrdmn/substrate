@@ -267,11 +267,14 @@ func (p *LambdaPlugin) pollAndInvoke(trigger *RequestContext, dispatch InternalD
 		return len(parsed.Messages), nil
 	}
 	fnRegion, fnAcct, fnName := fnParts[3], fnParts[4], fnParts[6]
+	// A mapping created on `name:alias` names the alias in its FunctionArn, and invokes it (#1613).
+	invokePath, invokeParams := lambdaInvokeTarget(esm.FunctionARN)
 	invokeResp, invokeErr := dispatch(ctxFor("invoke", fnAcct, fnRegion), &AWSRequest{
 		Service:    "lambda",
 		Operation:  "Invoke",
 		HTTPMethod: http.MethodPost,
-		Path:       "/2015-03-31/functions/" + fnName + "/invocations",
+		Path:       invokePath,
+		Params:     invokeParams,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       eventJSON,
 	})
