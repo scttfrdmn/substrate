@@ -129,6 +129,8 @@ type sdOperation struct {
 	ErrorMessage string            `json:"ErrorMessage,omitempty"`
 	CreateDate   time.Time         `json:"CreateDate"`
 	Targets      map[string]string `json:"Targets"`
+	// Seq numbers the account and Region's operations in the order they started.
+	Seq int64 `json:"Seq,omitempty"`
 }
 
 // sdScope is the "{account}/{region}/" every key of a caller's records continues with.

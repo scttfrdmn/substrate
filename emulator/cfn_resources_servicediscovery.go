@@ -97,13 +97,15 @@ var cfnSDNamespaceOperations = map[string]struct{ create, update string }{ //nol
 
 // cfnDeployServiceDiscoveryNamespace is the deploy helper for the three namespace types: it creates
 // the namespace, waits for the operation, and reads the namespace back for its ARN and hosted zone.
+// Each create carries a fresh CreatorRequestId, so a replacement that keeps its Name is refused as
+// a duplicate rather than answered with the namespace it replaces, which the update then deletes.
 func cfnDeployServiceDiscoveryNamespace(typ string) cfnDeployFunc {
 	return func(d *StackDeployer, ctx context.Context, logicalID string, props map[string]interface{},
 		streamID string, cctx *cfnContext) (DeployedResource, float64, error) {
 		dr := DeployedResource{LogicalID: logicalID, Type: typ}
 		body := map[string]interface{}{
 			"Name":             resolveStringProp(props, "Name", "", cctx),
-			"CreatorRequestId": streamID + "-" + logicalID,
+			"CreatorRequestId": d.internalRequestID(),
 		}
 		if v := resolveStringProp(props, "Description", "", cctx); v != "" {
 			body["Description"] = v
@@ -194,7 +196,8 @@ func cfnUpdateServiceDiscoveryNamespace(typ string) cfnUpdateFunc {
 	}
 }
 
-// cfnServiceDiscoveryNamespaceDeleter deletes the namespace; its hosted zone goes with it.
+// cfnServiceDiscoveryNamespaceDeleter is the namespace's delete request, which
+// [cfnDeleteServiceDiscoveryNamespace] dispatches and waits on; its hosted zone goes with it.
 func cfnServiceDiscoveryNamespaceDeleter(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {
 	if dr.PhysicalID == "" {
 		return nil
@@ -332,13 +335,18 @@ func (d *StackDeployer) updateServiceDiscoveryService(
 // deployServiceDiscoveryInstance registers the instance with RegisterInstance and waits for the
 // operation. An absent InstanceId is the logical ID. RegisterInstance updates an instance it already
 // holds, so a re-deploy of changed InstanceAttributes updates it in place.
+//
+// The physical ID is "{ServiceId}/{InstanceId}", because an instance is identified by both: a
+// ServiceId change keeps the InstanceId, and a physical ID of the InstanceId alone would read as the
+// same resource, so the update would never deregister the old one. Ref returns the InstanceId, as
+// the type's page publishes ([cfnRefValue]).
 func (d *StackDeployer) deployServiceDiscoveryInstance(
 	ctx context.Context, logicalID string, props map[string]interface{}, streamID string, cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	serviceID := resolveStringProp(props, "ServiceId", "", cctx)
 	instanceID := resolveStringProp(props, "InstanceId", logicalID, cctx)
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::ServiceDiscovery::Instance",
-		PhysicalID: instanceID, Metadata: map[string]interface{}{"ServiceId": serviceID}}
+		PhysicalID: serviceID + "/" + instanceID, Metadata: map[string]interface{}{"ServiceId": serviceID, "InstanceId": instanceID}}
 	attrs := map[string]string{}
 	if m, ok := cfnResolveStructured(props["InstanceAttributes"], cctx).(map[string]interface{}); ok {
 		for k, v := range m {
@@ -362,15 +370,59 @@ func (d *StackDeployer) deployServiceDiscoveryInstance(
 	return dr, cost, nil
 }
 
-// cfnServiceDiscoveryInstanceDeleter deregisters the instance.
+// cfnServiceDiscoveryInstanceDeleter is the instance's deregistration, which
+// [cfnDeleteServiceDiscoveryInstance] dispatches and waits on.
 func cfnServiceDiscoveryInstanceDeleter(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {
-	serviceID := cfnRefMetadata(dr, "ServiceId")
-	if serviceID == "" || dr.PhysicalID == "" {
+	serviceID, instanceID := cfnRefMetadata(dr, "ServiceId"), cfnRefMetadata(dr, "InstanceId")
+	if serviceID == "" || instanceID == "" {
 		return nil
 	}
-	req, err := cfnSDRequest("DeregisterInstance", map[string]interface{}{"ServiceId": serviceID, "InstanceId": dr.PhysicalID})
+	req, err := cfnSDRequest("DeregisterInstance", map[string]interface{}{"ServiceId": serviceID, "InstanceId": instanceID})
 	if err != nil {
 		return nil
 	}
 	return req
 }
+
+// cfnDeleteServiceDiscoveryAsync dispatches an asynchronous Cloud Map delete — a namespace's or an
+// instance's — and waits on its operation, so a FAIL (seeded, or a hosted zone Route 53 refuses to
+// delete) fails the resource rather than reading as deleted. A resource already gone is a completed
+// delete, as [cfnDeleteIsAbsent] reads it for every type.
+func cfnDeleteServiceDiscoveryAsync(build cfnDeleteRequestFunc) func(context.Context, *StackDeployer, DeployedResource,
+	map[string]interface{}, *cfnContext, string) *CFNResourceDeletion {
+	return func(ctx context.Context, d *StackDeployer, dr DeployedResource, props map[string]interface{},
+		cctx *cfnContext, streamID string) *CFNResourceDeletion {
+		failed := func(err error) *CFNResourceDeletion {
+			return &CFNResourceDeletion{LogicalID: dr.LogicalID, Type: dr.Type, Status: cfnDeleteFailed, Reason: err.Error()}
+		}
+		req := build(d, dr, props, cctx)
+		if req == nil {
+			return nil
+		}
+		resp, _, err := d.dispatch(ctx, req, streamID)
+		if err != nil {
+			if cfnDeleteIsAbsent(err) {
+				return nil
+			}
+			return failed(err)
+		}
+		var out struct {
+			OperationID string `json:"OperationId"`
+		}
+		if resp != nil {
+			if err := json.Unmarshal(resp.Body, &out); err != nil {
+				return failed(fmt.Errorf("cfn servicediscovery delete decode: %w", err))
+			}
+		}
+		if _, _, err := d.cfnSDWait(ctx, out.OperationID, streamID); err != nil {
+			return failed(err)
+		}
+		return nil
+	}
+}
+
+// cfnDeleteServiceDiscoveryNamespace deletes a namespace and waits on the operation.
+var cfnDeleteServiceDiscoveryNamespace = cfnDeleteServiceDiscoveryAsync(cfnServiceDiscoveryNamespaceDeleter) //nolint:gochecknoglobals // immutable function value
+
+// cfnDeleteServiceDiscoveryInstance deregisters an instance and waits on the operation.
+var cfnDeleteServiceDiscoveryInstance = cfnDeleteServiceDiscoveryAsync(cfnServiceDiscoveryInstanceDeleter) //nolint:gochecknoglobals // immutable function value

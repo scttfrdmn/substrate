@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"time"
 )
 
 // Cloud Map's asynchronous operations (#1614).
@@ -62,7 +61,8 @@ type sdOperationStatusSeed struct {
 	// Status is the settled status of an operation started under the seed: SUCCESS (the default)
 	// or FAIL.
 	Status string `json:"status,omitempty"`
-	// ErrorCode and ErrorMessage are what a FAIL reports.
+	// ErrorCode and ErrorMessage are what a FAIL reports. A FAIL seed must name an ErrorCode, because
+	// a failed operation with none would give a poller nothing to report; ErrorMessage may be empty.
 	ErrorCode    string `json:"errorCode,omitempty"`
 	ErrorMessage string `json:"errorMessage,omitempty"`
 }
@@ -71,7 +71,8 @@ func (s sdOperationStatusSeed) progressionID() string        { return s.Operatio
 func (s sdOperationStatusSeed) progressionObservations() int { return s.SubmittedObservations }
 
 // validateProgression refuses a status outside the Operation shape's enumeration, a transient
-// status that is settled or a settled one that is transient, and an error on a seed that succeeds.
+// status that is settled or a settled one that is transient, an error on a seed that succeeds, and
+// a FAIL with no errorCode.
 func (s sdOperationStatusSeed) validateProgression() error {
 	if err := progressionStates("transient operation", []string{sdOpSubmitted, sdOpPending}, s.TransientStatus); err != nil {
 		return err
@@ -82,22 +83,39 @@ func (s sdOperationStatusSeed) validateProgression() error {
 	if s.Status != sdOpFail && (s.ErrorCode != "" || s.ErrorMessage != "") {
 		return fmt.Errorf("errorCode and errorMessage need status %q", sdOpFail)
 	}
+	if s.Status == sdOpFail && s.ErrorCode == "" {
+		return fmt.Errorf("status %q needs an errorCode", sdOpFail)
+	}
 	return nil
 }
 
 // sdOperationProgressions is Cloud Map's operation-status countdown.
 var sdOperationProgressions = newProgression[sdOperationStatusSeed](serviceDiscoveryOperationCtrlNamespace, "operationId", "submittedObservations")
 
+// sdOperationSeqKey is the state key of the caller's operation counter, which numbers operations in
+// the order they start so a listing is in creation order even when the simulated clock stands still.
+func sdOperationSeqKey(ctx *RequestContext) string { return "opseq:" + sdScope(ctx) }
+
 // newOperation mints an operation of typ on targets and decides its settled status from the seed
-// in force, without storing it. The caller applies the effect only when the status is SUCCESS, and
-// may fail the operation itself (see [sdOperation]) before it calls [ServiceDiscoveryPlugin.saveOperation].
+// in force, without storing it. The caller holds [ServiceDiscoveryPlugin.mu], applies the effect only
+// when the status is SUCCESS, and may fail the operation itself (see [sdOperation]) before or after
+// it calls [ServiceDiscoveryPlugin.saveOperation].
 func (p *ServiceDiscoveryPlugin) newOperation(ctx *RequestContext, typ string, targets map[string]string) (sdOperation, error) {
+	var seq int64
+	if _, err := p.get(sdOperationSeqKey(ctx), &seq); err != nil {
+		return sdOperation{}, err
+	}
+	seq++
+	if err := p.put(sdOperationSeqKey(ctx), seq); err != nil {
+		return sdOperation{}, err
+	}
 	op := sdOperation{
 		ID:         ctx.IDs.Chars(32, sdIDAlphabet) + "-" + ctx.IDs.Chars(9, sdIDAlphabet),
 		Type:       typ,
 		Status:     sdOpSuccess,
 		CreateDate: p.tc.Now().UTC(),
 		Targets:    targets,
+		Seq:        seq,
 	}
 	seed, err := sdOperationProgressions.resolve(context.Background(), p.state, op.ID)
 	if err != nil {
@@ -117,6 +135,14 @@ func (op *sdOperation) fail(code, message string) {
 // saveOperation stores op.
 func (p *ServiceDiscoveryPlugin) saveOperation(ctx *RequestContext, op sdOperation) error {
 	return p.put(sdOperationKey(ctx, op.ID), op)
+}
+
+// dropOperation removes a stored operation whose effect could not be applied, so no answer names
+// it. A failure to remove it is logged: the request is already failing with the error that caused it.
+func (p *ServiceDiscoveryPlugin) dropOperation(ctx *RequestContext, op sdOperation) {
+	if err := p.del(sdOperationKey(ctx, op.ID)); err != nil && p.logger != nil {
+		p.logger.Warn("servicediscovery: drop operation", "operation", op.ID, "error", err)
+	}
 }
 
 // sdOperationAnswer is the {"OperationId"} an asynchronous operation answers.
@@ -304,7 +330,7 @@ func (p *ServiceDiscoveryPlugin) listOperations(ctx *RequestContext, req *AWSReq
 		}
 	}
 	res, err := page(matched, func(s summary) cursorKey {
-		return cursorKey{Sort: s.op.CreateDate.Format(time.RFC3339Nano), Tie: s.op.ID}
+		return cursorKey{Sort: fmt.Sprintf("%020d", s.op.CreateDate.UnixNano()), Tie: fmt.Sprintf("%020d/%s", s.op.Seq, s.op.ID)}
 	}, preq)
 	if err != nil {
 		return nil, sdInvalid("The NextToken is not valid for this request.")

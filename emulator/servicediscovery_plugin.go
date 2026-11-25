@@ -348,7 +348,9 @@ func (p *ServiceDiscoveryPlugin) createNamespace(ctx *RequestContext, req *AWSRe
 		return nil, err
 	}
 	for _, ns := range all {
-		if ns.Name != in.Name {
+		// A private namespace's name is unique within its VPC, as a private hosted zone's is; an
+		// HTTP or public namespace's within the account and Region.
+		if ns.Name != in.Name || (typ == sdTypeDNSPrivate && ns.Type == sdTypeDNSPrivate && ns.Vpc != in.Vpc) {
 			continue
 		}
 		if in.CreatorRequestID != "" && ns.CreatorRequestID == in.CreatorRequestID && ns.CreateOperationID != "" {
@@ -364,6 +366,11 @@ func (p *ServiceDiscoveryPlugin) createNamespace(ctx *RequestContext, req *AWSRe
 		return nil, err
 	}
 	if op.Status == sdOpSuccess {
+		// The operation is stored before the namespace, so a CreatorRequestId retry never answers an
+		// OperationId GetOperation cannot find, and a later failure undoes what this request made.
+		if err := p.saveOperation(ctx, op); err != nil {
+			return nil, err
+		}
 		ns := sdNamespace{
 			ID:                id,
 			ARN:               fmt.Sprintf("arn:aws:servicediscovery:%s:%s:namespace/%s", ctx.Region, ctx.AccountID, id),
@@ -379,21 +386,38 @@ func (p *ServiceDiscoveryPlugin) createNamespace(ctx *RequestContext, req *AWSRe
 		}
 		if typ != sdTypeHTTP {
 			zoneID, zoneErr := p.createHostedZone(ctx, &ns, op.ID)
-			if zoneErr != nil {
-				op.fail("CANNOT_CREATE_HOSTED_ZONE", zoneErr.Error())
+			var awsErr *AWSError
+			switch {
+			case errors.As(zoneErr, &awsErr):
+				op.fail("CANNOT_CREATE_HOSTED_ZONE", awsErr.Message)
+			case zoneErr != nil:
+				p.dropOperation(ctx, op)
+				return nil, zoneErr
 			}
 			ns.HostedZoneID = zoneID
 		}
 		if op.Status == sdOpSuccess {
 			if err := p.put(sdNamespaceKey(ctx, id), ns); err != nil {
+				p.undoHostedZone(ctx, ns.HostedZoneID)
+				p.dropOperation(ctx, op)
 				return nil, err
 			}
+			return sdOperationAnswer(op)
 		}
 	}
 	if err := p.saveOperation(ctx, op); err != nil {
 		return nil, err
 	}
 	return sdOperationAnswer(op)
+}
+
+// undoHostedZone deletes a hosted zone this request created, when a later step of the request
+// failed. It is best effort: a failure is logged, because the request is already failing with the
+// error that caused the undo.
+func (p *ServiceDiscoveryPlugin) undoHostedZone(ctx *RequestContext, zoneID string) {
+	if err := p.deleteHostedZone(ctx, zoneID); err != nil && p.logger != nil {
+		p.logger.Warn("servicediscovery: undo hosted zone", "zone", zoneID, "error", err)
+	}
 }
 
 // createHostedZone creates a DNS namespace's hosted zone with Route 53's CreateHostedZone and
@@ -587,19 +611,29 @@ func (p *ServiceDiscoveryPlugin) deleteNamespace(ctx *RequestContext, req *AWSRe
 		return nil, err
 	}
 	if op.Status == sdOpSuccess {
-		if zoneErr := p.deleteHostedZone(ctx, ns.HostedZoneID); zoneErr != nil {
-			var awsErr *AWSError
-			if errors.As(zoneErr, &awsErr) {
-				op.fail(awsErr.Code, awsErr.Message)
-			} else {
-				return nil, zoneErr
-			}
-		}
-	}
-	if op.Status == sdOpSuccess {
-		if err := p.del(sdNamespaceKey(ctx, ns.ID)); err != nil {
+		// The operation is stored, then the namespace record removed, then the zone deleted, so a
+		// store failure leaves the zone, and a zone Route 53 refuses to delete restores the record.
+		if err := p.saveOperation(ctx, op); err != nil {
 			return nil, err
 		}
+		key := sdNamespaceKey(ctx, ns.ID)
+		if err := p.del(key); err != nil {
+			p.dropOperation(ctx, op)
+			return nil, err
+		}
+		zoneErr := p.deleteHostedZone(ctx, ns.HostedZoneID)
+		if zoneErr == nil {
+			return sdOperationAnswer(op)
+		}
+		if err := p.put(key, ns); err != nil && p.logger != nil {
+			p.logger.Warn("servicediscovery: restore namespace", "namespace", ns.ID, "error", err)
+		}
+		var awsErr *AWSError
+		if !errors.As(zoneErr, &awsErr) {
+			p.dropOperation(ctx, op)
+			return nil, zoneErr
+		}
+		op.fail(awsErr.Code, awsErr.Message)
 	}
 	if err := p.saveOperation(ctx, op); err != nil {
 		return nil, err

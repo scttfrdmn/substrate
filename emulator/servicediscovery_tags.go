@@ -65,21 +65,39 @@ func sdTagList(tags map[string]string) []taggingTag {
 	return out
 }
 
+// sdTagTarget is a namespace or service ARN resolved for a tag operation.
+type sdTagTarget struct {
+	// key is the record's state key.
+	key string
+	// account and region are the ARN's.
+	account, region string
+}
+
+// inScope reports whether the ARN names a resource in the caller's account and Region. Cloud Map
+// is regional and substrate models no cross-account namespace sharing, so an ARN naming another
+// account's or Region's resource is one the caller cannot see.
+func (t sdTagTarget) inScope(ctx *RequestContext) bool {
+	return t.account == ctx.AccountID && t.region == ctx.Region
+}
+
 // sdTagKeyForARN resolves a namespace or service ARN to its record's state key, reporting ok false
 // for an ARN that is neither.
-func sdTagKeyForARN(arn string) (string, bool) {
+func sdTagKeyForARN(arn string) (sdTagTarget, bool) {
 	parts, isARN := taggingSplitARN(arn)
 	if !isARN || parts[2] != serviceDiscoveryNamespace || parts[3] == "" || parts[4] == "" {
-		return "", false
+		return sdTagTarget{}, false
 	}
 	scope := parts[4] + "/" + parts[3] + "/"
+	t := sdTagTarget{account: parts[4], region: parts[3]}
 	if id, ok := strings.CutPrefix(parts[5], "namespace/"); ok && id != "" {
-		return sdNamespaceKeyPrefix + scope + id, true
+		t.key = sdNamespaceKeyPrefix + scope + id
+		return t, true
 	}
 	if id, ok := strings.CutPrefix(parts[5], "service/"); ok && id != "" {
-		return sdServiceKeyPrefix + scope + id, true
+		t.key = sdServiceKeyPrefix + scope + id
+		return t, true
 	}
-	return "", false
+	return sdTagTarget{}, false
 }
 
 // sdTaggedRecord is the part of a namespace or service record a tag write reads and writes; the
@@ -149,13 +167,14 @@ func (p *ServiceDiscoveryPlugin) resolveTagged(ctx *RequestContext, arn string) 
 	if arn == "" {
 		return "", sdInvalid("ResourceARN is required.")
 	}
-	key, ok := sdTagKeyForARN(arn)
+	target, ok := sdTagKeyForARN(arn)
 	if !ok {
 		return "", sdInvalid("Invalid resource ARN: %s.", arn)
 	}
-	if !strings.Contains(key, sdScope(ctx)) {
+	if !target.inScope(ctx) {
 		return "", sdError("ResourceNotFoundException", http.StatusNotFound, "Resource %s not found.", arn)
 	}
+	key := target.key
 	raw, err := p.state.Get(context.Background(), serviceDiscoveryNamespace, key)
 	if err != nil {
 		return "", fmt.Errorf("servicediscovery get %s: %w", key, err)
@@ -279,19 +298,23 @@ func (p *ServiceDiscoveryPlugin) listTaggedResources(ctx context.Context, reqCtx
 	return sdListTaggedResources(ctx, p.state, reqCtx)
 }
 
-// tagResourceByARN implements [resourceTagger]. An ARN that names no namespace or service is the
-// ARN's failure; the reserved-prefix refusal is the tagging API's own ([taggingReservedKeyRefusal]).
+// tagResourceByARN implements [resourceTagger]. An ARN that names no namespace or service, or names
+// one outside the caller's account and Region, is the ARN's failure; the reserved-prefix refusal is
+// the tagging API's own ([taggingReservedKeyRefusal]).
 func (p *ServiceDiscoveryPlugin) tagResourceByARN(
-	_ *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
+	reqCtx *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
 ) error {
-	key, ok := sdTagKeyForARN(arn)
+	target, ok := sdTagKeyForARN(arn)
 	if !ok {
 		return taggingResolveFailed(unsupportedTagResource("Cloud Map %q is not a namespace or service ARN", arn))
+	}
+	if !target.inScope(reqCtx) {
+		return taggingResolveFailed(fmt.Errorf("%w: %s is outside the caller's account and Region", errTagResourceNotFound, arn))
 	}
 	if refusal := taggingReservedKeyRefusal(add, remove); refusal != nil {
 		return taggingQuotaRefusal(refusal)
 	}
-	return p.tagRecord(context.Background(), key, add, remove, quota)
+	return p.tagRecord(context.Background(), target.key, add, remove, quota)
 }
 
 // tagRecord implements [resourceTagger], under the lock the plugin's own tag operations hold.

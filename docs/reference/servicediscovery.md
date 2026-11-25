@@ -8,7 +8,7 @@
 | Operation | Notes |
 |-----------|-------|
 | CreateHttpNamespace | Asynchronous (see below). A name already in use is `NamespaceAlreadyExists`/400, except a retry with the same `CreatorRequestId`, which answers the original `OperationId` |
-| CreatePrivateDnsNamespace | As above; `Vpc` is required. Creates a private Route 53 hosted zone of the same name |
+| CreatePrivateDnsNamespace | As above; `Vpc` is required, and the name need only be unique within the VPC. Creates a private Route 53 hosted zone of the same name |
 | CreatePublicDnsNamespace | As above; creates a public hosted zone |
 | GetNamespace | `Id` or ARN. `Properties.DnsProperties.HostedZoneId` for a DNS namespace, `SOA` when one was set, and `HttpProperties.HttpName` for every namespace |
 | ListNamespaces | `Filters` on `TYPE`, `NAME`, `HTTP_NAME` (`EQ`, `BEGINS_WITH`, and `IN` for `TYPE`) and `RESOURCE_OWNER`. Name order; pages on `NextToken`/`MaxResults` (1–100, default 100) |
@@ -66,7 +66,8 @@ Unseeded, an operation reports its settled status, `SUCCESS`, from its first obs
 - `status` (`SUCCESS` by default, or `FAIL`), `errorCode` and `errorMessage` decide the outcome of
   every operation that **starts** while the seed is in force. An operation already started keeps its
   outcome, because its effect has already been applied or withheld; a seed naming it by ID governs
-  only its countdown.
+  only its countdown. A `FAIL` seed must name an `errorCode`, so a failed operation always says what
+  failed; `errorMessage` may be empty.
 - `DELETE /v1/servicediscovery/operation-status` clears every seed, or one with `?operationId=…`.
 
 The seed is a control-plane write, recorded and replayed in position. A DNS namespace whose hosted
@@ -123,7 +124,7 @@ every run. `InstancesRevision` changes on every register and deregister, and not
 
 The Resource Groups Tagging API's `GetResources`, `TagResources` and `UntagResources` reach
 namespaces and services, under the lock the plugin's own tag operations hold. A resource whose tags
-were all removed is still reported, as a previously tagged resource.
+were all removed is still reported, as a previously tagged resource. An ARN naming another account's or Region's namespace or service is reported failed and changes nothing.
 
 ## The CBOR protocol is not served
 
@@ -140,4 +141,9 @@ v1.50 and later prefer CBOR, which this plugin does not answer yet
 | AWS::ServiceDiscovery::PrivateDnsNamespace | the namespace ID | As above, with `Fn::GetAtt HostedZoneId`. `Description` and `Properties` update in place; `Name` and `Vpc` replace it |
 | AWS::ServiceDiscovery::PublicDnsNamespace | the namespace ID | As for the private namespace, without `Vpc` |
 | AWS::ServiceDiscovery::Service | the service ID | `Fn::GetAtt Id`, `Arn`, `Name`. `Description`, `DnsConfig` and `HealthCheckConfig` update in place through `UpdateService`; `Name`, `NamespaceId`, `Type` and `HealthCheckCustomConfig` replace it. `ServiceAttributes` fails the resource, because substrate does not route `UpdateServiceAttributes` |
-| AWS::ServiceDiscovery::Instance | the `InstanceId` (the logical ID when absent) | Registers and waits on the operation; changed `InstanceAttributes` re-register it in place |
+| AWS::ServiceDiscovery::Instance | the `InstanceId` (the logical ID when absent) | Registers and waits on the operation; changed `InstanceAttributes` re-register it in place, and a new `ServiceId` or `InstanceId` replaces it |
+
+A namespace's or instance's delete waits on its operation, so a `FAIL` (seeded, or a hosted zone
+Route 53 refuses to delete) fails the resource rather than reading as deleted. Each namespace
+create carries a fresh `CreatorRequestId`, so a replacement — a `PrivateDnsNamespace` moved to
+another `Vpc` — creates a new namespace before the old one is deleted.
