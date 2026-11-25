@@ -129,7 +129,8 @@ so and takes effect on restart.
 *existence* instead: a request is checked against attached policies, inline policies and
 a permission boundary only once its access key resolves to an IAM entity substrate
 actually holds, and a caller that never created a user or role is authorized against
-nothing. An `auth.enabled` flag would overpromise in both directions — it could not turn
+nothing. The converse holds too: a key or session that named an IAM entity which has since been
+deleted is refused, not let through as if it never had one. An `auth.enabled` flag would overpromise in both directions — it could not turn
 enforcement off for a principal that exists, because IAM's own authorization resolves
 against state directly rather than through the controller.
 

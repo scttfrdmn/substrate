@@ -34,6 +34,20 @@ type IAMPlugin struct {
 	// providerMu serializes the read-check-write of an OpenID Connect or SAML provider record:
 	// a create's duplicate check, a client-ID or thumbprint change, a tag write and a delete.
 	providerMu sync.Mutex
+
+	// tagMu serializes the read-merge-write of a user's, role's or instance profile's tags: IAM's
+	// own TagUser, UntagUser, TagRole, UntagRole, TagInstanceProfile and UntagInstanceProfile, and
+	// the tagging API's TagResources and UntagResources through [IAMPlugin.tagRecord]. They hold
+	// entityMu only for reading, which does not exclude each other, so without it two concurrent
+	// tag writes to one record could each read the old tags and one write would be lost.
+	tagMu sync.Mutex
+
+	// entityMu makes a user or group rename atomic against every other IAM request:
+	// UpdateUser and UpdateGroup move a dozen records keyed by the name and hold it for
+	// writing, and every other operation holds it for reading (see [IAMPlugin.HandleRequest]).
+	// The server's principal resolution and authorization gate, GetSessionToken and the tagging
+	// API's IAM writes hold it for reading too ([iamEntityLocker]).
+	entityMu sync.RWMutex
 }
 
 // Name returns the service name "iam".
@@ -68,6 +82,20 @@ func (p *IAMPlugin) Shutdown(_ context.Context) error { return nil }
 // helper so the dispatch stays where the operation catalog reads it.
 func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *AWSResponse, err error) {
 	defer func() { resp = iamStampRequestID(resp, ctx) }()
+	if req.Operation == "UpdateUser" || req.Operation == "UpdateGroup" {
+		p.entityMu.Lock()
+		defer p.entityMu.Unlock()
+	} else {
+		p.entityMu.RLock()
+		defer p.entityMu.RUnlock()
+	}
+	// The caller was resolved before the lock was taken; a user renamed since is evaluated under
+	// its new name, and one that no longer exists is left as it was for the doors to refuse.
+	if refreshed, err := iamRefreshedPrincipal(context.Background(), p.state, ctx.Principal); err != nil {
+		return nil, fmt.Errorf("resolve the caller: %w", err)
+	} else if refreshed != nil {
+		ctx.Principal = refreshed
+	}
 	switch req.Operation {
 	case "CreateUser":
 		return p.createUser(ctx, req)
@@ -239,6 +267,32 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.listInstanceProfiles(ctx, req)
 	case "ListInstanceProfilesForRole":
 		return p.listInstanceProfilesForRole(ctx, req)
+
+	case "UpdateUser":
+		return p.updateUser(ctx, req)
+	case "UpdateGroup":
+		return p.updateGroup(ctx, req)
+	case "ListEntitiesForPolicy":
+		return p.listEntitiesForPolicy(ctx, req)
+
+	case "CreateLoginProfile":
+		return p.createLoginProfile(ctx, req)
+	case "GetLoginProfile":
+		return p.getLoginProfile(ctx, req)
+	case "UpdateLoginProfile":
+		return p.updateLoginProfile(ctx, req)
+	case "DeleteLoginProfile":
+		return p.deleteLoginProfile(ctx, req)
+	case "ListMFADevices":
+		return p.listUserCredentials(ctx, req, "MFADevices")
+	case "ListSSHPublicKeys":
+		return p.listUserCredentials(ctx, req, "SSHPublicKeys")
+	case "ListSigningCertificates":
+		return p.listUserCredentials(ctx, req, "Certificates")
+	case "ListServiceSpecificCredentials":
+		return p.listUserCredentials(ctx, req, "ServiceSpecificCredentials")
+	case "ListVirtualMFADevices":
+		return p.listVirtualMFADevices(ctx, req)
 
 	case "CreateOpenIDConnectProvider":
 		return p.createOpenIDConnectProvider(ctx, req)
@@ -452,6 +506,36 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			fmt.Sprintf("Cannot delete entity, must remove user from all groups first. "+
 				"Groups containing %s: %s", params.UserName, strings.Join(groups, ", ")),
 			http.StatusConflict), nil
+	}
+
+	// The rest of what the DeleteUser page says to remove first: "Password (DeleteLoginProfile)",
+	// "Access keys (DeleteAccessKey)" and "Inline policies (DeleteUserPolicy)". Substrate models
+	// no signing certificate, SSH key, service-specific credential or MFA device, so none can exist.
+	// Each wording is AWS's, observed through the AWS CLI and Terraform. Without these a deleted
+	// user's records stayed behind, and a user later created or renamed into the name inherited them.
+	profile, err := p.loadLoginProfile(goCtx, ctx.AccountID, params.UserName)
+	if err != nil {
+		return nil, err
+	}
+	if profile != nil {
+		return iamErrorResponse("DeleteConflict",
+			"Cannot delete entity, must delete login profile first.", http.StatusConflict), nil
+	}
+	keys, err := p.loadStringList(goCtx, iamUserAccessKeysKey(ctx.AccountID, params.UserName))
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) > 0 {
+		return iamErrorResponse("DeleteConflict",
+			"Cannot delete entity, must delete access keys first.", http.StatusConflict), nil
+	}
+	inline, err := p.loadInlinePolicyNames(goCtx, ctx.AccountID, "user", params.UserName)
+	if err != nil {
+		return nil, err
+	}
+	if len(inline) > 0 {
+		return iamErrorResponse("DeleteConflict",
+			"Cannot delete entity, must delete policies first.", http.StatusConflict), nil
 	}
 
 	if err := p.state.Delete(goCtx, iamNamespace, iamUserKey(ctx.AccountID, params.UserName)); err != nil {
@@ -1882,6 +1966,10 @@ func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 	if err != nil {
 		return fmt.Errorf("resolve principal for authorization: %w", err)
 	}
+	if !exists && reqCtx.Principal.iamCredential && entity.Name != "" {
+		// Denied, matching CheckAccess: the credential's owner has vanished.
+		return authzVanishedPrincipal(reqCtx, action, iamAccessDeniedCode)
+	}
 	if !exists {
 		// Not enforced, matching CheckAccess: enforcement is opt-in by creating the
 		// principal. Denying here instead would refuse every IAM call made with a
@@ -2573,6 +2661,9 @@ func (p *IAMPlugin) tagUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
@@ -2627,6 +2718,9 @@ func (p *IAMPlugin) untagUser(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	user, err := p.loadUser(goCtx, ctx.AccountID, params.UserName)
 	if err != nil {
 		return nil, err
@@ -2714,6 +2808,9 @@ func (p *IAMPlugin) tagRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err
@@ -2768,6 +2865,9 @@ func (p *IAMPlugin) untagRole(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	role, err := p.loadRole(goCtx, ctx.AccountID, params.RoleName)
 	if err != nil {
 		return nil, err

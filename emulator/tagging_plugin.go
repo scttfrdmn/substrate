@@ -2178,8 +2178,10 @@ var errTagResourceNotFound = errors.New("no resource at the resolved state key")
 // caller at all; [taggingCheckTagQuota] records the reasoning (#1000).
 //
 // owners is the registry the namespace's plugin is looked up in. When the plugin registered under
-// ns implements [resourceTagger] it writes the record itself, under its own lock; otherwise, and
-// for a nil registry, the record is merged here.
+// ns implements [resourceTagger] it writes the record itself, under the lock its own tag operations
+// take, so a write through this API and one through the service's API cannot lose each other (IAM's
+// is [IAMPlugin.tagMu], taken inside its rename lock's read side). Otherwise, and for a nil
+// registry, the record is merged here, with no lock against the owning service's own writes.
 func mergeResourceTags(
 	goCtx context.Context, owners *PluginRegistry, state StateManager, ns, key string,
 	addTags map[string]string, removeKeys []string, quota tagQuotaMode,
@@ -2257,46 +2259,7 @@ func mergeResourceTags(
 		return ec2MergeTaggedRecord(goCtx, state, key, raw, addTags, removeKeys)
 
 	case iamNamespace:
-		if strings.HasPrefix(key, "user:") {
-			var u IAMUser
-			if err := json.Unmarshal(raw, &u); err != nil {
-				return fmt.Errorf("unmarshal IAMUser: %w", err)
-			}
-			u.EverTagged = taggingEverTagged(u.EverTagged, len(u.Tags), len(addTags))
-			u.Tags = mergeIAMTags(u.Tags, addTags, removeKeys)
-			updated, err := json.Marshal(u)
-			if err != nil {
-				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
-			}
-			return state.Put(goCtx, ns, key, updated)
-		}
-		if strings.HasPrefix(key, "role:") {
-			var r IAMRole
-			if err := json.Unmarshal(raw, &r); err != nil {
-				return fmt.Errorf("unmarshal IAMRole: %w", err)
-			}
-			r.EverTagged = taggingEverTagged(r.EverTagged, len(r.Tags), len(addTags))
-			r.Tags = mergeIAMTags(r.Tags, addTags, removeKeys)
-			updated, err := json.Marshal(r)
-			if err != nil {
-				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
-			}
-			return state.Put(goCtx, ns, key, updated)
-		}
-		if strings.HasPrefix(key, "instance_profile:") {
-			var ip IAMInstanceProfile
-			if err := json.Unmarshal(raw, &ip); err != nil {
-				return fmt.Errorf("unmarshal IAMInstanceProfile: %w", err)
-			}
-			ip.EverTagged = taggingEverTagged(ip.EverTagged, len(ip.Tags), len(addTags))
-			ip.Tags = mergeIAMTags(ip.Tags, addTags, removeKeys)
-			updated, err := json.Marshal(ip)
-			if err != nil {
-				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
-			}
-			return state.Put(goCtx, ns, key, updated)
-		}
-		return fmt.Errorf("unsupported IAM resource key: %s", key)
+		return iamMergeRecordTags(goCtx, state, key, raw, addTags, removeKeys)
 
 	case apigatewayNamespace:
 		var api RestAPIState

@@ -94,6 +94,18 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 	"PutUserPermissionsBoundary":    {Type: "user", NameParams: []string{"UserName"}},
 	"DeleteUserPermissionsBoundary": {Type: "user", NameParams: []string{"UserName"}},
 	"ListGroupsForUser":             {Type: "user", NameParams: []string{"UserName"}},
+	// UpdateUser is decided against the source user here; the handler also decides it against
+	// the target name, which the page requires.
+	"UpdateUser":         {Type: "user", NameParams: []string{"UserName"}},
+	"CreateLoginProfile": {Type: "user", NameParams: []string{"UserName"}, CallerIsResource: true},
+	"GetLoginProfile":    {Type: "user", NameParams: []string{"UserName"}, CallerIsResource: true},
+	"UpdateLoginProfile": {Type: "user", NameParams: []string{"UserName"}},
+	"DeleteLoginProfile": {Type: "user", NameParams: []string{"UserName"}, CallerIsResource: true},
+	// The credential listings force_destroy reads; each names the caller when UserName is absent.
+	"ListMFADevices":                 {Type: "user", NameParams: []string{"UserName"}, CallerIsResource: true},
+	"ListSSHPublicKeys":              {Type: "user", NameParams: []string{"UserName"}, CallerIsResource: true},
+	"ListSigningCertificates":        {Type: "user", NameParams: []string{"UserName"}, CallerIsResource: true},
+	"ListServiceSpecificCredentials": {Type: "user", NameParams: []string{"UserName"}, CallerIsResource: true},
 
 	// The three access-key operations and ChangePassword name the caller's own user when
 	// they carry no UserName, which is the common form for all four.
@@ -139,6 +151,7 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 	"GetGroupPolicy":            {Type: "group", NameParams: []string{"GroupName"}},
 	"DeleteGroupPolicy":         {Type: "group", NameParams: []string{"GroupName"}},
 	"ListGroupPolicies":         {Type: "group", NameParams: []string{"GroupName"}},
+	"UpdateGroup":               {Type: "group", NameParams: []string{"GroupName"}},
 
 	// Policies. Only the create carries a name; the rest carry the finished ARN, which
 	// costs no state read and no path lookup.
@@ -153,6 +166,7 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 	"TagPolicy":               {Type: "policy", NameParams: []string{"PolicyArn"}},
 	"UntagPolicy":             {Type: "policy", NameParams: []string{"PolicyArn"}},
 	"ListPolicyTags":          {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"ListEntitiesForPolicy":   {Type: "policy", NameParams: []string{"PolicyArn"}},
 
 	// Instance profiles. AddRoleToInstanceProfile carries a RoleName too, and AWS still
 	// publishes only `instance-profile` for it — the profile is the resource a policy

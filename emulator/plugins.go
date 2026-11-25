@@ -182,7 +182,7 @@ func RegisterDefaultPlugins(
 		extra  map[string]any
 	}{
 		{&IAMPlugin{}, "iam", nil},
-		{&STSPlugin{}, "sts", nil},
+		{&STSPlugin{}, "sts", registryOpt},
 		{&LambdaPlugin{}, "lambda", registryOpt},
 		{&SQSPlugin{}, "sqs", nil},
 		{&DynamoDBPlugin{}, "dynamodb", nil},

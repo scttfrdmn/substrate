@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 )
 
 // IAM resource tagging.
@@ -373,6 +374,9 @@ func (p *IAMPlugin) tagInstanceProfile(ctx *RequestContext, req *AWSRequest) (*A
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	record, err := p.loadTaggedInstanceProfile(goCtx, ctx.AccountID, params.InstanceProfileName)
 	if err != nil {
 		return nil, err
@@ -415,6 +419,9 @@ func (p *IAMPlugin) untagInstanceProfile(ctx *RequestContext, req *AWSRequest) (
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.tagMu].
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	record, err := p.loadTaggedInstanceProfile(goCtx, ctx.AccountID, params.InstanceProfileName)
 	if err != nil {
 		return nil, err
@@ -460,4 +467,103 @@ func (p *IAMPlugin) listInstanceProfileTags(ctx *RequestContext, req *AWSRequest
 		return iamInstanceProfileNotFound(params.InstanceProfileName), nil
 	}
 	return iamTagListingResponse("ListInstanceProfileTags", record.tags, pg)
+}
+
+// --- The tagging API's writes to IAM records -----------------------------------
+
+// tagResourceByARN implements [resourceTagger]: the tagging API's TagResources and
+// UntagResources on a user, a role or an instance profile. A user's or role's ARN carries its
+// path, and the record is keyed by the name alone, so the name is the ARN's last segment.
+func (p *IAMPlugin) tagResourceByARN(reqCtx *RequestContext, arn string, add map[string]string, remove []string,
+	quota tagQuotaMode) error {
+	key, err := iamTaggingKey(arn)
+	if err != nil {
+		return taggingResolveFailed(err)
+	}
+	if refusal := taggingReservedKeyRefusal(add, remove); refusal != nil {
+		return taggingQuotaRefusal(refusal)
+	}
+	return p.tagRecord(context.Background(), key, add, remove, quota)
+}
+
+// tagRecord implements [resourceTagger]. It holds [IAMPlugin.entityMu] for reading, as IAM's own
+// operations do, so a tag write cannot interleave with a user rename and write a record back under
+// a name the rename has just removed; a write to a name that no longer exists is
+// [errTagResourceNotFound]. It holds [IAMPlugin.tagMu] across the read, merge and write, as IAM's
+// own tag operations do, so a concurrent tag write through either API is not lost.
+func (p *IAMPlugin) tagRecord(ctx context.Context, key string, add map[string]string, remove []string,
+	quota tagQuotaMode) error {
+	p.entityMu.RLock()
+	defer p.entityMu.RUnlock()
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
+	raw, err := loadTagRecord(ctx, p.state, iamNamespace, key)
+	if err != nil {
+		return err
+	}
+	if quota == enforceTagQuota {
+		if quotaErr := taggingCheckTagQuota(iamNamespace, key, raw, add, remove); quotaErr != nil {
+			return quotaErr
+		}
+	}
+	return iamMergeRecordTags(ctx, p.state, key, raw, add, remove)
+}
+
+// iamTaggingKey returns the state key of the user, role or instance profile an IAM ARN names.
+func iamTaggingKey(arn string) (string, error) {
+	resourceType, nameWithPath := parsePrincipalARN(arn)
+	acct := arnAccountID(arn)
+	name := iamFriendlyName(nameWithPath)
+	if acct == "" || name == "" {
+		return "", fmt.Errorf("invalid ARN: %q", arn)
+	}
+	switch resourceType {
+	case "user":
+		return iamUserKey(acct, name), nil
+	case "role":
+		return iamRoleKey(acct, name), nil
+	case "instance-profile":
+		return iamInstanceProfileKey(acct, name), nil
+	}
+	return "", unsupportedTagResource("IAM %q is not a taggable resource type", resourceType)
+}
+
+// iamMergeRecordTags merges add and remove into the IAM record raw at key and stores it.
+func iamMergeRecordTags(goCtx context.Context, state StateManager, key string, raw []byte,
+	addTags map[string]string, removeKeys []string) error {
+	var updated []byte
+	var err error
+	switch {
+	case strings.HasPrefix(key, "user:"):
+		updated, err = iamRetag(raw, addTags, removeKeys, func(u *IAMUser) (*[]IAMTag, *bool) { return &u.Tags, &u.EverTagged })
+	case strings.HasPrefix(key, "role:"):
+		updated, err = iamRetag(raw, addTags, removeKeys, func(r *IAMRole) (*[]IAMTag, *bool) { return &r.Tags, &r.EverTagged })
+	case strings.HasPrefix(key, "instance_profile:"):
+		updated, err = iamRetag(raw, addTags, removeKeys,
+			func(ip *IAMInstanceProfile) (*[]IAMTag, *bool) { return &ip.Tags, &ip.EverTagged })
+	default:
+		return fmt.Errorf("unsupported IAM resource key: %s", key)
+	}
+	if err != nil {
+		return err
+	}
+	return state.Put(goCtx, iamNamespace, key, updated)
+}
+
+// iamRetag decodes raw as a T, applies addTags and removeKeys to the tags fields names, sets its
+// previously-tagged flag ([taggingEverTagged]) and encodes it again.
+func iamRetag[T any](raw []byte, addTags map[string]string, removeKeys []string,
+	fields func(*T) (*[]IAMTag, *bool)) ([]byte, error) {
+	var record T
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, fmt.Errorf("unmarshal %T: %w", record, err)
+	}
+	tags, ever := fields(&record)
+	*ever = taggingEverTagged(*ever, len(*tags), len(addTags))
+	*tags = mergeIAMTags(*tags, addTags, removeKeys)
+	out, err := json.Marshal(&record)
+	if err != nil {
+		return nil, fmt.Errorf("marshal %T: %w", record, err)
+	}
+	return out, nil
 }

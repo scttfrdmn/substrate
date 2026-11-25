@@ -9,8 +9,18 @@
 |-----------|-------|
 | CreateUser | Returns User object |
 | GetUser | |
-| DeleteUser | |
+| DeleteUser | Refuses with `DeleteConflict`/409 while the user has a login profile, access keys, inline or attached policies, or group memberships, each in AWS's observed wording ("Cannot delete entity, must delete access keys first.") |
 | ListUsers | |
+| UpdateUser | Renames and re-paths a user, moving everything keyed by its name — see [Renaming a user or group](#renaming-a-user-or-group). `EntityAlreadyExists`/409 for a taken name |
+| CreateLoginProfile | Stores `CreateDate` and `PasswordResetRequired`; the password is never stored. `UserName` defaults to the caller |
+| GetLoginProfile | `NoSuchEntity`/404 "Login Profile for User … cannot be found." when there is none |
+| UpdateLoginProfile | Changes `PasswordResetRequired` when sent; a new password is accepted and not stored |
+| DeleteLoginProfile | |
+| ListMFADevices | Always empty for an existing user: substrate models no MFA device. `NoSuchEntity` for an absent one |
+| ListSSHPublicKeys | Always empty, as above |
+| ListSigningCertificates | Always empty, as above |
+| ListServiceSpecificCredentials | Always empty, as above |
+| ListVirtualMFADevices | Always empty; `AssignmentStatus` is validated |
 | CreateRole | Supports trust policy document; the response carries it as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | GetRole | Reports `AssumeRolePolicyDocument` as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | UpdateAssumeRolePolicy | Replaces the trust policy in place, kept as submitted; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
@@ -27,6 +37,7 @@
 | AddUserToGroup | Writes both sides of the membership index; idempotent |
 | RemoveUserFromGroup | Idempotent — removing a non-member is not an error, per the model |
 | ListGroupsForUser | |
+| UpdateGroup | Renames and re-paths a group, moving its policies and both sides of its memberships. `EntityAlreadyExists`/409 for a taken name |
 | AttachUserPolicy | Refuses a malformed `PolicyArn` with `InvalidInput`; a well-formed ARN that resolves nowhere succeeds and logs at `WARN` (see below) |
 | DetachUserPolicy | Refuses a malformed `PolicyArn` with `InvalidInput`, as the attach does; a well-formed ARN that is not attached answers `NoSuchEntity`/404 (see below) |
 | ListAttachedUserPolicies | |
@@ -43,6 +54,7 @@
 | CreatePolicy | |
 | GetPolicy | Resolves a bundled AWS managed policy or a `CreatePolicy` one; metadata only, as on AWS |
 | DeletePolicy | `DeleteConflict`/409 while attached, naming the users, groups and roles; `InvalidInput` for a malformed ARN or a bundled AWS managed one — see below |
+| ListEntitiesForPolicy | The users, groups and roles a managed policy is attached to, and (unless `PolicyUsageFilter=PermissionsPolicy`) the users and roles using it as a boundary. `EntityFilter` and `PathPrefix` narrow it; one `Marker` pages across all three kinds. `EntityFilter=LocalManagedPolicy`/`AWSManagedPolicy` selecting by the policy's own kind is substrate's reading, since AWS publishes none |
 | ListPolicies | Applies `Scope`, `PathPrefix` and `OnlyAttached`, and includes the bundled catalog. `PolicyUsageFilter` is validated and narrows nothing (see below) |
 | GetPolicyVersion | Returns any version's document as it was submitted, URL-encoded per RFC 3986. A bundled AWS managed policy has only its default version |
 | ListPolicyVersions | Newest first; pages with `MaxItems` and `Marker` |
@@ -559,9 +571,8 @@ consumer setting a description could not read it back at all.
 
 **`PasswordLastUsed` is rendered but never populated.** AWS documents it as *"returned only in
 the GetUser and ListUsers operations"*, and a null value means the user never signed in with a
-password. Substrate models no password operation at all — `ChangePassword`,
-`CreateLoginProfile` and `UpdateLoginProfile` answer `InvalidAction` — so nothing assigns the
-field and the member is always omitted in an ordinary run. It is rendered from the record so a
+password. A login profile (`CreateLoginProfile`) holds a password, but substrate models no console
+sign-in, so nothing assigns the field and the member is always omitted in an ordinary run. It is rendered from the record so a
 consumer that seeds one directly observes it.
 
 **`PermissionsBoundaryUsageCount` is computed on every policy read, not stored.** A boundary
@@ -1492,6 +1503,52 @@ reason `DeletePolicy` does. A `VersionId` that is not version-shaped at all is `
 The seeded documents are also readable in process through `emulator.GetManagedPolicy`, and
 are what the IAM policy evaluator reads.
 
+## Renaming a user or group
+
+`UpdateUser` and `UpdateGroup` change a name, a path or both. Everything substrate stores under the
+name moves with it:
+- the record, with its ARN rebuilt from the new path and name;
+- the attached and inline policies;
+- both sides of each group membership;
+- for a user, the access keys (each key's record names its user, and a request signed with the key
+  resolves to the renamed user), the login profile, and its `GetSessionToken` sessions. AWS ties a
+  session to the user rather than to its name, so a session minted before the rename keeps the
+  renamed user's permissions.
+
+**Readers outside IAM see one name or the other, whole.** These are principal resolution, the
+authorization gate and STS. The new name's records are written first, then its entity record. Next
+the pointers that name the user are flipped one by one, and only then are the old records deleted,
+old entity record first. **A failure part way through is undone:** every write records what it
+replaced, so the entity is left wholly under its old name and the rename can be retried. Writers
+that could race a rename take the same lock: IAM's own operations, and the tagging API's writes to
+IAM records, which go through IAM. So none of them can write a record back under a name the rename
+removed.
+
+**A request is decided against one side of a rename.** The server resolves a request's caller
+and runs the authorization gate while holding the rename lock for reading, so a rename cannot
+run between reading the caller and deciding the request. A Deny on the user, or on a group it
+belongs to, therefore holds throughout. Two kinds of handler act on a caller resolved before they
+took the lock: IAM's own operations, and `GetSessionToken`, which writes the caller into a new
+session. Both look the user up again under the lock by its unique ID (the `AIDA…` it was created
+with). A user renamed in between is acted on under its new name, and a new session names the user
+as it now is. Existing `GetSessionToken` sessions are matched to the renamed user by the same ID.
+A session recorded before #771 has no ID, so it is matched by its name and ARN.
+
+**A credential whose user or role is gone is refused.** This covers an access key or session whose
+user or role has since been deleted or renamed away. It answers `AccessDenied` in every service,
+"User: … is not authorized to perform: … because no identity-based policy allows the … action";
+the message is substrate's own, in the shape of AWS's implicit-deny message. Leaving such a
+request unenforced, as one from a credential that never named an entity is, would let it outrun
+the Deny on the entity it was signed for.
+
+**Tag writes do not lose each other.** `TagUser`, `UntagUser`, `TagRole`, `UntagRole`,
+`TagInstanceProfile` and `UntagInstanceProfile`, and the tagging API's writes to the same records,
+each read, merge and write under one lock. So two concurrent tag writes to one record both land.
+
+The rename also authorizes the target name, since AWS requires "permissions on both the source
+object and the target object". The `NoSuchEntity` and `EntityAlreadyExists` messages match the other
+user and group operations, and the path message is substrate's own.
+
 ## Identity providers
 
 An OpenID Connect or SAML provider is a record a role's trust policy names as a `Federated`
@@ -1540,11 +1597,11 @@ every key.
 | AWS::IAM::Role | RoleName | `CreateRole` with the trust policy, `Description`, `MaxSessionDuration` and `Tags`; then `PermissionsBoundary`, `ManagedPolicyArns` (attached) and `Policies` (embedded inline). Updated in place; `RoleName` and `Path` replace it. `Fn::GetAtt` `Arn`, `RoleId` |
 | AWS::IAM::Policy | a generated ID | An **inline** policy: `Put{Role,User,Group}Policy` under `PolicyName` on every entry of `Roles`, `Users` and `Groups`. Naming none of the three fails the resource. Updated in place. `Ref` and `Fn::GetAtt Id` answer the generated physical ID |
 | AWS::IAM::ManagedPolicy | the policy ARN | `CreatePolicy`, then attached to every entry of `Roles`, `Users` and `Groups`. A changed `PolicyDocument` becomes a new default version. `ManagedPolicyName`, `Path` and `Description` replace it. `Fn::GetAtt` `PolicyArn`, `PolicyId`, `DefaultVersionId`, `AttachmentCount`, `IsAttachable`, `PermissionsBoundaryUsageCount`, `CreateDate`, `UpdateDate` |
-| AWS::IAM::User | UserName | `CreateUser` with `Path` and `Tags`; then `PermissionsBoundary`, `Groups` (joined), `ManagedPolicyArns` and `Policies`. Updated in place, except `Path`, which needs the unrouted `UpdateUser` and fails the update. `LoginProfile` is not applied. `UserName` replaces it. `Fn::GetAtt Arn` |
+| AWS::IAM::User | UserName | `CreateUser` with `Path` and `Tags`; then `PermissionsBoundary`, `LoginProfile` (`CreateLoginProfile`), `Groups` (joined), `ManagedPolicyArns` and `Policies`. Updated in place: `Path` through `UpdateUser`, `LoginProfile` through Create/Update/`DeleteLoginProfile`. `UserName` replaces it. The delete removes the login profile first. `Fn::GetAtt Arn` |
 | AWS::IAM::InstanceProfile | InstanceProfileName | Attaches each entry in `Roles`; resolvable by an `AWS::EC2::Instance`'s `IamInstanceProfile` |
 | AWS::IAM::OIDCProvider | the provider ARN | `CreateOpenIDConnectProvider` with `ClientIdList`, `ThumbprintList` and `Tags`. Those three update in place against the live record; `Url` replaces it. `Fn::GetAtt Arn` |
 | AWS::IAM::SAMLProvider | the provider ARN | `CreateSAMLProvider` with `SamlMetadataDocument`, `AssertionEncryptionMode` and `Tags`, updated in place; `Name` replaces it. `Fn::GetAtt Arn`, `SamlProviderUUID` |
-| AWS::IAM::Group | GroupName | `CreateGroup` with `Path`; then `ManagedPolicyArns` and `Policies`. Updated in place, except `Path` (`UpdateGroup` is not routed). `GroupName` replaces it. `Fn::GetAtt Arn` |
+| AWS::IAM::Group | GroupName | `CreateGroup` with `Path`; then `ManagedPolicyArns` and `Policies`. Updated in place, `Path` through `UpdateGroup`. `GroupName` replaces it. `Fn::GetAtt Arn` |
 
 A role, user, group or policy remembers what it has in place: what its deploy and its updates
 attached, embedded and joined, written as each call succeeds. An update changes only the

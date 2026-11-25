@@ -155,7 +155,7 @@
     },
     "iam": {
       "apiVersion": "2010-05-08",
-      "operations": 97
+      "operations": 109
     },
     "kafka": {
       "apiVersion": "2018-11-14",

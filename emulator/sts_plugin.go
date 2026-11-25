@@ -29,16 +29,22 @@ type STSPlugin struct {
 	// seedMu serializes the read and count-down of a federation seed, so two concurrent assumes
 	// cannot both consume a seed's last use.
 	seedMu sync.Mutex
+
+	// registry is where GetSessionToken finds IAM's entity lock ([PluginRegistry.iamEntityReadLock]),
+	// from Options["registry"]. Nil when the plugin is built without one, which leaves nothing to
+	// race.
+	registry *PluginRegistry
 }
 
 // Name returns the service name "sts".
 func (p *STSPlugin) Name() string { return "sts" }
 
-// Initialize stores the provided configuration and optionally a TimeController
-// from Options["time_controller"].
+// Initialize stores the provided configuration, optionally a TimeController from
+// Options["time_controller"], and optionally the registry from Options["registry"].
 func (p *STSPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	p.state = cfg.State
 	p.logger = cfg.Logger
+	p.registry, _ = cfg.Options["registry"].(*PluginRegistry)
 	if tc, ok := cfg.Options["time_controller"]; ok {
 		if typed, ok := tc.(*TimeController); ok {
 			p.tc = typed
@@ -548,6 +554,22 @@ func stsTrustDecision(role IAMRole, principal, action string, condCtx map[string
 	})
 }
 
+// currentSessionUser points creds at the IAM user the caller is now, when the caller is one
+// ([iamRefreshedPrincipal]): the user found by its unique ID after a rename, or a refusal when it
+// no longer exists, as the authorization doors refuse a credential whose owner has vanished. A
+// caller that is no IAM user is left as it is.
+func (p *STSPlugin) currentSessionUser(goCtx context.Context, ctx *RequestContext, creds *STSSessionCredentials) error {
+	current, err := iamRefreshedPrincipal(goCtx, p.state, ctx.Principal)
+	if err != nil {
+		return fmt.Errorf("resolve the session's user: %w", err)
+	}
+	if current == nil {
+		return authzVanishedPrincipal(ctx, "sts:GetSessionToken", "AccessDenied")
+	}
+	creds.PrincipalARN, creds.UserName = current.ARN, current.UserName
+	return nil
+}
+
 func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	durationStr := req.Params["DurationSeconds"]
 
@@ -581,6 +603,13 @@ func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSR
 		Expiration:      expiry,
 		AccountID:       ctx.AccountID,
 	}
+	goCtx := context.Background()
+
+	// The user is read again, and the session written, under IAM's entity lock: the caller was
+	// resolved before this handler ran, and a rename in between would otherwise leave the new
+	// session naming the user's old name, which the rename's session rewrite had already passed.
+	release := p.registry.iamEntityReadLock()
+	defer release()
 	if ctx.Principal != nil {
 		creds.PrincipalARN = ctx.Principal.ARN
 		// GetSessionToken returns credentials for the *same* IAM user, so the session
@@ -592,9 +621,10 @@ func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSR
 		// pairing. Empty when the caller has none, in which case the session publishes
 		// no aws:userid either (#771).
 		creds.PrincipalID = ctx.Principal.UserID
+		if err := p.currentSessionUser(goCtx, ctx, &creds); err != nil {
+			return nil, err
+		}
 	}
-
-	goCtx := context.Background()
 
 	credRaw, err := json.Marshal(creds)
 	if err != nil {

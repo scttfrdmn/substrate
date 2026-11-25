@@ -306,18 +306,63 @@ func TestCFN_IAMUserAndGroupDeployAndDelete(t *testing.T) {
 	}
 }
 
-func TestCFN_IAMUserPathChangeIsRefused(t *testing.T) {
+func TestCFN_IAMUserAndGroupPathChangeAppliesInPlace(t *testing.T) {
 	d, _, _, _ := newSweepDeployer(t)
 	ctx := context.Background()
 	tmpl := func(path string) string {
-		return `{"Resources":{"U":{"Type":"AWS::IAM::User","Properties":{"UserName":"pathy","Path":"` + path + `"}}}}`
+		return `{"Resources":{
+			"G":{"Type":"AWS::IAM::Group","Properties":{"GroupName":"pathy-group","Path":"` + path + `"}},
+			"U":{"Type":"AWS::IAM::User","Properties":{"UserName":"pathy","Path":"` + path + `",
+				"Groups":[{"Ref":"G"}],"ManagedPolicyArns":["arn:aws:iam::aws:policy/ReadOnlyAccess"]}}}}`
 	}
 	_, err := d.Deploy(ctx, tmpl("/a/"), "pathy", nil)
 	require.NoError(t, err)
 	updated, err := d.UpdateStack(ctx, tmpl("/b/"), "pathy", nil, emulator.CFNDeployOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, "UPDATE_ROLLBACK_COMPLETE", updated.Status)
-	assert.Contains(t, updated.StatusReason, "UpdateUser")
+	require.Equal(t, "UPDATE_COMPLETE", updated.Status, updated.StatusReason)
+	assert.Equal(t, "pathy", resourceByLogicalID(t, updated, "U").PhysicalID, "the user keeps its physical ID")
+	assert.Equal(t, []string{"/b/"}, cfnIAMMembers(t, cfnIAMOK(t, d, "GetUser", map[string]string{"UserName": "pathy"}), "User>Path"))
+	assert.Equal(t, []string{"arn:aws:iam::123456789012:user/b/pathy"},
+		cfnIAMMembers(t, cfnIAMOK(t, d, "GetUser", map[string]string{"UserName": "pathy"}), "User>Arn"))
+	assert.Equal(t, []string{"/b/"}, cfnIAMMembers(t,
+		cfnIAMOK(t, d, "GetGroup", map[string]string{"GroupName": "pathy-group"}), "Group>Path"))
+	assert.Equal(t, []string{"pathy"}, cfnIAMMembers(t,
+		cfnIAMOK(t, d, "GetGroup", map[string]string{"GroupName": "pathy-group"}), "Users>member>UserName"),
+		"the membership survives the path change")
+	require.NoError(t, d.DeleteStack(ctx, "pathy"))
+}
+
+func TestCFN_IAMUserLoginProfile(t *testing.T) {
+	d, _, _, _ := newSweepDeployer(t)
+	ctx := context.Background()
+	tmpl := func(profile string) string {
+		return `{"Resources":{"U":{"Type":"AWS::IAM::User","Properties":{"UserName":"console"` + profile + `}}}}`
+	}
+	result, err := d.Deploy(ctx, tmpl(`,"LoginProfile":{"Password":"Initial-Passw0rd!","PasswordResetRequired":true}`), "console", nil)
+	require.NoError(t, err)
+	requireNoResourceErrors(t, result)
+	got := cfnIAMOK(t, d, "GetLoginProfile", map[string]string{"UserName": "console"})
+	assert.Equal(t, []string{"true"}, cfnIAMMembers(t, got, "LoginProfile>PasswordResetRequired"))
+	assert.NotContains(t, string(got), "Initial-Passw0rd!")
+
+	updated, err := d.UpdateStack(ctx, tmpl(`,"LoginProfile":{"Password":"Next-Passw0rd!","PasswordResetRequired":false}`),
+		"console", nil, emulator.CFNDeployOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "UPDATE_COMPLETE", updated.Status, updated.StatusReason)
+	got = cfnIAMOK(t, d, "GetLoginProfile", map[string]string{"UserName": "console"})
+	assert.Equal(t, []string{"false"}, cfnIAMMembers(t, got, "LoginProfile>PasswordResetRequired"))
+
+	updated, err = d.UpdateStack(ctx, tmpl(``), "console", nil, emulator.CFNDeployOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "UPDATE_COMPLETE", updated.Status, updated.StatusReason)
+	_, err = cfnIAMDo(t, d, "GetLoginProfile", map[string]string{"UserName": "console"})
+	require.Error(t, err, "a LoginProfile the declaration drops is deleted")
+
+	_, err = d.UpdateStack(ctx, tmpl(`,"LoginProfile":{"Password":"Again-Passw0rd!"}`), "console", nil, emulator.CFNDeployOptions{})
+	require.NoError(t, err)
+	require.NoError(t, d.DeleteStack(ctx, "console"), "the stack delete removes the login profile before the user")
+	_, err = cfnIAMDo(t, d, "GetUser", map[string]string{"UserName": "console"})
+	require.Error(t, err)
 }
 
 func TestCFN_IAMRoleAppliesItsPoliciesAndUpdatesInPlace(t *testing.T) {

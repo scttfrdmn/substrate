@@ -115,7 +115,7 @@ func TestSessionPolicy_NarrowsTheSecondaryPasses(t *testing.T) {
 	})
 }
 
-func TestSessionPolicy_AppliesWhenTheRoleIsGone(t *testing.T) {
+func TestSession_IsDeniedWhenTheRoleIsGone(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 	key := tsAdminSession(t, ts, url.Values{"Policy": {`{"Version":"2012-10-17","Statement":[
 		{"Effect":"Allow","Action":"iam:GetRole","Resource":"*"}]}`}})
@@ -126,12 +126,14 @@ func TestSessionPolicy_AppliesWhenTheRoleIsGone(t *testing.T) {
 		status, body := tsCall(t, ts, http.MethodPost, "/", "iam", setup, form, nil)
 		require.Equal(t, http.StatusOK, status, "%s: %s", op, body)
 	}
-	// The role no longer exists, so its identity policies cannot be read and are not enforced —
-	// but the session's own policy still narrows it.
-	status, body := tsCall(t, ts, http.MethodPost, "/", "iam", key,
-		url.Values{"Action": {"ListRoles"}, "Version": {"2010-05-08"}}, nil)
-	assert.Equal(t, http.StatusForbidden, status, body)
-	assert.Contains(t, body, "blocked by session policy")
+	// The session names a role that no longer exists: its owner has vanished, so the session is
+	// refused outright rather than left unenforced, through IAM's own door as through the gate's.
+	for _, action := range []string{"GetRole", "ListRoles"} {
+		status, body := tsCall(t, ts, http.MethodPost, "/", "iam", key,
+			url.Values{"Action": {action}, "Version": {"2010-05-08"}, "RoleName": {"admin"}}, nil)
+		assert.Equal(t, http.StatusForbidden, status, body)
+		assert.Contains(t, body, "because no identity-based policy allows the iam:"+action+" action")
+	}
 }
 
 func TestSessionPolicy_UnbundledAWSManagedPolicyFailsSafe(t *testing.T) {
@@ -364,7 +366,7 @@ func TestSessionPolicy_PresignedAndPostPolicyRequestsResolveTheirPrincipal(t *te
 	assert.Equal(t, http.StatusForbidden, post(readOnly), "a POST-policy upload is decided as its signer")
 }
 
-func TestSessionPolicy_RoleGoneKeepsTheSecondaryPasses(t *testing.T) {
+func TestSession_RoleGoneIsDeniedOutsideIAM(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 	key := tsAdminSession(t, ts, url.Values{"Policy": {`{"Version":"2012-10-17","Statement":[
 		{"Effect":"Allow","Action":"ec2:RunInstances","Resource":"*"}]}`}})
@@ -381,8 +383,8 @@ func TestSessionPolicy_RoleGoneKeepsTheSecondaryPasses(t *testing.T) {
 		"TagSpecification.1.ResourceType": {"instance"}, "TagSpecification.1.Tag.1.Key": {"team"},
 		"TagSpecification.1.Tag.1.Value": {"ci"}}
 	status, body := tsCall(t, ts, http.MethodPost, "/", "ec2", key, form, nil)
-	assert.Equal(t, http.StatusForbidden, status, "the tag-on-create pass still applies the session policy: %s", body)
-	assert.Contains(t, body, "blocked by session policy")
+	assert.Equal(t, http.StatusForbidden, status, "a session whose role is gone allows nothing: %s", body)
+	assert.Contains(t, body, "because no identity-based policy allows the ec2:RunInstances action")
 }
 
 func TestSTSAssumeRole_TransitiveKeyMustNameATag(t *testing.T) {
