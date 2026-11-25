@@ -132,6 +132,7 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	"rds":                  errProtoQueryXML,
 	"redshift":             errProtoQueryXML,
 	"route53":              errProtoQueryXML,
+	"ses":                  errProtoQueryXML,
 	"sns":                  errProtoQueryXML,
 	"sts":                  errProtoQueryXML,
 

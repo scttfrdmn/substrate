@@ -186,7 +186,22 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 // credential scope. A resolved "apigateway" is then refined by path, because API
 // Gateway v1 and v2 are indistinguishable by every other signal.
 func extractService(target, host, urlPath, authHeader string) string {
-	return refineAPIGatewayVersion(extractServiceSignals(target, host, urlPath, authHeader), urlPath)
+	return refineSESVersion(refineAPIGatewayVersion(extractServiceSignals(target, host, urlPath, authHeader), urlPath), urlPath)
+}
+
+// refineSESVersion resolves SES v1 versus SES v2, which share every routing signal: both
+// models declare the endpoint prefix "email" and the signing name "ses", and neither sends
+// X-Amz-Target. The path separates them. Every requestUri in the sesv2 model lives under
+// "/v2/", while SES v1 is the Query protocol, which POSTs its form to "/" (every operation's
+// requestUri in the ses model). So a "/v2/" path is SES v2 and anything else is SES v1.
+//
+// Like refineAPIGatewayVersion it acts only on a request that already resolved to the
+// service: a "/v2/" path alone is not evidence of SES.
+func refineSESVersion(service, urlPath string) string {
+	if service == "ses" && strings.HasPrefix(urlPath, "/v2/") {
+		return "sesv2"
+	}
+	return service
 }
 
 // refineAPIGatewayVersion resolves API Gateway v1 versus v2, which no other
@@ -331,12 +346,10 @@ var targetServiceAliases = map[string]string{
 	// answers XML. That is a protocol gap in CloudWatchPlugin, filed separately;
 	// this alias only makes the request arrive.
 	"graniteserviceversion20100801": "monitoring",
-	// "email" is the subdomain name for Amazon SES v2.
-	"email": "sesv2",
+	// "email" is the endpoint prefix of both SES APIs; refineSESVersion separates them.
+	"email": "ses",
 	// "Kafka_20181101" → strip version → "Kafka" → lowercase → "kafka" → "msk".
 	"kafka": "msk",
-	// SigV4 service name for Amazon SES v2 is "ses".
-	"ses": "sesv2",
 	// "AWSSimbaAPIService_v20180301" → strip "_" → "AWSSimbaAPIService" → lowercase → "awssimbaapiservice" → "fsx".
 	// The AWS Go SDK v2 FSx client uses this as the X-Amz-Target namespace.
 	"awssimbaapiservice": "fsx",

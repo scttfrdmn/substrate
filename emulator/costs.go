@@ -487,7 +487,12 @@ func defaultCostTable() map[string]float64 {
 		// Budgets: $0.02 per budget per month, approximated per-API call.
 		"budgets/CreateBudget": 0.00001,
 		// SES v2: $0.10 per 1,000 emails sent.
-		"sesv2/SendEmail": 0.0000001,
+		"sesv2/SendEmail": 0.0001,
+		// SES v1: $0.10 per 1,000 emails sent (aws.amazon.com/ses/pricing). SES bills each
+		// recipient as an email, and this table prices a call, so a message to several
+		// recipients is priced as one email; the same holds for SES v2 above.
+		"ses/SendEmail":    0.0001,
+		"ses/SendRawEmail": 0.0001,
 		// Firehose: $0.029 per GB ingested, approximated per record.
 		"firehose/PutRecord":      0.000000029,
 		"firehose/PutRecordBatch": 0.000000029,

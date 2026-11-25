@@ -746,7 +746,7 @@ func TestParseAWSRequest_ServiceFromSigV4Auth(t *testing.T) {
 		{"logs (CWLogs)", "AKIATEST12345678901/20240101/us-east-1/logs/aws4_request", "logs"},
 		{"elasticloadbalancing", "AKIATEST12345678901/20240101/us-east-1/elasticloadbalancing/aws4_request", "elasticloadbalancing"},
 		{"elasticfilesystem→efs", "AKIATEST12345678901/20240101/us-east-1/elasticfilesystem/aws4_request", "efs"},
-		{"ses→sesv2", "AKIATEST12345678901/20240101/us-east-1/ses/aws4_request", "sesv2"},
+		{"ses", "AKIATEST12345678901/20240101/us-east-1/ses/aws4_request", "ses"},
 		{"kafka→msk", "AKIATEST12345678901/20240101/us-east-1/kafka/aws4_request", "msk"},
 	}
 

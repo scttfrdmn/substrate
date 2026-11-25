@@ -73,6 +73,7 @@ var pluginModels = []pluginModel{
 	{plugin: "scheduler", models: []string{"scheduler"}},
 	{plugin: "secretsmanager", models: []string{"secretsmanager"}},
 	{plugin: "servicequotas", models: []string{"service-quotas"}},
+	{plugin: "ses", models: []string{"ses"}},
 	{plugin: "sesv2", models: []string{"sesv2"}},
 	{plugin: "sns", models: []string{"sns"}},
 	{plugin: "sqs", models: []string{"sqs"}},
