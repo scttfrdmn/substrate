@@ -218,11 +218,47 @@ func TestLambdaFunctionFields_AChangePublishesANewVersion(t *testing.T) {
 	for i, body := range []map[string]any{
 		{"EphemeralStorage": map[string]any{"Size": 1024}},
 		{"LoggingConfig": map[string]any{"LogGroup": "/custom"}},
-		{"ImageConfig": map[string]any{"Command": []string{"x"}}},
+		{"LoggingConfig": map[string]any{"LogFormat": "JSON"}},
 	} {
 		update(body)
 		assert.Equal(t, []string{"2", "3", "4"}[i], lambdaPublish(t, srv, "fp"), "%v", body)
 	}
+	update(map[string]any{"LoggingConfig": map[string]any{"ApplicationLogLevel": "INFO", "SystemLogLevel": "INFO"}})
+	assert.Equal(t, "4", lambdaPublish(t, srv, "fp"), "naming JSON's default levels changes nothing")
+
+	status, _, raw := lambdaDo(t, srv, http.MethodPost, "/2015-03-31/functions", map[string]any{
+		"FunctionName": "fp-img", "Role": "arn:aws:iam::123456789012:role/r", "PackageType": "Image",
+		"Code": map[string]any{"ImageUri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/fp:1"},
+	})
+	require.Equal(t, http.StatusCreated, status, raw)
+	require.Equal(t, "1", lambdaPublish(t, srv, "fp-img"))
+	status, _, raw = lambdaDo(t, srv, http.MethodPut, "/2015-03-31/functions/fp-img/configuration",
+		map[string]any{"ImageConfig": map[string]any{"Command": []string{"x"}}})
+	require.Equal(t, http.StatusOK, status, raw)
+	assert.Equal(t, "2", lambdaPublish(t, srv, "fp-img"), "an ImageConfig change publishes a new version")
+}
+
+// TestLambdaFunctionFields_ImageConfigOnAZipFunctionIsRefused pins the refusal Lambda answers for an
+// ImageConfig on a function packaged as a .zip archive, on create and on update.
+func TestLambdaFunctionFields_ImageConfigOnAZipFunctionIsRefused(t *testing.T) {
+	t.Parallel()
+	srv := newLambdaTestServer(t)
+	const message = "The ImageConfig parameter is not supported for functions created with deployment packages."
+	status, _, raw := lambdaDo(t, srv, http.MethodPost, "/2015-03-31/functions", map[string]any{
+		"FunctionName": "zip-img", "Runtime": "python3.12", "Handler": "index.handler",
+		"Role": "arn:aws:iam::123456789012:role/r", "ImageConfig": map[string]any{"Command": []string{"x"}},
+	})
+	assert.Equal(t, http.StatusBadRequest, status, raw)
+	assert.Contains(t, raw, message)
+
+	lambdaCreateZipFunction(t, srv, "zip", "print(1)", nil)
+	status, _, raw = lambdaDo(t, srv, http.MethodPut, "/2015-03-31/functions/zip/configuration",
+		map[string]any{"ImageConfig": map[string]any{"WorkingDirectory": "/w"}})
+	assert.Equal(t, http.StatusBadRequest, status, raw)
+	assert.Contains(t, raw, message)
+	status, _, raw = lambdaDo(t, srv, http.MethodPut, "/2015-03-31/functions/zip/configuration",
+		map[string]any{"ImageConfig": map[string]any{}})
+	assert.Equal(t, http.StatusOK, status, "an empty ImageConfig overrides nothing: %s", raw)
 }
 
 // TestLambdaFunctionFields_ARecordWithoutThemRendersTheDefaults reads a function record an older

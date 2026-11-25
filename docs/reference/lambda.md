@@ -34,7 +34,7 @@
 | ListFunctionEventInvokeConfigs | The function's own configuration first, then its versions' and aliases'. `MaxItems` 1–50, 50 when absent; a `Marker` substrate did not issue is refused |
 | CreateEventSourceMapping | `BatchSize` defaults to 10 for an SQS queue and 100 for every other source, as published. An SQS source refuses `StartingPosition`, and a queue whose `VisibilityTimeout` is lower than the function's `Timeout`, with the `InvalidParameterValueException` messages Lambda is observed to answer. Records `FunctionResponseTypes` (`ReportBatchItemFailures`), `ScalingConfig.MaximumConcurrency` (2–1000, SQS only) and `Tags` as intent, and answers `EventSourceMappingArn` (#1659, #1660) |
 | GetEventSourceMapping | By UUID. No `Tags`: `EventSourceMappingConfiguration` has no such member, so a mapping's tags are read with `ListTags` on its `EventSourceMappingArn` |
-| UpdateEventSourceMapping | `BatchSize`, `Enabled`, `FunctionName`, `FunctionResponseTypes` and `ScalingConfig`, an empty one of the last two clearing it; all optional, so an **absent** body is a no-op update rather than a refusal and only a present-but-unparseable body is refused. Toggling `Enabled` starts or stops polling; re-enabling restarts the cadence from now (#1292) |
+| UpdateEventSourceMapping | `BatchSize`, `Enabled`, `FunctionName`, `FunctionResponseTypes` and `ScalingConfig`, an empty one of the last two clearing it. Re-pointing an SQS mapping at another function runs the visibility-timeout check again. All optional, so an **absent** body is a no-op update rather than a refusal and only a present-but-unparseable body is refused. Toggling `Enabled` starts or stops polling; re-enabling restarts the cadence from now (#1292) |
 | DeleteEventSourceMapping | |
 | ListEventSourceMappings | Paginates on `MaxItems`/`Marker`; an absent `MaxItems` answers the published per-response cap of 100, a value outside 1–10000 is refused, and a `Marker` substrate did not issue is refused with `InvalidParameterValueException` — see [Two more cursors published and unread](/reference/concepts/listing-order#two-more-cursors-published-and-unread-outside-ec2) |
 | TagResource | `204` with no body. Takes a function ARN or an event-source-mapping ARN (#1660). Published under [`2017-03-31`](#each-operation-is-published-under-its-own-api-version-date), as the other two tag operations are |
@@ -65,7 +65,7 @@ aliases) answers them back (#1659). Substrate runs no container, mounts no `/tmp
 
 | Field | Answered as | Default | Refused |
 |---|---|---|---|
-| `ImageConfig` (`EntryPoint`, `Command`, `WorkingDirectory`) | `ImageConfigResponse.ImageConfig`, for a function with `PackageType: Image` | none | |
+| `ImageConfig` (`EntryPoint`, `Command`, `WorkingDirectory`) | `ImageConfigResponse.ImageConfig`, for a function with `PackageType: Image` | none | on a `Zip` function, `InvalidParameterValueException` with the message Lambda is observed to answer |
 | `EphemeralStorage.Size` | `EphemeralStorage.Size` | 512 | outside 512–10240, `InvalidParameterValueException` |
 | `LoggingConfig` | `LoggingConfig` | `LogFormat: Text`, `LogGroup: /aws/lambda/` followed by the function name; under `JSON`, both levels `INFO` | a value outside an enum, and either level under `Text`, `InvalidParameterValueException` |
 
@@ -73,7 +73,7 @@ A level under `Text`, whether named or the default format, is refused with the m
 observed to answer: `LogLevel is not supported when LogFormat is set to "Text". Remove LogLevel from
 your request or change the LogFormat to "JSON" and try again.` On an update, a `LoggingConfig`
 member the request names replaces the function's, and setting `LogFormat` to `Text` without a level
-drops the stored levels. A change to any of the three is a change `PublishVersion` publishes as a new
+drops the stored levels. Under `JSON`, a level of `INFO` is the default, the same function as an omitted level. A change to any of the three is a change `PublishVersion` publishes as a new
 version; an explicit default is the same function as an omitted one, so it is not.
 
 ## Versions and aliases

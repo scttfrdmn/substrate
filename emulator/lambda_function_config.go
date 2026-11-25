@@ -162,6 +162,13 @@ func lambdaResolveLoggingConfig(current, req *LambdaLoggingConfig, functionName 
 		return nil, lambdaInvalidParameterValue(`LogLevel is not supported when LogFormat is set to "Text". ` +
 			`Remove LogLevel from your request or change the LogFormat to "JSON" and try again.`)
 	}
+	// A level equal to JSON's default is the default, so naming it is the same record as omitting it.
+	if merged.ApplicationLogLevel == lambdaLogLevelDefault {
+		merged.ApplicationLogLevel = ""
+	}
+	if merged.SystemLogLevel == lambdaLogLevelDefault {
+		merged.SystemLogLevel = ""
+	}
 	if merged.LogGroup == lambdaDefaultLogGroup(functionName) {
 		merged.LogGroup = ""
 	}
@@ -169,6 +176,13 @@ func lambdaResolveLoggingConfig(current, req *LambdaLoggingConfig, functionName 
 		return nil, nil
 	}
 	return &merged, nil
+}
+
+// lambdaImageConfigOnZip refuses an ImageConfig on a function whose package is a .zip archive. The
+// message is the one Lambda answers, observed rather than published: CreateFunction's refusal quoted
+// in Stack Overflow question 76862775 from the Terraform AWS provider.
+func lambdaImageConfigOnZip() *AWSError {
+	return lambdaInvalidParameterValue("The ImageConfig parameter is not supported for functions created with deployment packages.")
 }
 
 // lambdaResolveImageConfig returns the ImageConfig the record keeps: the request's, which replaces

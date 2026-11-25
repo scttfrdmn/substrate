@@ -225,10 +225,12 @@ func (p *LambdaPlugin) loadESMByARN(ctx *RequestContext, arn, action string) (*E
 	return esm, nil
 }
 
-// tagESM merges a tag set onto a mapping: TagResource on an event-source-mapping ARN.
+// tagESM merges a tag set onto a mapping: TagResource on an event-source-mapping ARN. The mapping is
+// read under [LambdaPlugin.esmWriteMu], so a tag cannot re-save a mapping a delete has removed or be
+// lost to an update's stale copy.
 func (p *LambdaPlugin) tagESM(ctx *RequestContext, arn string, tags map[string]string) (*AWSResponse, error) {
-	p.esmTagMu.Lock()
-	defer p.esmTagMu.Unlock()
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
 	esm, err := p.loadESMByARN(ctx, arn, "lambda:TagResource")
 	if err != nil {
 		return nil, err
@@ -243,8 +245,8 @@ func (p *LambdaPlugin) tagESM(ctx *RequestContext, arn string, tags map[string]s
 
 // untagESM removes tag keys from a mapping: UntagResource on an event-source-mapping ARN.
 func (p *LambdaPlugin) untagESM(ctx *RequestContext, arn string, keys []string) (*AWSResponse, error) {
-	p.esmTagMu.Lock()
-	defer p.esmTagMu.Unlock()
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
 	esm, err := p.loadESMByARN(ctx, arn, "lambda:UntagResource")
 	if err != nil {
 		return nil, err

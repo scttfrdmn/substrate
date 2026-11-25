@@ -38,14 +38,14 @@ type LambdaPlugin struct {
 	// [progression.observe].
 	seedMu sync.Mutex
 	// versionMu serializes the operations that read, check and write a function's versions and
-	// aliases: PublishVersion's counter, an alias's existence and targets, and the alias check that
-	// guards deleting a version.
+	// aliases: PublishVersion's counter, an alias's existence and targets, the alias check that
+	// guards deleting a version, and the event-invoke configuration writes, which resolve the version
+	// or alias they belong to and must not outlive its delete.
 	versionMu sync.Mutex
-	// invokeConfigMu serializes the event-invoke configuration writes, so an Update's merge reads
-	// the configuration it replaces.
-	invokeConfigMu sync.Mutex
-	// esmTagMu serializes the tag operations on event-source mappings.
-	esmTagMu sync.Mutex
+	// esmWriteMu serializes every write to an event-source mapping record and to the per-function
+	// mapping index: create, update, delete, tag and untag. Each reads the record under it, so none
+	// saves a stale copy over another's write or re-saves a mapping a delete removed.
+	esmWriteMu sync.Mutex
 }
 
 // Name returns the service name "lambda".
@@ -270,6 +270,9 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	archs := body.Architectures
 	if len(archs) == 0 {
 		archs = []string{"x86_64"}
+	}
+	if pkgType != "Image" && !body.ImageConfig.empty() {
+		return nil, lambdaImageConfigOnZip()
 	}
 
 	now := p.tc.Now()
@@ -525,6 +528,9 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 		fn.EphemeralStorageSize = ephemeral
 	}
 	fn.LoggingConfig = logging
+	if fn.PackageType != "Image" && !body.ImageConfig.empty() {
+		return nil, lambdaImageConfigOnZip()
+	}
 	fn.ImageConfig = lambdaResolveImageConfig(fn.ImageConfig, body.ImageConfig)
 	if body.TracingConfig.Mode != "" {
 		fn.TracingMode = body.TracingConfig.Mode
@@ -1495,6 +1501,8 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 	}
 
 	uuid := ctx.IDs.HexUUID()
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
 	esm := &ESMConfig{
 		UUID:                  uuid,
 		FunctionARN:           functionARN,
@@ -1773,12 +1781,20 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 		newFunctionARN = arn
 	}
 
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
 	esm, err := p.loadESM(context.Background(), uuid)
 	if err != nil {
 		return nil, err
 	}
 	if esm == nil {
 		return nil, lambdaESMNotFound(uuid)
+	}
+	// Re-pointing an SQS mapping is checked against the new function's timeout, as a create is.
+	if newFunctionARN != "" && newFunctionARN != esm.FunctionARN && lambdaIsSQSSource(esm.EventSourceARN) {
+		if err := p.checkQueueVisibility(ctx, input.FunctionName, esm.EventSourceARN); err != nil {
+			return nil, err
+		}
 	}
 	if input.ScalingConfig != nil {
 		scaling, awsErr := lambdaValidateScalingConfig(input.ScalingConfig, esm.EventSourceARN)
@@ -1835,6 +1851,8 @@ func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSReq
 }
 
 func (p *LambdaPlugin) deleteEventSourceMapping(_ *RequestContext, uuid string) (*AWSResponse, error) {
+	p.esmWriteMu.Lock()
+	defer p.esmWriteMu.Unlock()
 	esm, err := p.loadESM(context.Background(), uuid)
 	if err != nil {
 		return nil, err

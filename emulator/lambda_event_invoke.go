@@ -174,6 +174,11 @@ func (p *LambdaPlugin) loadEventInvokeConfig(key string) (*LambdaEventInvokeConf
 // writeFunctionEventInvokeConfig serves Put (replace) and Update (merge). The body is parsed before
 // the function is looked up, as for every Lambda write ([LambdaPlugin.updateFunctionCode]). Update
 // of a function, version or alias with no configuration is the not-found Get answers.
+//
+// The target is resolved and the configuration written under [LambdaPlugin.versionMu], the lock
+// DeleteFunction, deleting a version and DeleteAlias hold while they delete the configurations they
+// own: otherwise a write could resolve an alias, lose the race to its delete, and leave a
+// configuration that an alias re-created under the name would inherit.
 func (p *LambdaPlugin) writeFunctionEventInvokeConfig(ctx *RequestContext, req *AWSRequest, ref string, replace bool) (*AWSResponse, error) {
 	body, awsErr := parseLambdaEventInvokeRequest(req)
 	if awsErr != nil {
@@ -183,6 +188,8 @@ func (p *LambdaPlugin) writeFunctionEventInvokeConfig(ctx *RequestContext, req *
 	if replace {
 		action = "lambda:PutFunctionEventInvokeConfig"
 	}
+	p.versionMu.Lock()
+	defer p.versionMu.Unlock()
 	t, err := p.resolveFunction(ctx, ref, req.Params["Qualifier"], action)
 	if err != nil {
 		return nil, err
@@ -190,8 +197,6 @@ func (p *LambdaPlugin) writeFunctionEventInvokeConfig(ctx *RequestContext, req *
 	qualifier := lambdaInvokeConfigQualifier(t)
 	key := lambdaQualifiedInvokeConfigStateKey(t.accountID, t.region, t.latest.FunctionName, qualifier)
 
-	p.invokeConfigMu.Lock()
-	defer p.invokeConfigMu.Unlock()
 	existing, err := p.loadEventInvokeConfig(key)
 	if err != nil {
 		return nil, err
@@ -246,8 +251,11 @@ func (p *LambdaPlugin) getFunctionEventInvokeConfig(ctx *RequestContext, req *AW
 }
 
 // deleteFunctionEventInvokeConfig answers DeleteFunctionEventInvokeConfig with the 204 its page
-// publishes, or the not-found Get answers when there is nothing to delete.
+// publishes, or the not-found Get answers when there is nothing to delete. It holds
+// [LambdaPlugin.versionMu] as the writes do.
 func (p *LambdaPlugin) deleteFunctionEventInvokeConfig(ctx *RequestContext, req *AWSRequest, ref string) (*AWSResponse, error) {
+	p.versionMu.Lock()
+	defer p.versionMu.Unlock()
 	t, err := p.resolveFunction(ctx, ref, req.Params["Qualifier"], "lambda:DeleteFunctionEventInvokeConfig")
 	if err != nil {
 		return nil, err
@@ -255,8 +263,6 @@ func (p *LambdaPlugin) deleteFunctionEventInvokeConfig(ctx *RequestContext, req 
 	qualifier := lambdaInvokeConfigQualifier(t)
 	key := lambdaQualifiedInvokeConfigStateKey(t.accountID, t.region, t.latest.FunctionName, qualifier)
 
-	p.invokeConfigMu.Lock()
-	defer p.invokeConfigMu.Unlock()
 	cfg, err := p.loadEventInvokeConfig(key)
 	if err != nil {
 		return nil, err

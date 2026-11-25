@@ -136,6 +136,17 @@ func TestLambdaESMFields_SQSRefusals(t *testing.T) {
 		})
 	}
 
+	status, created, raw := esmLambda(t, ts, http.MethodPost, "/2015-03-31/event-source-mappings",
+		map[string]any{"FunctionName": "quick", "EventSourceArn": short})
+	require.Equal(t, http.StatusCreated, status, raw)
+	uuid := created["UUID"].(string)
+	status, _, raw = esmLambda(t, ts, http.MethodPut, "/2015-03-31/event-source-mappings/"+uuid, map[string]any{"FunctionName": "slow"})
+	assert.Equal(t, http.StatusBadRequest, status, "re-pointing at a slower function is checked too: %s", raw)
+	assert.Contains(t, raw, "Queue visibility timeout: 30 seconds is less than Function timeout: 60 seconds")
+	status, got, raw := esmLambda(t, ts, http.MethodGet, "/2015-03-31/event-source-mappings/"+uuid, nil)
+	require.Equal(t, http.StatusOK, status, raw)
+	assert.Equal(t, "arn:aws:lambda:us-east-1:123456789012:function:quick", got["FunctionArn"], "a refused update changes nothing")
+
 	for _, tc := range []struct{ name, fn, source string }{
 		{"a timeout equal to the visibility", "quick", short},
 		{"a visibility above the timeout", "slow", long},
