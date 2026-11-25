@@ -131,3 +131,29 @@ func TestCFN_ScalingPolicyTargetForms(t *testing.T) {
 	step := pols[0].(map[string]any)["StepScalingPolicyConfiguration"].(map[string]any)
 	assert.EqualValues(t, 60, step["Cooldown"])
 }
+
+// TestCFN_ApplicationAutoScalingRefusals pins that a refused registration, policy or scheduled
+// action fails its resource, and the stack rolls back.
+func TestCFN_ApplicationAutoScalingRefusals(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	for name, tc := range map[string]struct{ resources, reason string }{
+		"missing table": {`"T":{"Type":"AWS::ApplicationAutoScaling::ScalableTarget","Properties":{"ServiceNamespace":"dynamodb",
+			"ScalableDimension":"dynamodb:table:ReadCapacityUnits","ResourceId":"table/missing","MinCapacity":1,"MaxCapacity":2}}`,
+			"DynamoDB resource doesn't exist"},
+		"unregistered target": {`"P":{"Type":"AWS::ApplicationAutoScaling::ScalingPolicy","Properties":{"PolicyName":"p","PolicyType":"StepScaling",
+			"ScalingTargetId":"r|custom-resource:ResourceType:Property|custom-resource",
+			"StepScalingPolicyConfiguration":{"AdjustmentType":"ChangeInCapacity"}}}`,
+			"No scalable target registered"},
+		"bad schedule": {`"T":{"Type":"AWS::ApplicationAutoScaling::ScalableTarget","Properties":{"ServiceNamespace":"custom-resource",
+			"ScalableDimension":"custom-resource:ResourceType:Property","ResourceId":"r","MinCapacity":0,"MaxCapacity":2,
+			"ScheduledActions":[{"ScheduledActionName":"s","Schedule":"sometimes","EndTime":"2031-01-01T00:00:00"}]}}`,
+			"Unsupported schedule expression"},
+	} {
+		stack := strings.ReplaceAll(name, " ", "-")
+		code, body := cfnStrictCall(t, ts, "CreateStack", map[string]string{"StackName": stack, "TemplateBody": `{"Resources":{` + tc.resources + `}}`})
+		require.Equal(t, http.StatusOK, code, body)
+		status, reason := cfnStackStatusOf(t, ts, stack)
+		assert.Equal(t, "ROLLBACK_COMPLETE", status, name)
+		assert.Contains(t, reason, tc.reason, name)
+	}
+}

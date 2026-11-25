@@ -337,6 +337,33 @@ func TestApplicationAutoScaling_Refusals(t *testing.T) {
 		{"untag without keys", "UntagResource", map[string]any{"ResourceARN": "arn:aws:application-autoscaling:us-east-1:123456789012:scalable-target/0123abcd"}, "ValidationException", ""},
 		{"list tags of another Region", "ListTagsForResource", map[string]any{"ResourceARN": "arn:aws:application-autoscaling:eu-west-1:123456789012:scalable-target/0123abcd"}, "ResourceNotFoundException", ""},
 		{"unknown operation", "GetPredictiveScalingForecast", map[string]any{}, "UnknownOperationException", ""},
+		{"delete a policy without a name", "DeleteScalingPolicy", ddb(nil), "ValidationException", ""},
+		{"delete a policy on a bad target", "DeleteScalingPolicy", ddb(map[string]any{"PolicyName": "p", "ServiceNamespace": "nope"}), "ValidationException", ""},
+		{"delete an unknown policy", "DeleteScalingPolicy", ddb(map[string]any{"PolicyName": "none"}), "ObjectNotFoundException", ""},
+		{"delete a scheduled action without a name", "DeleteScheduledAction", ddb(nil), "ValidationException", ""},
+		{"delete a scheduled action on a bad target", "DeleteScheduledAction", ddb(map[string]any{"ScheduledActionName": "s", "ScalableDimension": ""}), "ValidationException", ""},
+		{"deregister a bad target", "DeregisterScalableTarget", ddb(map[string]any{"ResourceId": "nope"}), "ValidationException", ""},
+		{"scheduled action without a name", "PutScheduledAction", ddb(map[string]any{"Schedule": "rate(1 day)"}), "ValidationException", ""},
+		{"scheduled action on a bad target", "PutScheduledAction", ddb(map[string]any{"ScheduledActionName": "s", "ResourceId": "x"}), "ValidationException", ""},
+		{"long policy name", "PutScalingPolicy", ddb(map[string]any{"PolicyName": strings.Repeat("p", 257)}), "ValidationException", ""},
+		{"policy on a bad target", "PutScalingPolicy", ddb(map[string]any{"PolicyName": "p", "ScalableDimension": "ecs:service:DesiredCount"}), "ValidationException", ""},
+		{"long resource ID", "RegisterScalableTarget", map[string]any{"ServiceNamespace": "custom-resource", "ResourceId": strings.Repeat("r", 1601), "ScalableDimension": "custom-resource:ResourceType:Property", "MinCapacity": 0, "MaxCapacity": 1}, "ValidationException", ""},
+		{"negative maximum", "RegisterScalableTarget", ddb(map[string]any{"MaxCapacity": -1}), "ValidationException", ""},
+		{"no dimension", "RegisterScalableTarget", ddb(map[string]any{"ScalableDimension": ""}), "ValidationException", ""},
+		{"too many resource IDs", "DescribeScalableTargets", map[string]any{"ServiceNamespace": "dynamodb", "ResourceIds": make([]string, 51)}, "ValidationException", ""},
+		{"too many policy names", "DescribeScalingPolicies", map[string]any{"ServiceNamespace": "dynamodb", "PolicyNames": make([]string, 51)}, "ValidationException", ""},
+		{"too many action names", "DescribeScheduledActions", map[string]any{"ServiceNamespace": "dynamodb", "ScheduledActionNames": make([]string, 51)}, "ValidationException", ""},
+		{"scheduled page size", "DescribeScheduledActions", map[string]any{"ServiceNamespace": "dynamodb", "MaxResults": 51}, "ValidationException", ""},
+		{"activities namespace", "DescribeScalingActivities", map[string]any{"ServiceNamespace": "nope"}, "ValidationException", ""},
+		{"policies token", "DescribeScalingPolicies", map[string]any{"ServiceNamespace": "dynamodb", "NextToken": "x"}, "InvalidNextTokenException", ""},
+		{"actions token", "DescribeScheduledActions", map[string]any{"ServiceNamespace": "dynamodb", "NextToken": "x"}, "InvalidNextTokenException", ""},
+		{"long tag key", "RegisterScalableTarget", map[string]any{"ServiceNamespace": "custom-resource", "ResourceId": "t", "ScalableDimension": "custom-resource:ResourceType:Property", "MinCapacity": 0, "MaxCapacity": 1, "Tags": map[string]string{strings.Repeat("k", 129): "v"}}, "ValidationException", ""},
+		{"long tag value", "RegisterScalableTarget", map[string]any{"ServiceNamespace": "custom-resource", "ResourceId": "t", "ScalableDimension": "custom-resource:ResourceType:Property", "MinCapacity": 0, "MaxCapacity": 1, "Tags": map[string]string{"k": strings.Repeat("v", 257)}}, "ValidationException", ""},
+		{"ARN with a letter account", "ListTagsForResource", map[string]any{"ResourceARN": "arn:aws:application-autoscaling:us-east-1:12345678901x:scalable-target/abc"}, "ValidationException", ""},
+		{"ARN with a bad ID", "ListTagsForResource", map[string]any{"ResourceARN": "arn:aws:application-autoscaling:us-east-1:123456789012:scalable-target/a_b"}, "ValidationException", ""},
+		{"ARN of another resource", "ListTagsForResource", map[string]any{"ResourceARN": "arn:aws:application-autoscaling:us-east-1:123456789012:policy/abc"}, "ValidationException", ""},
+		{"no ARN", "ListTagsForResource", map[string]any{}, "ValidationException", ""},
+		{"untag an unknown target", "UntagResource", map[string]any{"ResourceARN": "arn:aws:application-autoscaling:us-east-1:123456789012:scalable-target/abc", "TagKeys": []string{"a"}}, "ResourceNotFoundException", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -566,7 +593,11 @@ func TestApplicationAutoScaling_ECSServiceTarget(t *testing.T) {
 // an empty body is read as the empty object.
 func TestApplicationAutoScaling_MalformedBodies(t *testing.T) {
 	ts := emulator.StartTestServer(t)
-	for _, op := range []string{"RegisterScalableTarget", "PutScalingPolicy", "PutScheduledAction", "TagResource", "DescribeScalableTargets"} {
+	for _, op := range []string{
+		"RegisterScalableTarget", "DescribeScalableTargets", "DeregisterScalableTarget", "PutScalingPolicy",
+		"DescribeScalingPolicies", "DeleteScalingPolicy", "PutScheduledAction", "DescribeScheduledActions",
+		"DeleteScheduledAction", "DescribeScalingActivities", "TagResource", "UntagResource", "ListTagsForResource",
+	} {
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/", strings.NewReader("{not json"))
 		require.NoError(t, err)
 		req.Header.Set("X-Amz-Target", "AnyScaleFrontendService."+op)
