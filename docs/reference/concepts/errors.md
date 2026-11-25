@@ -1,7 +1,7 @@
 # Errors
 
-What substrate answers when a request body will not parse, and what every error response
-carries.
+What substrate answers when a request body will not parse, what every error response
+carries, and what a service no plugin emulates answers.
 
 ## A request body that will not parse
 
@@ -752,3 +752,50 @@ S3 keeps the fixed `SUBSTRATE`: its documents are built by the plugin without a 
 pipeline-raised S3 error (an injected fault, a quota refusal) is built by the same function so the two
 are byte-identical (#480). Threading the ID into one half only would break that. An in-process caller
 with no request in hand also renders `SUBSTRATE`.
+
+## A service no plugin emulates
+
+A request whose service has no plugin is refused with HTTP **501** and the code
+`ServiceNotAvailable`, with the message `service not emulated: <name>` naming the service the
+request resolved to (`unknown` when it carried no routing signal at all). All three are
+substrate's own: AWS has no answer for a service that does not exist, because its endpoint does
+not resolve. 501 is Not Implemented, and it is outside the transient statuses both botocore
+(`retries/standard.py`: 500, 502, 503 and 504) and aws-sdk-go-v2 (`DefaultRetryableHTTPStatusCodes`)
+retry, so a client reports the refusal at once instead of backing off.
+
+There is no model to say which protocol such a service speaks, so the envelope follows the
+request ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)). The rule covers every service
+with no entry in substrate's error-protocol table (`serviceErrorProtocols` in
+`emulator/error_protocol.go`). That is every unemulated service, and also any plugin registered
+through `PluginRegistry.Register` without an entry, such as a consumer's own plugin. Every built-in
+plugin has an entry, and a test refuses one that does not. A custom plugin should have one too. A
+plugin's own refusal of an action it does not implement is chosen with no request in hand, so
+without an entry it is REST-JSON's `UnknownOperationException` even when the envelope carrying it
+is a Query document.
+
+| The request carries | Envelope |
+|---|---|
+| `Smithy-Protocol: rpc-v2-cbor`, or a CBOR body at `/service/{Service}/operation/{Operation}` | RPC v2 CBOR: a CBOR map with `__type`, and the `Smithy-Protocol` response header |
+| `X-Amz-Target`, or an `application/x-amz-json-1.x` Content-Type | JSON RPC: `__type` in a JSON body |
+| an `Action` parameter, in the query string or a form body (even one with a malformed escape elsewhere) | Query: the `ErrorResponse` document above, `Type` `Receiver` |
+| none of these, on an S3 Control host | the same `ErrorResponse` document, which the REST-XML parsers read |
+| none of these | REST-JSON: the code in the `X-Amzn-ErrorType` header and a JSON body |
+
+A form-encoded Content-Type alone does not make a request Query. curl's `-d` sends one with any body,
+including JSON to a REST path, and only the `Action` names a Query operation.
+
+REST-JSON and REST-XML requests cannot be told apart, since a REST call names its operation by
+method and path, so the service decides that row. Of the 445 models in the botocore release the
+wire model is vendored from, four are REST-XML — CloudFront, Route 53, S3 and S3 Control — and
+only S3 Control has no plugin. REST-JSON is the protocol of 265 of them, and it is the answer
+for any other REST request, which is what EKS and FIS clients parse.
+
+The S3 Control row applies to its `amazonaws.com` endpoints: `s3-control.{region}`,
+`s3-control-fips.{region}` and either with `.dualstack`, each with or without the `{AccountId}.`
+prefix the SDKs add. A client pointed at a custom endpoint sends `{AccountId}.localhost` signed for
+`s3`, which no host label identifies. Substrate routes it to the S3 plugin, which reads the account
+ID as a bucket name and answers `NoSuchBucket`. Routing S3 Control there is
+[#1717](https://github.com/scttfrdmn/substrate/issues/1717).
+
+The authorization gate's code follows the same classification, so a refusal for such a service is
+`AccessDeniedException` in a JSON or CBOR envelope and `AccessDenied` in an XML one.

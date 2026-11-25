@@ -17,12 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Lambda: `Configuration` no longer carries `Tags`; `GetFunction` answers them only beside it (#1660).
+- Routing: an unemulated service's 501 `ServiceNotAvailable` arrives in the request's own envelope — CBOR, JSON RPC, Query, REST-XML for S3 Control's `amazonaws.com` hosts, else REST-JSON (#1614).
 
 ### Compatibility
 
 - Lambda: `CreateEventSourceMapping` on an SQS queue refuses `StartingPosition`; drop it from the request. An SQS mapping created without `BatchSize` now reads 10, not 100 (#1659).
 - Lambda: `LambdaEventInvokeConfig.MaximumRetryAttempts` and `MaximumEventAgeInSeconds` are `*int`; an embedder reading them dereferences the pointer (#1685).
 - EC2: `DeleteVpc` refuses a VPC holding a custom network ACL, so delete the ACL first, and removes the VPC's flow logs. A test counting a VPC's records sees its default ACL (#1614).
+- Errors: a request to a service with no error-protocol entry (unemulated, or a custom plugin without one) that carries no `X-Amz-Target`, x-amz-json Content-Type, `Smithy-Protocol: rpc-v2-cbor` header, CBOR body at `/service/{S}/operation/{O}` or `Action` parameter is answered in REST-JSON. Assert the code from the `X-Amzn-ErrorType` header or the JSON body's `Code`, not from an `ErrorResponse` XML document, and expect `AccessDeniedException` rather than `AccessDenied` from the authorization gate (#1614).
 
 ## [v0.134.0] - 2026-11-25
 

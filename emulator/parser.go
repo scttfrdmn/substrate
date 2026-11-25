@@ -85,6 +85,13 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 			}
 			params[k] = v
 		}
+	} else if action := r.Form.Get("Action"); action != "" {
+		// A form with a malformed escape elsewhere ("Action=ListDomains&x=%zz") still names its
+		// Query operation: url.ParseQuery keeps every pair it could decode and reports the first
+		// failure. The rest of the form is not trusted, but the Action is kept, because the error
+		// envelope (requestNamesAction, reading r.Form) and the authorization gate's code
+		// (errorProtocolForAWSRequest, reading this map) must classify the request the same way.
+		params["Action"] = action
 	}
 
 	host := r.Host
@@ -480,6 +487,11 @@ func extractServiceFromHost(host string) string {
 		return "execute-api"
 	}
 
+	// S3 Control endpoint; see isS3ControlHost.
+	if isS3ControlHost(host) {
+		return "s3-control"
+	}
+
 	// Timestream endpoint discovery hands a client a host whose first label is the
 	// operation class rather than the service: "ingest.timestream.{region}" for
 	// writes, "query.timestream.{region}" for queries. Both reduced to "ingest" or
@@ -515,6 +527,31 @@ func extractServiceFromHost(host string) string {
 		return canonical
 	}
 	return svc
+}
+
+// isS3ControlHost reports whether host, with ".amazonaws.com" already removed, is an S3
+// Control endpoint: "s3-control.{region}", "s3-control-fips.{region}", or either with a
+// ".dualstack" label after it, each optionally prefixed "{AccountId}.". The s3control model
+// gives its account-scoped operations the endpoint hostPrefix "{AccountId}.", so the first
+// label is often the caller's account ID rather than the service, and taking it would name a
+// service "123456789012". No plugin emulates S3 Control; resolving the name is what lets its
+// error envelope be REST-XML (restXMLServices). A custom endpoint ("{AccountId}.localhost")
+// carries no such label, so this cannot recognize it (#1717).
+func isS3ControlHost(host string) bool {
+	labels := strings.Split(host, ".")
+	for i, label := range labels {
+		if i > 1 || i+1 >= len(labels) {
+			return false
+		}
+		if label == "s3-control" || label == "s3-control-fips" {
+			if i == 1 && (labels[0] == "" || !isDigitsOnly(labels[0])) {
+				return false
+			}
+			next := labels[i+1]
+			return next == "dualstack" || regionCandidate(next) != ""
+		}
+	}
+	return false
 }
 
 // smithyServiceAliases maps Smithy internal service IDs (lower-cased) found in

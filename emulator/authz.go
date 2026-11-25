@@ -181,7 +181,7 @@ func (a *AuthController) sessionPolicyOnly(reqCtx *RequestContext, req *AWSReque
 	if len(reqCtx.Principal.SessionPolicies) == 0 {
 		return nil
 	}
-	return a.decide(reqCtx, req, action, resources, authzAllowAllDocs, nil, accessDeniedCodeFor(req.Service, ""),
+	return a.decide(reqCtx, req, action, resources, authzAllowAllDocs, nil, accessDeniedCodeForRequest(req),
 		now, haveClock)
 }
 
@@ -224,7 +224,7 @@ func (a *AuthController) now() (time.Time, bool) {
 // CheckAccess returns nil when the caller is allowed or when reqCtx.Principal
 // is nil. Returns an *AWSError with HTTP 403 and the denial code the requested
 // service's wire protocol uses — "AccessDenied" for the XML protocols,
-// "AccessDeniedException" for the JSON ones; see [accessDeniedCodeFor] (#595).
+// "AccessDeniedException" for the JSON ones; see [accessDeniedCodeForRequest] (#595).
 func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) error {
 	if reqCtx.Principal == nil {
 		return nil
@@ -248,7 +248,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		return a.sessionPolicyOnly(reqCtx, req, action, resources, now, haveClock)
 	}
 	if !exists && reqCtx.Principal.iamCredential && entity.Name != "" {
-		return authzVanishedPrincipal(reqCtx, action, accessDeniedCodeFor(req.Service, ""))
+		return authzVanishedPrincipal(reqCtx, action, accessDeniedCodeForRequest(req))
 	}
 	if !exists {
 		// Enforcement is opt-in by creating the principal. A credential that
@@ -270,7 +270,7 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	// Both denial arms take their code from the same helper, so an identity-policy
 	// refusal and a boundary refusal cannot drift apart — and neither can drift from
 	// the trust-policy gate #593 added, which resolves the same way for STS.
-	deniedCode := accessDeniedCodeFor(req.Service, "")
+	deniedCode := accessDeniedCodeForRequest(req)
 
 	// If a permission boundary is set it must also allow the action, against every
 	// resource the request names — loaded once, outside the loop, because it is a

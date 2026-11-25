@@ -580,8 +580,15 @@ func (r *PluginRegistry) Register(p Plugin) {
 }
 
 // RouteRequest dispatches req to the plugin registered for req.Service.
-// Returns an [*AWSError] with code "ServiceNotAvailable" if no matching
+// Returns an [*AWSError] with code "ServiceNotAvailable" and HTTP 501 if no matching
 // plugin is registered.
+//
+// The code, status and message are substrate's own: AWS has no answer for a service
+// that does not exist, because such an endpoint does not resolve. 501 is Not
+// Implemented, and it is outside the transient statuses both botocore
+// (retries/standard.py, 500/502/503/504) and aws-sdk-go-v2 retry, so a client reports
+// the refusal at once instead of backing off. The envelope carrying it follows the
+// request's own protocol; see unclassifiedErrorProtocol.
 func (r *PluginRegistry) RouteRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	r.mu.RLock()
 	p, ok := r.plugins[req.Service]

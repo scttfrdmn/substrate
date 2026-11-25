@@ -371,6 +371,12 @@ func ErrorProtocolForTest(service, contentType string) string {
 	return errProtoNameForTest(errorProtocolFor(service, contentType))
 }
 
+// AccessDeniedCodeForRequestForTest wraps accessDeniedCodeForRequest, the code the
+// authorization gate refuses a parsed request with.
+func AccessDeniedCodeForRequestForTest(req *AWSRequest) string {
+	return accessDeniedCodeForRequest(req)
+}
+
 // ErrorProtocolForRequestForTest wraps errorProtocolForRequest, returning one of the
 // ErrProto*ForTest names. This is the classification the emulator actually uses, so a
 // test asserting that a multi-protocol service follows its caller — and that a
@@ -423,11 +429,11 @@ func DetectQueryModeForTest(r *http.Request) bool { return detectQueryMode(r) }
 // check the specification requires a server to make.
 func RPCV2CBORTargetConflictForTest(r *http.Request) bool { return rpcV2CBORTargetConflict(r) }
 
-// AccessDeniedCodeForTest wraps accessDeniedCodeFor so an external test can pin
-// the protocol-to-code mapping directly, rather than only through the two
-// AuthController denial arms that consume it.
+// AccessDeniedCodeForTest is the denial code for service as errorProtocolFor classifies
+// it from contentType alone, so an external test can pin the protocol-to-code mapping
+// directly rather than only through the AuthController denial arms that consume it.
 func AccessDeniedCodeForTest(service, contentType string) string {
-	return accessDeniedCodeFor(service, contentType)
+	return accessDeniedCode(errorProtocolFor(service, contentType))
 }
 
 // RegisteredErrorProtocolServicesForTest returns every service name in
@@ -443,7 +449,7 @@ func RegisteredErrorProtocolServicesForTest() []string {
 }
 
 // IAMAccessDeniedCodeForTest is the code the IAM plugin's own gate reports, so a
-// test can assert it agrees with what accessDeniedCodeFor derives for "iam"
+// test can assert it agrees with what accessDeniedCodeForRequest derives for "iam"
 // instead of restating the literal.
 const IAMAccessDeniedCodeForTest = iamAccessDeniedCode
 

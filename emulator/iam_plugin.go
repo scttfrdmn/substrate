@@ -1894,7 +1894,7 @@ func (p *IAMPlugin) listAccessKeys(ctx *RequestContext, req *AWSRequest) (*AWSRe
 // iamAccessDeniedCode is the code every IAM denial reports.
 //
 // IAM speaks the query protocol, so this is the bare form — the same value
-// [accessDeniedCodeFor] derives for the service, and the plugin's denials must
+// [accessDeniedCodeForRequest] derives for the service, and the plugin's denials must
 // agree with the generic gate's or substrate would report two codes for one
 // outcome on the same service (#595). Written as a constant rather than a call
 // because the answer is fixed for this plugin: its service is always "iam".

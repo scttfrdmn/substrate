@@ -35,7 +35,7 @@ import (
 // decides it is that no query-protocol service models an access-denied shape
 // (all 17, STS and IAM and CloudFormation among them), nor do S3 or EC2. Every
 // service where this code is observable in substrate is in that set, so the value
-// is observed AWS behavior rather than modeled. See accessDeniedCodeFor.
+// is observed AWS behavior rather than modeled. See accessDeniedCodeForRequest.
 func TestAccessDeniedCodeFor_TracksTheWireProtocol(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -61,11 +61,10 @@ func TestAccessDeniedCodeFor_TracksTheWireProtocol(t *testing.T) {
 		{"ssm is json rpc", "ssm", "application/x-amz-json-1.1", "AccessDeniedException"},
 		{"sqs is json rpc", "sqs", "", "AccessDeniedException"},
 
-		// Config, whose Content-Type-free case is the one that matters: the
-		// AuthController calls accessDeniedCodeFor(service, "") with no Content-Type
-		// at all, so a service missing from serviceErrorProtocols falls through to
-		// the XML default and refuses a JSON caller with a code its SDK cannot
-		// match. Config was in exactly that state when its plugin landed (#580).
+		// Config, whose Content-Type-free case is the one that matters: a JSON RPC
+		// plugin's entry in serviceErrorProtocols decides its code whatever the
+		// request carries, and without one an empty Content-Type classifies as REST,
+		// not as the JSON RPC its callers speak (#580).
 		{"config is json rpc", "config", "", "AccessDeniedException"},
 		{"config is json rpc with a body", "config", "application/x-amz-json-1.1", "AccessDeniedException"},
 
@@ -76,10 +75,16 @@ func TestAccessDeniedCodeFor_TracksTheWireProtocol(t *testing.T) {
 		{"lambda is rest json", "lambda", "application/json", "AccessDeniedException"},
 		{"apigateway is rest json", "apigateway", "application/json", "AccessDeniedException"},
 
-		// An unregistered service falls through errorProtocolFor's Content-Type
-		// sniff, so it inherits that fallback rather than a code of its own.
+		// An unregistered service is classified from the request (#1614): a JSON RPC
+		// body, an Action parameter, and otherwise REST — REST-JSON unless the service
+		// is one of the rest-xml ones. A form Content-Type alone is not a Query
+		// request, and an Action is not something a Content-Type can carry, so this
+		// table has no Query row; TestUnemulatedService_AccessDeniedFollowsTheEnvelope
+		// has one.
 		{"unknown with a json body", "notaservice", "application/x-amz-json-1.1", "AccessDeniedException"},
-		{"unknown with no content type", "notaservice", "", "AccessDenied"},
+		{"unknown with only a form content type is rest json", "notaservice", "application/x-www-form-urlencoded; charset=utf-8", "AccessDeniedException"},
+		{"unknown with no content type is rest json", "notaservice", "", "AccessDeniedException"},
+		{"unknown rest-xml service", "s3-control", "", "AccessDenied"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -142,11 +147,11 @@ func TestAccessDenied_PricingPluginAgreesWithTheGenericGate(t *testing.T) {
 //
 // TestAccessDeniedCode_MatchesTheServiceErrorProtocol asserts a property over
 // serviceErrorProtocols by iterating *that map*, so a service absent from it is
-// invisible to the test: there is no entry to iterate. Both config (#580) and
-// pricing (#653) sat in exactly that blind spot, taking errorProtocolFor's final
-// errProtoQueryXML default and refusing a JSON caller with a code its SDK cannot
-// match — AuthController.CheckAccess calls accessDeniedCodeFor(service, "") with
-// no Content-Type, so the Content-Type sniff cannot rescue them either.
+// invisible to the test: there is no entry to iterate (config, #580, and pricing,
+// #653, are the cases). A service with no entry is classified from the request
+// (unclassifiedErrorProtocol), which cannot tell a REST call from anything else that
+// carries no target, form Action or CBOR header, so a JSON RPC plugin without an entry
+// is refused in the wrong family for any caller that omits its X-Amz-Target.
 //
 // The fix is to drive the assertion from the *plugin registry* instead. A plugin
 // that lands without an entry now fails here, whatever its name.
@@ -172,9 +177,9 @@ func TestAccessDenied_EveryRegisteredPluginHasAnErrorProtocol(t *testing.T) {
 	require.NotEmpty(t, names, "the registry must hold plugins for this to assert anything")
 	for _, name := range names {
 		assert.True(t, classified[name],
-			"plugin %q has no serviceErrorProtocols entry, so its authorization "+
-				"denials fall back to the XML AccessDenied regardless of the "+
-				"protocol it actually speaks; add %q to serviceErrorProtocols in "+
+			"plugin %q has no serviceErrorProtocols entry, so its errors and "+
+				"authorization denials are classified from each request rather than "+
+				"from the protocol it actually speaks; add %q to serviceErrorProtocols in "+
 				"emulator/error_protocol.go, classified by the \"protocol\" field "+
 				"of its botocore service model", name, name)
 	}

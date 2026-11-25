@@ -235,18 +235,92 @@ var multiProtocolServices = map[string]bool{
 	"monitoring": true,
 }
 
-// errorProtocolFor returns the error protocol for a service. An unregistered
-// service falls back to the request Content-Type: an x-amz-json body implies
-// JSON RPC, anything else implies XML. That fallback preserves the behavior
-// substrate had before #392 for any service not yet classified.
+// errorProtocolFor returns the error protocol for a service. A service with no
+// serviceErrorProtocols entry is classified by unclassifiedErrorProtocol from the only
+// signal this signature carries, the Content-Type; errorProtocolForRequest and
+// errorProtocolForAWSRequest read the whole request instead.
 func errorProtocolFor(service, contentType string) awsErrorProtocol {
 	if proto, ok := serviceErrorProtocols[service]; ok {
 		return proto
 	}
+	wire := WireQuery
 	if strings.HasPrefix(contentType, "application/x-amz-json") {
-		return errProtoJSONRPC
+		wire = WireJSONRPC
 	}
-	return errProtoQueryXML
+	return unclassifiedErrorProtocol(service, wire, false)
+}
+
+// restXMLServices names the services whose model declares the rest-xml protocol and
+// which have no serviceErrorProtocols entry, keyed by the name a request to them
+// resolves to (see unclassifiedErrorProtocol). Of botocore 1.44.10's 445 service models four declare rest-xml —
+// cloudfront, route53, s3 and s3control — and the first three are emulated, so the one
+// left is S3 Control, whose endpoint prefix is "s3-control" (its signing name is "s3";
+// see extractServiceFromHost).
+//
+// The set is hand-written rather than generated because the vendored snapshot in
+// emulator/wiremodel holds only the models behind routed plugins, so it cannot name a
+// service substrate does not emulate. A new rest-xml model in a botocore refresh is the
+// event that would change it.
+var restXMLServices = map[string]bool{
+	"s3-control": true,
+}
+
+// unclassifiedErrorProtocol classifies the error envelope for a service with no
+// serviceErrorProtocols entry, from what the request says about itself. That is every
+// service no plugin emulates, and also any plugin registered through
+// [PluginRegistry.Register] without an entry of its own, such as a consumer's custom
+// plugin. Substrate has no model for such a service, so the answer has to come from the
+// request, and it can, because every protocol but the two REST ones marks its requests:
+//
+//   - a Smithy-Protocol: rpc-v2-cbor header (or a CBOR body at an RPC v2 path) is RPC v2
+//     CBOR, answered with a CBOR map carrying "__type";
+//   - an X-Amz-Target header or an application/x-amz-json Content-Type is JSON RPC,
+//     answered with "__type" in a JSON body;
+//   - an Action parameter, in the query string or a form-encoded body, is the Query
+//     protocol, answered with an <ErrorResponse> document. A form Content-Type alone does
+//     not decide it: curl's -d sends one with any body, a JSON one to a REST path included,
+//     and only the Action names a Query operation.
+//
+// What is left is REST, and a REST-JSON request is indistinguishable from a REST-XML one:
+// a REST call names its operation by method and path, and either may carry any body or
+// none. The service decides that one, through restXMLServices, and REST-JSON — the
+// protocol of 265 of botocore's 445 models — answers for the rest, with the code in the
+// X-Amzn-ErrorType header the REST-JSON parsers read first (#1614).
+func unclassifiedErrorProtocol(service string, wire WireProtocol, action bool) awsErrorProtocol {
+	switch wire {
+	case WireRPCV2CBOR:
+		return errProtoRPCV2CBOR
+	case WireJSONRPC:
+		return errProtoJSONRPC
+	case WireQuery:
+	}
+	if action {
+		return errProtoQueryXML
+	}
+	if restXMLServices[service] {
+		return errProtoQueryXML
+	}
+	return errProtoRESTJSON
+}
+
+// requestNamesAction reports whether r carries a Query protocol Action parameter, in its
+// query string or in a form body [ParseAWSRequest] has already parsed. It never parses
+// the body itself, which would consume it.
+func requestNamesAction(r *http.Request) bool {
+	if r.Form != nil {
+		return r.Form.Get("Action") != ""
+	}
+	return r.URL != nil && r.URL.Query().Get("Action") != ""
+}
+
+// errorProtocolForAWSRequest is errorProtocolForRequest for a caller holding the parsed
+// [AWSRequest] rather than the HTTP request, which is what the authorization gate has.
+// The parse recorded every signal unclassifiedErrorProtocol reads.
+func errorProtocolForAWSRequest(req *AWSRequest) awsErrorProtocol {
+	if proto, ok := serviceErrorProtocols[req.Service]; ok {
+		return proto
+	}
+	return unclassifiedErrorProtocol(req.Service, req.Protocol, req.Params["Action"] != "")
 }
 
 // errorProtocolForRequest returns the error protocol for a service, letting the request
@@ -264,6 +338,9 @@ func errorProtocolForRequest(service string, r *http.Request) awsErrorProtocol {
 	contentType := ""
 	if r != nil {
 		contentType = r.Header.Get("Content-Type")
+	}
+	if _, registered := serviceErrorProtocols[service]; !registered && r != nil {
+		return unclassifiedErrorProtocol(service, detectWireProtocol(r), requestNamesAction(r))
 	}
 	if r != nil && multiProtocolServices[service] {
 		switch detectWireProtocol(r) {
@@ -337,8 +414,8 @@ func errorWireContextFor(service string, r *http.Request, requestID string) erro
 	}
 }
 
-// accessDeniedCodeFor returns the error code AWS uses to refuse an authorization
-// check on the given service: "AccessDenied" for the XML protocols, and
+// accessDeniedCodeForRequest returns the error code the authorization gate refuses req
+// with: "AccessDenied" for the XML protocols, and
 // "AccessDeniedException" for the JSON ones.
 //
 // The suffix tracks the wire protocol rather than the individual service (#595).
@@ -365,25 +442,34 @@ func errorWireContextFor(service string, r *http.Request, requestID string) erro
 // s3_publicaccess.go). CloudFront and the unanimous JSON column corroborate the
 // split; they are not its basis.
 //
-// contentType is only consulted for services absent from serviceErrorProtocols,
-// via errorProtocolFor's fallback — callers that do not have it may pass "".
-func accessDeniedCodeFor(service, contentType string) string {
-	switch errorProtocolFor(service, contentType) {
-	case errProtoJSONRPC, errProtoRESTJSON:
-		return "AccessDeniedException"
+// The protocol is errorProtocolForAWSRequest's, the classification the request's error
+// envelope gets, so the code and the envelope carrying it agree. A service with no
+// serviceErrorProtocols entry is classified from the request (unclassifiedErrorProtocol).
+//
+// A registered service takes its serviceErrorProtocols entry whatever the request says.
+// That matters for CloudWatch, the one registered service a request can move to CBOR or
+// JSON: a refused CloudWatch call reports "AccessDenied" on every protocol. That is
+// deliberate — the value is observed AWS behavior for the query-protocol services,
+// CloudWatch's model declares no access-denied shape to contradict it, and a code that
+// changed with the caller's serialization would be harder to assert against than one
+// that does not.
+func accessDeniedCodeForRequest(req *AWSRequest) string {
+	return accessDeniedCode(errorProtocolForAWSRequest(req))
+}
+
+// accessDeniedCode is the access-denied code for one error protocol: the bare form for
+// the XML protocols and the suffixed form for the JSON ones, RPC v2 CBOR included, which
+// is reachable only for a service with no serviceErrorProtocols entry
+// (unclassifiedErrorProtocol).
+func accessDeniedCode(proto awsErrorProtocol) string {
+	switch proto {
 	case errProtoQueryXML, errProtoS3XML, errProtoEC2XML:
 		return "AccessDenied"
+	case errProtoJSONRPC, errProtoRESTJSON, errProtoRPCV2CBOR:
+		return "AccessDeniedException"
 	}
-	// Unreachable: errorProtocolFor returns one of the five constants above and never
-	// errProtoRPCV2CBOR, which only errorProtocolForRequest selects. That matters for
-	// CloudWatch, the one service where CBOR is reachable: this function is called with
-	// no request in hand (authz.go), so a refused CloudWatch call reports "AccessDenied"
-	// on every protocol. That is deliberate — the value is observed AWS behavior for the
-	// query-protocol services, CloudWatch's model declares no access-denied shape to
-	// contradict it, and a code that changed with the caller's serialization would be
-	// harder to assert against than one that does not. Defaulting to the suffixed form
-	// below keeps a hypothetical new protocol on the value the overwhelming majority of
-	// AWS services use.
+	// A hypothetical new protocol takes the value the overwhelming majority of AWS
+	// services use.
 	return "AccessDeniedException"
 }
 
