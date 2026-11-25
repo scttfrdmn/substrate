@@ -7,6 +7,8 @@
 the Step Functions model's target prefix is `AWSStepFunctions` (#739). Substrate
 routes both.
 
+**A custom endpoint needs host-prefix injection off for `StartSyncExecution`.** The SDKs prepend `sync-` to the host, so turn it off in the client (boto3: `Config(inject_host_prefix=False)`); see [Operations whose SDK call adds a host prefix](concepts/routing.md#operations-whose-sdk-call-adds-a-host-prefix).
+
 ## Supported operations
 
 | Operation | Notes |

@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Costs: `sesv2/SendEmail` is $0.0001 per email, $0.10 per 1,000 (#1729).
 - EC2: revoking an absent egress rule outside the default VPC is pinned as `InvalidPermission.NotFound`, AWS's answer, with its provenance (#1658).
 - EC2: private addresses come from the subnet's CIDR, unique and skipping its five reserved addresses; `availableIpAddressCount` reports what is left (#1592).
+- Docs: Cloud Map `DiscoverInstances`, Step Functions `StartSyncExecution` and Omics runs need SDK host-prefix injection off against a custom endpoint (#1745).
 
 ### Compatibility
 

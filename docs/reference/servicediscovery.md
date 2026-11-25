@@ -120,6 +120,8 @@ returns every instance when none is healthy. `MaxResults` (1–1000, default 100
 AWS randomizes the order; substrate answers instance ID order, so a test reads the same list on
 every run. `InstancesRevision` changes on every register and deregister, and not on a health change.
 
+**A custom endpoint needs host-prefix injection off for `DiscoverInstances` and `DiscoverInstancesRevision`.** The SDKs prepend `data-` to the host, so turn it off in the client (boto3: `Config(inject_host_prefix=False)`); see [Operations whose SDK call adds a host prefix](concepts/routing.md#operations-whose-sdk-call-adds-a-host-prefix).
+
 ## A namespace or service is reachable through the tagging API
 
 The Resource Groups Tagging API's `GetResources`, `TagResources` and `UntagResources` reach
