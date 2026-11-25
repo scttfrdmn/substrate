@@ -18,11 +18,12 @@ import (
 // and its attributes resolve to "" as they did until the resource is next updated.
 //
 // Refused rather than answered (#1591), each listed in cfnGetAttUnmodelled or
-// cfnGetAttUnmodelledPrefixes with its reason: a VPC's DefaultNetworkAcl, CidrBlockAssociations,
-// Ipv6CidrBlocks and VpcEncryptionControl.*, a subnet's Ipv6CidrBlocks, NetworkAclAssociationId,
-// OutpostArn and BlockPublicAccessStates.*, and a NAT gateway's EniId, RouteTableId,
-// AutoProvisionZones and AutoScalingIps — network ACLs, IPv6 blocks, CIDR associations, encryption
-// control, Outposts, Block Public Access and regional NAT gateways are not modeled.
+// cfnGetAttUnmodelledPrefixes with its reason: a VPC's CidrBlockAssociations, Ipv6CidrBlocks and
+// VpcEncryptionControl.*, a subnet's Ipv6CidrBlocks, OutpostArn and BlockPublicAccessStates.*, and
+// a NAT gateway's EniId, RouteTableId, AutoProvisionZones and AutoScalingIps — IPv6 blocks, CIDR
+// associations, encryption control, Outposts, Block Public Access and regional NAT gateways are
+// not modeled. A VPC's DefaultNetworkAcl and a subnet's NetworkAclAssociationId are answered from
+// EC2's network ACL records (#1614).
 
 // cfnEC2IDAttribute names, by type, the attribute whose value is the resource's EC2 ID.
 var cfnEC2IDAttribute = map[string]string{
@@ -62,6 +63,9 @@ func (d *StackDeployer) recordEC2Attributes(ctx context.Context, dr *DeployedRes
 				"DefaultSecurityGroup": ec2LookupDefaultSecurityGroup(ctx, d.state,
 					&RequestContext{AccountID: acct, Region: region}, dr.PhysicalID),
 			}
+			if acl, err := ec2LookupDefaultNetworkACL(ctx, d.state, acct, region, dr.PhysicalID); err == nil {
+				attrs["DefaultNetworkAcl"] = acl
+			}
 		}
 	case "AWS::EC2::Subnet":
 		var subnet EC2Subnet
@@ -71,6 +75,9 @@ func (d *StackDeployer) recordEC2Attributes(ctx context.Context, dr *DeployedRes
 				"CidrBlock":          subnet.CIDRBlock,
 				"AvailabilityZone":   subnet.AvailabilityZone,
 				"AvailabilityZoneId": cfnAvailabilityZoneID(region, subnet.AvailabilityZone),
+			}
+			if assoc, err := ec2LookupSubnetNetworkACLAssociation(ctx, d.state, acct, region, dr.PhysicalID); err == nil {
+				attrs["NetworkAclAssociationId"] = assoc
 			}
 		}
 	case "AWS::EC2::Instance":

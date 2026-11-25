@@ -32,7 +32,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); seven of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId`, `dhcpOptionsId` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifyVpcAttribute | `VpcId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `EnableDnsSupport.Value`, `EnableDnsHostnames.Value` and `EnableNetworkAddressUsageMetrics.Value` are read under the spellings the page publishes, and each is readable back through `DescribeVpcAttribute` ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then the first two were read as `EnableDNSSupport.Value`/`EnableDNSHostnames.Value`, which no SDK sends, and every modify was discarded). One attribute per request, and hostnames only where DNS support is enabled ([#1554](https://github.com/scttfrdmn/substrate/issues/1554)) — see [VPC attributes and internet gateways](#vpc-attributes-and-internet-gateways) |
 | DescribeVpcAttribute | `VpcId` and `Attribute` are required; `Attribute` is one of `enableDnsSupport`, `enableDnsHostnames` and `enableNetworkAddressUsageMetrics` (`InvalidParameterValue` otherwise), and the response carries `vpcId` and that one attribute as `value` — the shape of the page's samples. A new VPC answers DNS support on and hostnames off; the [default VPC](#the-default-vpc) has both on. Network Address Usage metrics is a recorded flag: no metric is produced |
-| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Refused with `DependencyViolation` while the VPC holds a subnet, an attached internet gateway, a security group other than `default`, a route table other than its main one, a network ACL other than its default one, a NAT gateway not yet `deleted`, or an instance not yet `terminated`, and nothing is written; otherwise its `default` security group, main route table and default network ACL go with it — see [A VPC's dependents](#a-vpc-s-dependents). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again |
+| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Refused with `DependencyViolation` while the VPC holds a subnet, an attached internet gateway, a security group other than `default`, a route table other than its main one, a network ACL other than its default one, a NAT gateway not yet `deleted`, or an instance not yet `terminated`, and nothing is written; otherwise its `default` security group, main route table, default network ACL and flow logs go with it — see [A VPC's dependents](#a-vpc-s-dependents). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again |
 | CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them). The subnet is associated with its VPC's default network ACL ([#1614](https://github.com/scttfrdmn/substrate/issues/1614)) |
 | DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifySubnetAttribute | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `MapPublicIpOnLaunch` is the one modelled attribute — it decides whether a launch into the subnet gets a public IPv4 address, and it is readable back through [`DescribeSubnets`](#a-subnet-reports-its-tags-and-filters-on-them) — and the other ten published parameters are unread. It is read as `MapPublicIpOnLaunch.Value`, the page's own spelling ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then it was read as `MapPublicIPOnLaunch.Value` and every SDK's modify was discarded). AWS's *"You can only modify one attribute at a time"* is not enforced, which is inert while one attribute is modelled |
@@ -1164,7 +1164,8 @@ route tables stayed listed, so a teardown in the wrong order passed here and fai
 
 Any of them is `DependencyViolation` / "The specified object has dependent resources." — the
 client-error table's gloss — and nothing is written. Once none remains the VPC is deleted, and its
-`default` security group, main route table and default network ACL with it. Dependents substrate does not store as
+`default` security group, main route table and default network ACL with it, along with its flow
+logs: "flow logs for deleted VPCs are eventually automatically removed". Dependents substrate does not store as
 records of their own — network interfaces, VPC endpoints, peering connections, egress-only
 gateways — cannot hold a VPC here.
 
@@ -1316,6 +1317,11 @@ created with a CloudWatch Logs ARN also reports the group's name as `logGroupNam
 The delete's shape is EC2's observed behavior (aws-controllers-k8s/ec2-controller#402). No
 source shows which shape `CreateFlowLogs` uses for a missing resource; substrate answers it the
 same way.
+
+**A VPC's flow logs go with it.** `API_DeleteVpc`: "flow logs for deleted VPCs are eventually
+automatically removed". Substrate removes them in the same `DeleteVpc`, since "eventually" names
+no delay a caller could observe. A subnet's flow logs are kept when the subnet is deleted, because
+no AWS source says what happens to them.
 
 ## VPC attributes and internet gateways
 

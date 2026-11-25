@@ -21,7 +21,8 @@ import (
 // therefore reads SUCCESS and flowLogStatus ACTIVE, the values AWS's DescribeFlowLogs sample
 // shows for a working flow log.
 //
-// A flow log is stored under flowlog:{account}/{region}/{fl-id} as an [EC2FlowLog].
+// A flow log is stored under flowlog:{account}/{region}/{fl-id} as an [EC2FlowLog]. DeleteVpc
+// removes the VPC's flow logs with it ([EC2Plugin.vpcNetworkControlDependents]).
 
 // ec2DefaultFlowLogFormat is the format a flow log created without LogFormat records — the
 // default format's fields, as AWS's DescribeFlowLogs sample renders a flow log created without
@@ -313,6 +314,11 @@ func (p *EC2Plugin) createFlowLogs(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
 		return nil, awsErr
 	}
+	// Held from the resource checks through the writes, so two identical requests cannot both
+	// pass the duplicate check, and DeleteVpc — which holds it too — cannot remove a VPC between
+	// its check here and its flow log's write.
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	for _, id := range resourceIDs {
 		found, kind, err := p.flowLogResourceExists(reqCtx, resourceType, id)
 		if err != nil {
@@ -396,6 +402,8 @@ func (p *EC2Plugin) deleteFlowLogs(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, ec2MissingParameter("FlowLogId")
 	}
 	ctx := context.Background()
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	for _, id := range ids {
 		data, err := p.state.Get(ctx, ec2Namespace, ec2FlowLogKey(reqCtx.AccountID, reqCtx.Region, id))
 		if err != nil {

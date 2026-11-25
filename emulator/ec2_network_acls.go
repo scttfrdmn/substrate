@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -42,9 +43,19 @@ import (
 //
 // # Locking
 //
-// Every ACL write holds [EC2Plugin.sgMu], the lock DeleteVpc and DeleteSubnet hold across their
-// dependency checks and deletes, so an ACL cannot be created in a VPC a concurrent DeleteVpc has
-// just checked, and a subnet's association cannot be replaced while DeleteSubnet removes it.
+// Every write of an ACL or association record holds [EC2Plugin.sgMu], the lock DeleteVpc and
+// DeleteSubnet hold across their dependency checks and deletes:
+//
+//   - the operations below take it themselves;
+//   - CreateVpc and the default VPC's creation ([EC2Plugin.createDefaultVPCResources]) hold it
+//     across the whole creation, and [EC2Plugin.createDefaultNetworkACL] runs under it;
+//   - [EC2Plugin.associateSubnetWithDefaultNetworkACL], which CreateSubnet and
+//     CreateDefaultSubnet call, takes it around the default-ACL lookup and the write;
+//   - CreateTags and DeleteTags take it before [EC2Plugin.tagMu] for an ID whose record other
+//     operations also rewrite under it ([ec2SGMuTagPrefixes]), see [EC2Plugin.lockTagWrite].
+//
+// The order is igwMu, then defaultVPCMu, then sgMu, then tagMu, and nothing holding a later lock
+// takes an earlier one.
 
 // ec2NetworkACLDefaultRuleNumber is the rule number of the IPv4 catch-all deny every ACL ends
 // with — the rule the console shows as "*" and DescribeNetworkAcls renders as 32767 (AWS's
@@ -213,8 +224,8 @@ func ec2NewDefaultNetworkACL(aclID, vpcID string) EC2NetworkACL {
 
 // createDefaultNetworkACL draws the ID of vpcID's default ACL and an association ID for each of
 // subnetIDs, in that order, and writes them. CreateVpc passes no subnets; the default VPC passes
-// its default subnets, after every draw it made before #1614, so the IDs a recorded run minted
-// for its other resources are unchanged on replay.
+// its default subnets. Both callers draw these IDs last, after every other resource they create,
+// so the IDs of those resources do not depend on this one. The caller holds [EC2Plugin.sgMu].
 func (p *EC2Plugin) createDefaultNetworkACL(ctx context.Context, reqCtx *RequestContext, vpcID string, subnetIDs []string) error {
 	aclID := generateNetworkACLID(reqCtx.IDs)
 	if err := p.putEC2Record(ctx, ec2NetworkACLKey(reqCtx.AccountID, reqCtx.Region, aclID), ec2NewDefaultNetworkACL(aclID, vpcID)); err != nil {
@@ -234,9 +245,12 @@ func (p *EC2Plugin) createDefaultNetworkACL(ctx context.Context, reqCtx *Request
 }
 
 // associateSubnetWithDefaultNetworkACL draws an association ID for a new subnet and associates
-// it with its VPC's default ACL. It is called after the subnet's own draw. A subnet whose VPC
-// does not exist — CreateSubnet does not check — is given no association and draws nothing.
+// it with its VPC's default ACL, under [EC2Plugin.sgMu]. It is called after the subnet's own
+// draw. A subnet whose VPC does not exist — CreateSubnet does not check — is given no association
+// and draws nothing.
 func (p *EC2Plugin) associateSubnetWithDefaultNetworkACL(ctx context.Context, reqCtx *RequestContext, subnetID, vpcID string) error {
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	aclID, err := p.vpcDefaultNetworkACLID(ctx, reqCtx, vpcID)
 	if err != nil || aclID == "" {
 		return err
@@ -255,8 +269,22 @@ func (p *EC2Plugin) associateSubnetWithDefaultNetworkACL(ctx context.Context, re
 // vpcDefaultNetworkACLID returns vpcID's default ACL: the stored one, the derived ID for a VPC
 // an older build wrote, or "" when the VPC does not exist.
 func (p *EC2Plugin) vpcDefaultNetworkACLID(ctx context.Context, reqCtx *RequestContext, vpcID string) (string, error) {
+	data, err := p.state.Get(ctx, ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+vpcID)
+	if err != nil {
+		return "", fmt.Errorf("ec2 default network ACL vpc: %w", err)
+	}
+	if data == nil {
+		return "", nil
+	}
+	return ec2LookupDefaultNetworkACL(ctx, p.state, reqCtx.AccountID, reqCtx.Region, vpcID)
+}
+
+// ec2LookupDefaultNetworkACL returns vpcID's default ACL ID: the stored one, or the derived ID of
+// a VPC an older build wrote. It does not check that the VPC exists. It is a free function so
+// CloudFormation's VPC DefaultNetworkAcl attribute, which holds only the state, can read it.
+func ec2LookupDefaultNetworkACL(ctx context.Context, state StateManager, accountID, region, vpcID string) (string, error) {
 	found := ""
-	if err := ec2ScanRecords(ctx, p.state, ec2StatePrefix("acl", reqCtx.AccountID, reqCtx.Region), func(_ string, acl EC2NetworkACL) {
+	if err := ec2ScanRecords(ctx, state, ec2StatePrefix("acl", accountID, region), func(_ string, acl EC2NetworkACL) {
 		if acl.IsDefault && acl.VPCID == vpcID && found == "" {
 			found = acl.NetworkACLID
 		}
@@ -266,14 +294,25 @@ func (p *EC2Plugin) vpcDefaultNetworkACLID(ctx context.Context, reqCtx *RequestC
 	if found != "" {
 		return found, nil
 	}
-	data, err := p.state.Get(ctx, ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+vpcID)
+	return ec2DerivedDefaultNetworkACLID(accountID, region, vpcID), nil
+}
+
+// ec2LookupSubnetNetworkACLAssociation returns the ID of subnetID's network ACL association: the
+// stored one, or the derived ID of a subnet an older build wrote. It is the value of
+// CloudFormation's subnet NetworkAclAssociationId attribute.
+func ec2LookupSubnetNetworkACLAssociation(ctx context.Context, state StateManager, accountID, region, subnetID string) (string, error) {
+	data, err := state.Get(ctx, ec2Namespace, ec2NetworkACLAssociationKey(accountID, region, subnetID))
 	if err != nil {
-		return "", fmt.Errorf("ec2 default network ACL vpc: %w", err)
+		return "", fmt.Errorf("ec2 network ACL association: %w", err)
 	}
 	if data == nil {
-		return "", nil
+		return ec2DerivedNetworkACLAssociationID(accountID, region, subnetID), nil
 	}
-	return ec2DerivedDefaultNetworkACLID(reqCtx.AccountID, reqCtx.Region, vpcID), nil
+	var a EC2NetworkACLAssociation
+	if err := json.Unmarshal(data, &a); err != nil {
+		return "", fmt.Errorf("ec2 network ACL association unmarshal: %w", err)
+	}
+	return a.AssociationID, nil
 }
 
 // deleteSubnetNetworkACLAssociation removes a deleted subnet's association.
@@ -284,12 +323,17 @@ func (p *EC2Plugin) deleteSubnetNetworkACLAssociation(ctx context.Context, reqCt
 	return nil
 }
 
-// vpcNetworkACLDependents reports whether vpcID holds a network ACL other than its default one,
-// which DeleteVpc must refuse on, and returns the state key of the default ACL, which the delete
-// removes ("When you delete the VPC, it deletes the default security group, network ACL, and
-// route table for the VPC", API_DeleteVpc). A VPC an older build wrote has no stored default
-// ACL, so there is nothing to remove.
-func (p *EC2Plugin) vpcNetworkACLDependents(ctx context.Context, reqCtx *RequestContext, vpcID string) (bool, []string, error) {
+// vpcNetworkControlDependents reports whether vpcID holds a network ACL other than its default
+// one, which DeleteVpc must refuse on, and returns the state keys of what the delete removes with
+// the VPC: its default ACL, per "When you delete the VPC, it deletes the default security group,
+// network ACL, and route table for the VPC", and its flow logs, per "flow logs for deleted VPCs
+// are eventually automatically removed" (both API_DeleteVpc). Substrate removes them at once,
+// since "eventually" names no observable delay. A VPC an older build wrote has no stored default
+// ACL, so there is no ACL to remove.
+//
+// A subnet's flow logs are kept when the subnet is deleted: no AWS source states what happens
+// to them.
+func (p *EC2Plugin) vpcNetworkControlDependents(ctx context.Context, reqCtx *RequestContext, vpcID string) (bool, []string, error) {
 	held := false
 	var owned []string
 	if err := ec2ScanRecords(ctx, p.state, ec2StatePrefix("acl", reqCtx.AccountID, reqCtx.Region), func(k string, acl EC2NetworkACL) {
@@ -303,6 +347,13 @@ func (p *EC2Plugin) vpcNetworkACLDependents(ctx context.Context, reqCtx *Request
 		held = true
 	}); err != nil {
 		return false, nil, fmt.Errorf("ec2 deleteVpc network ACLs: %w", err)
+	}
+	if err := ec2ScanRecords(ctx, p.state, ec2StatePrefix("flowlog", reqCtx.AccountID, reqCtx.Region), func(k string, fl EC2FlowLog) {
+		if fl.ResourceID == vpcID {
+			owned = append(owned, k)
+		}
+	}); err != nil {
+		return false, nil, fmt.Errorf("ec2 deleteVpc flow logs: %w", err)
 	}
 	return held, owned, nil
 }
@@ -416,10 +467,10 @@ func (p *EC2Plugin) putNetworkACL(ctx context.Context, reqCtx *RequestContext, a
 	return nil
 }
 
-// materializeNetworkACLs persists every synthesized ACL among ids, so a write naming one finds
-// a record to change. CreateTags calls it for the acl- IDs it names, since its writer changes
-// only a stored record. It holds [EC2Plugin.sgMu] while it reads and writes.
-func (p *EC2Plugin) materializeNetworkACLs(reqCtx *RequestContext, ids []string) error {
+// syntheticNetworkACLs returns the synthesized ACLs among ids — those with no record in state —
+// so CreateTags, whose writer changes only a stored record, can persist them first. The caller
+// holds [EC2Plugin.sgMu].
+func (p *EC2Plugin) syntheticNetworkACLs(reqCtx *RequestContext, ids []string) ([]EC2NetworkACL, error) {
 	var named []string
 	for _, id := range ids {
 		if strings.HasPrefix(id, ec2NetworkACLIDKind.Prefix) {
@@ -427,23 +478,47 @@ func (p *EC2Plugin) materializeNetworkACLs(reqCtx *RequestContext, ids []string)
 		}
 	}
 	if len(named) == 0 {
-		return nil
+		return nil, nil
 	}
-	ctx := context.Background()
-	p.sgMu.Lock()
-	defer p.sgMu.Unlock()
-	s, err := p.loadNetworkACLScope(ctx, reqCtx)
+	s, err := p.loadNetworkACLScope(context.Background(), reqCtx)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	var out []EC2NetworkACL
 	for _, id := range named {
 		if acl := s.acl(id); acl != nil && !s.storedACL[id] {
-			if err := p.putNetworkACL(ctx, reqCtx, *acl); err != nil {
-				return err
-			}
+			out = append(out, *acl)
 		}
 	}
-	return nil
+	return out, nil
+}
+
+// ec2SGMuTagPrefixes are the ID prefixes whose records operations other than tagging rewrite
+// under [EC2Plugin.sgMu]: a VPC (AssociateDhcpOptions, ModifyVpcAttribute), a network ACL (its
+// entries), a DHCP option set and a flow log (their deletes). A tag write naming one takes sgMu
+// as well, so neither write can overwrite the other's change with a stale copy.
+var ec2SGMuTagPrefixes = []string{"vpc-", "acl-", "dopt-", "fl-"}
+
+// lockTagWrite takes the locks a tag write naming ids needs — [EC2Plugin.sgMu] when any ID has a
+// prefix in [ec2SGMuTagPrefixes], then [EC2Plugin.tagMu] — and returns the function that releases
+// them. sgMu is taken first, the order every holder of both follows.
+func (p *EC2Plugin) lockTagWrite(ids []string) func() {
+	needSG := false
+	for _, id := range ids {
+		for _, prefix := range ec2SGMuTagPrefixes {
+			needSG = needSG || strings.HasPrefix(id, prefix)
+		}
+	}
+	if needSG {
+		p.sgMu.Lock()
+	}
+	p.tagMu.Lock()
+	return func() {
+		p.tagMu.Unlock()
+		if needSG {
+			p.sgMu.Unlock()
+		}
+	}
 }
 
 // --- Rendering ---

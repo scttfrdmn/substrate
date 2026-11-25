@@ -620,8 +620,7 @@ func ec2TagKeyRefusal(add map[string]string, remove []string) *AWSError {
 // [EC2Plugin.tagMu]. It applies no key rules, because its callers are CloudFormation's stamp and
 // stack-tag propagation, which write `aws:cloudformation:*`.
 func (p *EC2Plugin) applyTagsByID(reqCtx *RequestContext, id string, tags []EC2Tag, remove bool) error {
-	p.tagMu.Lock()
-	defer p.tagMu.Unlock()
+	defer p.lockTagWrite([]string{id})()
 	return ec2ApplyTagsToResource(p.state, reqCtx, id, tags, remove)
 }
 

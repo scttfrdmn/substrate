@@ -64,7 +64,9 @@ type EC2Plugin struct {
 	// tagMu serializes tag writes with each other: CreateTags, DeleteTags, the tagging API's writes
 	// through [EC2Plugin.tagRecord], and CloudFormation's stamps and stack-tag propagation through
 	// [EC2Plugin.applyTagsByID] (#1609). It orders only those. Another operation that rewrites the
-	// same record, such as an instance state change, does not take it.
+	// same record, such as an instance state change, does not take it — except that a tag write
+	// naming a VPC, network ACL, DHCP option set or flow log also takes sgMu, first; see
+	// [EC2Plugin.lockTagWrite].
 	tagMu sync.Mutex
 }
 
@@ -1930,6 +1932,11 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "InvalidParameterValue",
 			Message: "Value (" + tenancy + ") for parameter InstanceTenancy is invalid", HTTPStatus: http.StatusBadRequest}
 	}
+	// Held through the VPC's creation, so the default DHCP option set it is associated with
+	// cannot be deleted between the read and the write, and its default network ACL is written
+	// under the lock every ACL write holds (#1614).
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	dhcpOptionsID, err := p.newVPCDHCPOptionsID(context.Background(), reqCtx)
 	if err != nil {
 		return nil, err
@@ -3752,13 +3759,7 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if awsErr := ec2CheckTagResourceIDs(p.state, reqCtx, resourceIDs); awsErr != nil {
 		return nil, awsErr
 	}
-	// A default network ACL or DHCP option set that is synthesized when read is persisted first,
-	// so the tags have a record to land on (#1614).
-	if err := p.materializeTagTargets(reqCtx, resourceIDs); err != nil {
-		return nil, err
-	}
-	p.tagMu.Lock()
-	defer p.tagMu.Unlock()
+	defer p.lockTagWrite(resourceIDs)()
 	for _, id := range resourceIDs {
 		existing, found, err := ec2ResourceTags(p.state, reqCtx, id)
 		if err != nil {
@@ -3773,6 +3774,11 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		if awsErr := ec2CheckTagLimit(existing, tags); awsErr != nil {
 			return nil, awsErr
 		}
+	}
+	// A default network ACL or DHCP option set that is synthesized when read is persisted, once
+	// every limit check has passed, so the tags have a record to land on (#1614).
+	if err := p.materializeTagTargets(reqCtx, resourceIDs, tags); err != nil {
+		return nil, err
 	}
 	for _, id := range resourceIDs {
 		if err := ec2ApplyTagsToResource(p.state, reqCtx, id, tags, false); err != nil {
@@ -3810,8 +3816,7 @@ func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if awsErr := ec2CheckTagResourceIDs(p.state, reqCtx, resourceIDs); awsErr != nil {
 		return nil, awsErr
 	}
-	p.tagMu.Lock()
-	defer p.tagMu.Unlock()
+	defer p.lockTagWrite(resourceIDs)()
 	for _, id := range resourceIDs {
 		if err := ec2ApplyTagsToResource(p.state, reqCtx, id, tags, true); err != nil {
 			return nil, err
@@ -6078,6 +6083,10 @@ func ec2CheckVPCAttributeRequest(params map[string]string, vpc EC2VPC) *AWSError
 func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	vpcID := req.Params["VpcId"]
 	key := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
+	// The VPC record's read-modify-write holds the lock AssociateDhcpOptions and a VPC's tag
+	// writes hold, so none of them overwrites another's change (#1614).
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 modifyVpcAttribute get: %w", err)

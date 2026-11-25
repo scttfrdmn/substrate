@@ -249,7 +249,7 @@ func ec2ScanRecords[T any](ctx context.Context, state StateManager, prefix strin
 
 // vpcDependents reports whether vpcID still holds anything AWS requires to be gone before
 // DeleteVpc, and returns the state keys of what the delete itself removes: the default security
-// group, the main route table and the default network ACL.
+// group, the main route table, the default network ACL and the VPC's flow logs.
 //
 // A dependent is a subnet, an attached internet gateway, a security group other than the
 // default one ([ec2IsDefaultSecurityGroup]), a route table that is not the main one, a network
@@ -305,8 +305,9 @@ func (p *EC2Plugin) vpcDependents(reqCtx *RequestContext, vpcID string) (bool, [
 	}); err != nil {
 		return false, owned, fmt.Errorf("ec2 deleteVpc NAT gateways: %w", err)
 	}
-	// A network ACL other than the default one holds the VPC; the default one goes with it (#1614).
-	aclHeld, aclOwned, err := p.vpcNetworkACLDependents(ctx, reqCtx, vpcID)
+	// A network ACL other than the default one holds the VPC; the default one and the VPC's flow
+	// logs go with it (#1614).
+	aclHeld, aclOwned, err := p.vpcNetworkControlDependents(ctx, reqCtx, vpcID)
 	if err != nil {
 		return false, owned, err
 	}

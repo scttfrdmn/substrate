@@ -139,6 +139,10 @@ func (p *EC2Plugin) seedDefaultVPC(reqCtx *RequestContext) error {
 // from the account and Region, CreateDefaultVpc the request's own.
 func (p *EC2Plugin) createDefaultVPCResources(ctx context.Context, reqCtx *RequestContext) (*EC2VPC, error) {
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	// Held as CreateVpc holds it; see [EC2Plugin.createVPC]. Both callers hold defaultVPCMu,
+	// which is taken before sgMu everywhere (#1614).
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	dhcpOptionsID, err := p.newVPCDHCPOptionsID(ctx, reqCtx)
 	if err != nil {
 		return nil, err
@@ -198,8 +202,8 @@ func (p *EC2Plugin) createDefaultVPCResources(ctx context.Context, reqCtx *Reque
 		}
 		subnetIDs = append(subnetIDs, subnet.SubnetID)
 	}
-	// The default network ACL and its subnet associations are drawn after every other
-	// resource here, so the IDs those resources have always been seeded with are unchanged (#1614).
+	// The default network ACL and its subnet associations are drawn last, after every other
+	// resource here, so the other resources' IDs do not depend on them (#1614).
 	if err := p.createDefaultNetworkACL(ctx, reqCtx, vpcID, subnetIDs); err != nil {
 		return nil, err
 	}

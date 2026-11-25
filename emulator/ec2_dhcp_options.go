@@ -127,7 +127,8 @@ func ec2VPCDHCPOptionsID(vpc EC2VPC) string {
 }
 
 // newVPCDHCPOptionsID is the set a new VPC is associated with: the Region's default set, or none
-// once that set has been deleted.
+// once that set has been deleted. The caller holds [EC2Plugin.sgMu] from this read through the
+// VPC's write, so a concurrent DeleteDhcpOptions cannot delete the default set between them.
 func (p *EC2Plugin) newVPCDHCPOptionsID(ctx context.Context, reqCtx *RequestContext) (string, error) {
 	deleted, err := p.state.Get(ctx, ec2Namespace, ec2DefaultDHCPOptionsTombstoneKey(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
@@ -174,38 +175,57 @@ func ec2FindDHCPOptions(sets []EC2DHCPOptions, id string) *EC2DHCPOptions {
 	return nil
 }
 
-// materializeDefaultDHCPOptions persists the Region's default set when ids names it and it is
-// not yet stored, so CreateTags, whose writer changes only a stored record, can tag it.
-func (p *EC2Plugin) materializeDefaultDHCPOptions(reqCtx *RequestContext, ids []string) error {
+// syntheticDefaultDHCPOptions returns the Region's default set when ids names it and it is not
+// yet stored, or nil. The caller holds [EC2Plugin.sgMu].
+func (p *EC2Plugin) syntheticDefaultDHCPOptions(reqCtx *RequestContext, ids []string) (*EC2DHCPOptions, error) {
 	defaultID := ec2DefaultDHCPOptionsID(reqCtx.AccountID, reqCtx.Region)
 	if !containsStr(ids, defaultID) {
-		return nil
+		return nil, nil
 	}
-	ctx := context.Background()
-	p.sgMu.Lock()
-	defer p.sgMu.Unlock()
-	sets, stored, err := p.loadDHCPOptions(ctx, reqCtx)
+	sets, stored, err := p.loadDHCPOptions(context.Background(), reqCtx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	set := ec2FindDHCPOptions(sets, defaultID)
 	if set == nil || stored[defaultID] {
-		return nil
+		return nil, nil
 	}
-	if err := p.putEC2Record(ctx, ec2DHCPOptionsKey(reqCtx.AccountID, reqCtx.Region, defaultID), *set); err != nil {
-		return fmt.Errorf("ec2 default DHCP options: %w", err)
-	}
-	return nil
+	return set, nil
 }
 
 // materializeTagTargets persists the synthesized records among a CreateTags request's resource
 // IDs — a default network ACL of a VPC an older build wrote, and the Region's default DHCP
-// option set — so the tags have a stored record to land on.
-func (p *EC2Plugin) materializeTagTargets(reqCtx *RequestContext, ids []string) error {
-	if err := p.materializeNetworkACLs(reqCtx, ids); err != nil {
+// option set — so the tags have a stored record to land on. A synthesized record carries no
+// tags, so the request's own tags must fit the 50-tag limit on it; when they do not, the limit's
+// refusal is returned and nothing is persisted. The caller holds [EC2Plugin.sgMu], which
+// [EC2Plugin.lockTagWrite] takes for both prefixes.
+func (p *EC2Plugin) materializeTagTargets(reqCtx *RequestContext, ids []string, tags []EC2Tag) error {
+	acls, err := p.syntheticNetworkACLs(reqCtx, ids)
+	if err != nil {
 		return err
 	}
-	return p.materializeDefaultDHCPOptions(reqCtx, ids)
+	set, err := p.syntheticDefaultDHCPOptions(reqCtx, ids)
+	if err != nil {
+		return err
+	}
+	if len(acls) == 0 && set == nil {
+		return nil
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return awsErr
+	}
+	ctx := context.Background()
+	for _, acl := range acls {
+		if err := p.putNetworkACL(ctx, reqCtx, acl); err != nil {
+			return err
+		}
+	}
+	if set != nil {
+		if err := p.putEC2Record(ctx, ec2DHCPOptionsKey(reqCtx.AccountID, reqCtx.Region, set.DHCPOptionsID), *set); err != nil {
+			return fmt.Errorf("ec2 default DHCP options: %w", err)
+		}
+	}
+	return nil
 }
 
 // --- Rendering ---
