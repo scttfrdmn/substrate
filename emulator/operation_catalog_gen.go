@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1211 routed operations.
+// 68 plugins, 1223 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -719,6 +719,7 @@ var routedOperations = map[string][]string{
 		"CreateAccessKey",
 		"CreateGroup",
 		"CreateInstanceProfile",
+		"CreateLoginProfile",
 		"CreateOpenIDConnectProvider",
 		"CreatePolicy",
 		"CreatePolicyVersion",
@@ -730,6 +731,7 @@ var routedOperations = map[string][]string{
 		"DeleteGroup",
 		"DeleteGroupPolicy",
 		"DeleteInstanceProfile",
+		"DeleteLoginProfile",
 		"DeleteOpenIDConnectProvider",
 		"DeletePolicy",
 		"DeletePolicyVersion",
@@ -748,6 +750,7 @@ var routedOperations = map[string][]string{
 		"GetGroup",
 		"GetGroupPolicy",
 		"GetInstanceProfile",
+		"GetLoginProfile",
 		"GetOpenIDConnectProvider",
 		"GetPolicy",
 		"GetPolicyVersion",
@@ -761,12 +764,14 @@ var routedOperations = map[string][]string{
 		"ListAttachedGroupPolicies",
 		"ListAttachedRolePolicies",
 		"ListAttachedUserPolicies",
+		"ListEntitiesForPolicy",
 		"ListGroupPolicies",
 		"ListGroups",
 		"ListGroupsForUser",
 		"ListInstanceProfileTags",
 		"ListInstanceProfiles",
 		"ListInstanceProfilesForRole",
+		"ListMFADevices",
 		"ListOpenIDConnectProviderTags",
 		"ListOpenIDConnectProviders",
 		"ListPolicies",
@@ -777,9 +782,13 @@ var routedOperations = map[string][]string{
 		"ListRoles",
 		"ListSAMLProviderTags",
 		"ListSAMLProviders",
+		"ListSSHPublicKeys",
+		"ListServiceSpecificCredentials",
+		"ListSigningCertificates",
 		"ListUserPolicies",
 		"ListUserTags",
 		"ListUsers",
+		"ListVirtualMFADevices",
 		"PutGroupPolicy",
 		"PutRolePermissionsBoundary",
 		"PutRolePolicy",
@@ -804,9 +813,12 @@ var routedOperations = map[string][]string{
 		"UntagSAMLProvider",
 		"UntagUser",
 		"UpdateAssumeRolePolicy",
+		"UpdateGroup",
+		"UpdateLoginProfile",
 		"UpdateOpenIDConnectProviderThumbprint",
 		"UpdateRole",
 		"UpdateSAMLProvider",
+		"UpdateUser",
 	},
 	"kinesis": {
 		"AddTagsToStream",

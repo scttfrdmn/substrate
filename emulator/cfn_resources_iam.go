@@ -62,6 +62,10 @@ type cfnIAMRecord struct {
 
 	// PermissionsBoundary is the boundary ARN the template declared.
 	PermissionsBoundary string `json:"PermissionsBoundary,omitempty"`
+
+	// LoginProfile reports that the user declares a LoginProfile, so the delete removes the profile
+	// the stack made and leaves alone one it did not.
+	LoginProfile bool `json:"LoginProfile,omitempty"`
 }
 
 // cfnIAMEmbedding is one copy of an inline policy: the principal it is embedded in and its name
@@ -403,27 +407,76 @@ func (d *StackDeployer) iamLivePath(ctx context.Context, e cfnIAMEntity, streamI
 	return out.GroupPath, cost, nil
 }
 
-// cfnIAMPathRefusal reports, for a user or group whose Path the planner counts as changed, the
-// refusal a real change earns: IAM changes the path only through UpdateUser or UpdateGroup, which
-// substrate does not route (#1582). The live path is read first, so a Path whose value is what
-// the entity already has — a rollback re-applying the previous declaration counts every declared
-// property as changed — is not refused.
-func (d *StackDeployer) cfnIAMPathRefusal(
+// applyIAMPath applies a changed Path to a user or group in place through UpdateUser or
+// UpdateGroup, which is how IAM changes one ("Update requires: No interruption"). The live path is
+// read first, so a Path whose value is what the entity already has — a rollback re-applying the
+// previous declaration counts every declared property as changed — costs no update. The name is
+// unchanged: UserName and GroupName are Replacement.
+func (d *StackDeployer) applyIAMPath(
 	ctx context.Context, e cfnIAMEntity, props map[string]interface{}, changed []string,
 	streamID string, cctx *cfnContext,
-) (string, float64) {
+) (float64, error) {
 	if !slices.Contains(changed, "Path") {
-		return "", 0
+		return 0, nil
 	}
-	live, cost, err := d.iamLivePath(ctx, e, streamID)
+	live, total, err := d.iamLivePath(ctx, e, streamID)
 	if err != nil {
-		return err.Error(), cost
+		return total, err
 	}
-	if live == resolveStringProp(props, "Path", "/", cctx) {
-		return "", cost
+	want := resolveStringProp(props, "Path", "/", cctx)
+	if live == want {
+		return total, nil
 	}
-	return fmt.Sprintf("updating Path of AWS::IAM::%s is not modeled: IAM changes a %s's path "+
-		"through Update%s, which substrate does not route", e.Kind, strings.ToLower(e.Kind), e.Kind), cost
+	_, cost, err := d.iamCall(ctx, "Update"+e.Kind, e.body(map[string]string{"NewPath": want}), nil, streamID)
+	return total + cost, err
+}
+
+// cfnLoginProfile is an AWS::IAM::User's LoginProfile property: a password and whether it must be
+// reset at next sign-in.
+type cfnLoginProfile struct {
+	password      string
+	resetRequired string
+}
+
+// cfnUserLoginProfile resolves an AWS::IAM::User's LoginProfile, or nil when it declares none.
+func cfnUserLoginProfile(props map[string]interface{}, cctx *cfnContext) *cfnLoginProfile {
+	raw, ok := props["LoginProfile"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return &cfnLoginProfile{
+		password:      resolveStringProp(raw, "Password", "", cctx),
+		resetRequired: resolveStringProp(raw, "PasswordResetRequired", "false", cctx),
+	}
+}
+
+// syncIAMUserLoginProfile brings a user's login profile to want: CreateLoginProfile when the user
+// has none, UpdateLoginProfile when it has one, and DeleteLoginProfile when want is nil.
+func (d *StackDeployer) syncIAMUserLoginProfile(
+	ctx context.Context, userName string, want *cfnLoginProfile, streamID string,
+) (float64, error) {
+	_, total, getErr := d.iamCall(ctx, "GetLoginProfile", map[string]string{"UserName": userName}, nil, streamID)
+	exists := getErr == nil
+	if getErr != nil && !cfnDeleteIsAbsent(getErr) {
+		return total, getErr
+	}
+	switch {
+	case want == nil && exists:
+		_, cost, err := d.iamCall(ctx, "DeleteLoginProfile", map[string]string{"UserName": userName}, nil, streamID)
+		return total + cost, err
+	case want == nil:
+		return total, nil
+	}
+	body := map[string]string{"UserName": userName, "PasswordResetRequired": want.resetRequired}
+	if want.password != "" {
+		body["Password"] = want.password
+	}
+	op := "CreateLoginProfile"
+	if exists {
+		op = "UpdateLoginProfile"
+	}
+	_, cost, err := d.iamCall(ctx, op, body, nil, streamID)
+	return total + cost, err
 }
 
 // deleteIAMEntity undoes what rec records on the entity and deletes it: group memberships, then
@@ -432,6 +485,12 @@ func (d *StackDeployer) cfnIAMPathRefusal(
 // absence.
 func (d *StackDeployer) deleteIAMEntity(ctx context.Context, e cfnIAMEntity, rec cfnIAMRecord, streamID string) error {
 	if e.Kind == "User" {
+		// DeleteUser refuses a user with a password, so a login profile the stack made goes first.
+		if rec.LoginProfile {
+			if _, err := d.iamCallTolerant(ctx, "DeleteLoginProfile", map[string]string{"UserName": e.Name}, streamID); err != nil {
+				return err
+			}
+		}
 		for _, g := range rec.Groups {
 			if _, err := d.iamCallTolerant(ctx, "RemoveUserFromGroup",
 				map[string]string{"UserName": e.Name, "GroupName": g}, streamID); err != nil {
@@ -586,8 +645,8 @@ func (d *StackDeployer) updateIAMRole(
 //
 // "Ref returns the UserName", which is the physical ID, and "Arn" is CreateUser's own response
 // member. A UserName the template omits is generated, as "CloudFormation generates a unique
-// physical ID and uses that ID for the user name". LoginProfile is not applied: substrate routes
-// no CreateLoginProfile (#1583); the declaration is logged rather than failing the user.
+// physical ID and uses that ID for the user name". A LoginProfile is created through
+// CreateLoginProfile; its password is passed on and, like every IAM password, not stored.
 func (d *StackDeployer) deployIAMUser(
 	ctx context.Context, logicalID string, props map[string]interface{}, streamID string, cctx *cfnContext,
 ) (DeployedResource, float64, error) {
@@ -607,15 +666,17 @@ func (d *StackDeployer) deployIAMUser(
 	if resp != nil && xmlUnmarshalIAM(resp.Body, &result) == nil {
 		dr.ARN = result.ARN
 	}
-	if _, ok := props["LoginProfile"]; ok {
-		d.logger.Warn("cfn: AWS::IAM::User LoginProfile is not applied; CreateLoginProfile is not routed",
-			"logical_id", logicalID)
-	}
-
 	rec := cfnIAMRecord{TagKeys: sortedStringKeys(tags)}
 	e := cfnIAMEntity{Kind: "User", Name: name}
 	cost, err := d.syncIAMEntityBoundary(ctx, e, &rec, resolveStringProp(props, "PermissionsBoundary", "", cctx), streamID)
 	total += cost
+	if err == nil {
+		if lp := cfnUserLoginProfile(props, cctx); lp != nil {
+			rec.LoginProfile = true
+			cost, err = d.syncIAMUserLoginProfile(ctx, name, lp, streamID)
+			total += cost
+		}
+	}
 	if err == nil {
 		cost, err = d.syncIAMUserGroups(ctx, name, &rec, resolveStringList(props["Groups"], cctx), streamID)
 		total += cost
@@ -641,10 +702,8 @@ func (d *StackDeployer) deployIAMUser(
 
 // updateIAMUser applies a changed AWS::IAM::User in place. UserName is Replacement; Groups,
 // ManagedPolicyArns, Policies, Tags and PermissionsBoundary go through the operations that change
-// them, diffed against what is in place. Path is No interruption on the page but changes only
-// through UpdateUser, which substrate does not route, so a Path that really differs from the
-// user's fails the user with a reason saying so rather than replacing a user AWS would have kept;
-// a changed LoginProfile is logged and not applied, as on create.
+// them, diffed against what is in place. Path changes through UpdateUser and LoginProfile through
+// the login-profile operations, both in place.
 func (d *StackDeployer) updateIAMUser(
 	ctx context.Context, logicalID string, prior DeployedResource,
 	props map[string]interface{}, changed []string, streamID string, cctx *cfnContext,
@@ -653,17 +712,21 @@ func (d *StackDeployer) updateIAMUser(
 	dr.LogicalID = logicalID
 	dr.Metadata = cfnCopyMetadata(prior.Metadata)
 	e := cfnIAMEntity{Kind: "User", Name: prior.PhysicalID}
-	refusal, total := d.cfnIAMPathRefusal(ctx, e, props, changed, streamID, cctx)
-	if refusal != "" {
-		dr.Error = refusal
-		return dr, total, nil
-	}
-	if slices.Contains(changed, "LoginProfile") {
-		d.logger.Warn("cfn: AWS::IAM::User LoginProfile is not applied; CreateLoginProfile is not routed",
-			"logical_id", logicalID)
-	}
 	rec := d.liveIAMRecord(ctx, cctx, prior)
+	var total float64
 	steps := []func() (float64, error){
+		func() (float64, error) { return d.applyIAMPath(ctx, e, props, changed, streamID, cctx) },
+		func() (float64, error) {
+			if !slices.Contains(changed, "LoginProfile") {
+				return 0, nil
+			}
+			want := cfnUserLoginProfile(props, cctx)
+			cost, err := d.syncIAMUserLoginProfile(ctx, e.Name, want, streamID)
+			if err == nil {
+				rec.LoginProfile = want != nil
+			}
+			return cost, err
+		},
 		func() (float64, error) {
 			return d.syncIAMUserGroups(ctx, e.Name, &rec, resolveStringList(props["Groups"], cctx), streamID)
 		},
@@ -684,6 +747,10 @@ func (d *StackDeployer) updateIAMUser(
 		if err != nil {
 			return cfnIAMUpdated(dr, rec, total, err)
 		}
+	}
+	// "Fn::GetAtt Arn" embeds the path, so a Path change is a new ARN under the same name.
+	if dr.ARN != "" {
+		dr.ARN = iamUserARN(arnAccountID(dr.ARN), resolveStringProp(props, "Path", "/", cctx), e.Name)
 	}
 	return cfnIAMUpdated(dr, rec, total, nil)
 }
@@ -732,9 +799,7 @@ func (d *StackDeployer) deployIAMGroup(
 
 // updateIAMGroup applies a changed AWS::IAM::Group in place. GroupName is Replacement;
 // ManagedPolicyArns and Policies go through Attach/DetachGroupPolicy and Put/DeleteGroupPolicy,
-// diffed against what is in place. Path is No interruption but changes only through UpdateGroup,
-// which substrate does not route, so a Path that really differs from the group's fails the group
-// with a reason saying so.
+// diffed against what is in place. Path changes in place through UpdateGroup.
 func (d *StackDeployer) updateIAMGroup(
 	ctx context.Context, logicalID string, prior DeployedResource,
 	props map[string]interface{}, changed []string, streamID string, cctx *cfnContext,
@@ -743,14 +808,16 @@ func (d *StackDeployer) updateIAMGroup(
 	dr.LogicalID = logicalID
 	dr.Metadata = cfnCopyMetadata(prior.Metadata)
 	e := cfnIAMEntity{Kind: "Group", Name: prior.PhysicalID}
-	refusal, total := d.cfnIAMPathRefusal(ctx, e, props, changed, streamID, cctx)
-	if refusal != "" {
-		dr.Error = refusal
-		return dr, total, nil
-	}
 	rec := d.liveIAMRecord(ctx, cctx, prior)
+	total, err := d.applyIAMPath(ctx, e, props, changed, streamID, cctx)
+	if err != nil {
+		return cfnIAMUpdated(dr, rec, total, err)
+	}
 	cost, err := d.syncIAMEntityPolicies(ctx, e, &rec, resolveStringList(props["ManagedPolicyArns"], cctx),
 		cfnInlinePolicies(props["Policies"], cctx), slices.Contains(changed, "Policies"), streamID)
+	if err == nil && dr.ARN != "" {
+		dr.ARN = iamGroupARN(arnAccountID(dr.ARN), resolveStringProp(props, "Path", "/", cctx), e.Name)
+	}
 	return cfnIAMUpdated(dr, rec, total+cost, err)
 }
 

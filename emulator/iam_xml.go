@@ -140,9 +140,9 @@ func iamUserIdentityXML(u *IAMUser) string {
 // type says the member "is returned only in the GetUser and ListUsers operations",
 // and `ListUsers`' sample response carries it (#807). It is omitted when nil, which
 // AWS documents as meaning the user never signed in with a password — and that is
-// always the case here, because substrate models no password operation
-// (`ChangePassword`, `CreateLoginProfile` and `UpdateLoginProfile` all answer
-// `InvalidAction`), so nothing assigns the field. Rendering it anyway costs nothing
+// always the case here: substrate models no console sign-in, so a login profile
+// (`CreateLoginProfile`) holds a password nothing uses, and nothing assigns the field.
+// Rendering it anyway costs nothing
 // and is what a consumer seeding an [IAMUser] into state directly observes.
 //
 // The member therefore also cannot appear on `CreateUser`, which shares this

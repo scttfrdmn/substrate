@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - STS: `Policy` and `PolicyArns` session policies on `AssumeRole`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` narrow every request the session signs, including on replay and a stack's later operations (#1613).
 - STS: `AssumeRole` honors `Tags`, `TransitiveTagKeys`, `SourceIdentity` and `MaxSessionDuration`, and role chaining carries transitive tags and the source identity (#1706).
 - CloudFormation: `AWS::IAM::OIDCProvider` and `AWS::IAM::SAMLProvider` deploy, update in place and delete (#1613).
+- IAM: `ListEntitiesForPolicy`, with `EntityFilter`, `PathPrefix`, `PolicyUsageFilter` and one `Marker` across users, groups and roles (#1613).
+- IAM: `UpdateUser` and `UpdateGroup` rename and re-path, moving policies, memberships, access keys and login profiles; `AWS::IAM::User`/`Group` `Path` updates in place (#1582).
+- IAM: login profiles (`Create`/`Get`/`Update`/`DeleteLoginProfile`) store no password; CloudFormation applies `AWS::IAM::User` `LoginProfile` (#1583).
+- IAM: `ListMFADevices`, `ListSSHPublicKeys`, `ListSigningCertificates`, `ListServiceSpecificCredentials` and `ListVirtualMFADevices` answer empty lists, which Terraform's `force_destroy` reads (#1613).
 
 ### Changed
 
@@ -73,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authorization: a presigned URL, S3 POST-policy upload or SigV2-signed request is authorized as its signer, whose key is read from `X-Amz-Credential`, `AWSAccessKeyId` or the SigV2 `Authorization` header; it was unenforced (#1613). This applies only with signature verification off. Substrate verifies only a SigV4 `Authorization` header, so with verification on, an unverified credential never names the caller: those requests resolve no principal, as before (verifying them is #1713).
 - STS: a `TransitiveTagKeys` entry matches its session tag regardless of case, as tag keys are case-insensitive, both in `AssumeRole` chaining and in the web-identity and SAML claims (#1613, #1706).
 - STS: `AssumeRole` with `Policy` or `PolicyArns` now mints a narrowed session where it ignored them; an unknown customer managed `PolicyArns` entry is `MalformedPolicyDocument`, and an AWS managed one substrate does not bundle is accepted as a policy that allows nothing (#1613).
+- IAM: `DeleteUser` refuses a user with a login profile, access keys or inline policies (`DeleteConflict`), and a CloudFormation `Path` change to a user or group now applies instead of failing the update (#1582, #1583).
+- IAM: the tagging API's writes to users, roles and instance profiles go through IAM, resolving a pathed user's or role's ARN by its name (#1582).
+- IAM: the new path, `Password is required`, login-profile `EntityAlreadyExists` and `ListEntitiesForPolicy` filter messages are substrate's own (#1582, #1583).
+- STS: `AssumeRole` with `Policy` or `PolicyArns` now mints a narrowed session where it ignored them; an unknown customer managed `PolicyArns` entry is `MalformedPolicyDocument`, and an unbundled AWS managed one is accepted and not applied (#1613).
 - STS: `AssumeRole` refuses a `DurationSeconds` above the role's `MaxSessionDuration` (3600 unless set), and needs `sts:TagSession`/`sts:SetSourceIdentity` in an enforced trust policy when tags or a source identity are passed (#1706).
 - STS/IAM: the federation and provider limit, validation, SAML `NoSuchEntity`, malformed-token, missing-`sub`/`exp`, not-yet-valid, SAML-expiry, session-tag, session-policy and seeded `IDPRejectedClaim`/`IDPCommunicationError` messages are substrate's own (#1613).
 - EventBridge: a rule on a custom bus has the ARN `rule/{bus}/{name}`, and `PutRule` refuses a bus that does not exist; create it with `CreateEventBus` first. Rules from earlier state are default-bus rules (#1613).

@@ -34,6 +34,11 @@ type IAMPlugin struct {
 	// providerMu serializes the read-check-write of an OpenID Connect or SAML provider record:
 	// a create's duplicate check, a client-ID or thumbprint change, a tag write and a delete.
 	providerMu sync.Mutex
+
+	// entityMu makes a user or group rename atomic against every other IAM request:
+	// UpdateUser and UpdateGroup move a dozen records keyed by the name and hold it for
+	// writing, and every other operation holds it for reading (see [IAMPlugin.HandleRequest]).
+	entityMu sync.RWMutex
 }
 
 // Name returns the service name "iam".
@@ -68,6 +73,13 @@ func (p *IAMPlugin) Shutdown(_ context.Context) error { return nil }
 // helper so the dispatch stays where the operation catalog reads it.
 func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *AWSResponse, err error) {
 	defer func() { resp = iamStampRequestID(resp, ctx) }()
+	if req.Operation == "UpdateUser" || req.Operation == "UpdateGroup" {
+		p.entityMu.Lock()
+		defer p.entityMu.Unlock()
+	} else {
+		p.entityMu.RLock()
+		defer p.entityMu.RUnlock()
+	}
 	switch req.Operation {
 	case "CreateUser":
 		return p.createUser(ctx, req)
@@ -239,6 +251,32 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.listInstanceProfiles(ctx, req)
 	case "ListInstanceProfilesForRole":
 		return p.listInstanceProfilesForRole(ctx, req)
+
+	case "UpdateUser":
+		return p.updateUser(ctx, req)
+	case "UpdateGroup":
+		return p.updateGroup(ctx, req)
+	case "ListEntitiesForPolicy":
+		return p.listEntitiesForPolicy(ctx, req)
+
+	case "CreateLoginProfile":
+		return p.createLoginProfile(ctx, req)
+	case "GetLoginProfile":
+		return p.getLoginProfile(ctx, req)
+	case "UpdateLoginProfile":
+		return p.updateLoginProfile(ctx, req)
+	case "DeleteLoginProfile":
+		return p.deleteLoginProfile(ctx, req)
+	case "ListMFADevices":
+		return p.listUserCredentials(ctx, req, "MFADevices")
+	case "ListSSHPublicKeys":
+		return p.listUserCredentials(ctx, req, "SSHPublicKeys")
+	case "ListSigningCertificates":
+		return p.listUserCredentials(ctx, req, "Certificates")
+	case "ListServiceSpecificCredentials":
+		return p.listUserCredentials(ctx, req, "ServiceSpecificCredentials")
+	case "ListVirtualMFADevices":
+		return p.listVirtualMFADevices(ctx, req)
 
 	case "CreateOpenIDConnectProvider":
 		return p.createOpenIDConnectProvider(ctx, req)
@@ -452,6 +490,36 @@ func (p *IAMPlugin) deleteUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			fmt.Sprintf("Cannot delete entity, must remove user from all groups first. "+
 				"Groups containing %s: %s", params.UserName, strings.Join(groups, ", ")),
 			http.StatusConflict), nil
+	}
+
+	// The rest of what the DeleteUser page says to remove first: "Password (DeleteLoginProfile)",
+	// "Access keys (DeleteAccessKey)" and "Inline policies (DeleteUserPolicy)". Substrate models
+	// no signing certificate, SSH key, service-specific credential or MFA device, so none can exist.
+	// Each wording is AWS's, observed through the AWS CLI and Terraform. Without these a deleted
+	// user's records stayed behind, and a user later created or renamed into the name inherited them.
+	profile, err := p.loadLoginProfile(goCtx, ctx.AccountID, params.UserName)
+	if err != nil {
+		return nil, err
+	}
+	if profile != nil {
+		return iamErrorResponse("DeleteConflict",
+			"Cannot delete entity, must delete login profile first.", http.StatusConflict), nil
+	}
+	keys, err := p.loadStringList(goCtx, iamUserAccessKeysKey(ctx.AccountID, params.UserName))
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) > 0 {
+		return iamErrorResponse("DeleteConflict",
+			"Cannot delete entity, must delete access keys first.", http.StatusConflict), nil
+	}
+	inline, err := p.loadInlinePolicyNames(goCtx, ctx.AccountID, "user", params.UserName)
+	if err != nil {
+		return nil, err
+	}
+	if len(inline) > 0 {
+		return iamErrorResponse("DeleteConflict",
+			"Cannot delete entity, must delete policies first.", http.StatusConflict), nil
 	}
 
 	if err := p.state.Delete(goCtx, iamNamespace, iamUserKey(ctx.AccountID, params.UserName)); err != nil {
