@@ -47,7 +47,7 @@ var tfAddresses = []string{
 	"aws_flow_log.vpc",
 	"aws_iam_role.flow_logs",
 	"aws_network_acl.private",
-	"aws_network_acl_rule.all_out",
+	"aws_network_acl_rule.ephemeral_out",
 	"aws_network_acl_rule.https_in",
 	"aws_vpc_dhcp_options.main",
 	"aws_vpc_dhcp_options_association.main",

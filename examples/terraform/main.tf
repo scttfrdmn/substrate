@@ -99,13 +99,15 @@ resource "aws_network_acl_rule" "https_in" {
   to_port        = 443
 }
 
-resource "aws_network_acl_rule" "all_out" {
+resource "aws_network_acl_rule" "ephemeral_out" {
   network_acl_id = aws_network_acl.private.id
   rule_number    = 100
   egress         = true
-  protocol       = "-1"
+  protocol       = "tcp"
   rule_action    = "allow"
-  cidr_block     = "0.0.0.0/0"
+  cidr_block     = aws_vpc.main.cidr_block
+  from_port      = 1024
+  to_port        = 65535
 }
 
 resource "aws_vpc_dhcp_options" "main" {

@@ -65,6 +65,12 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 		"CreateCapacityReservation": {
 			"TagSpecifications[].Tags": {Name: "Tag"},
 		},
+		"CreateDhcpOptions": {
+			"DhcpConfigurations":          {Name: "DhcpConfiguration"},
+			"DhcpConfigurations[].Values": {Name: "Value"},
+			"TagSpecifications":           {Name: "TagSpecification"},
+			"TagSpecifications[].Tags":    {Name: "Tag"},
+		},
 		"CreateFleet": {
 			"LaunchTemplateConfigs[].Overrides[].BlockDeviceMappings":                                            {Name: "BlockDeviceMapping"},
 			"LaunchTemplateConfigs[].Overrides[].InstanceRequirements.AcceleratorManufacturers":                  {Name: "AcceleratorManufacturer"},
@@ -82,6 +88,13 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 			"ReservedCapacityOptions.ReservedCapacityFallbackOptions.MarketTypes":                                {Name: "MarketType"},
 			"TagSpecifications":        {Name: "TagSpecification"},
 			"TagSpecifications[].Tags": {Name: "Tag"},
+		},
+		"CreateFlowLogs": {
+			"ResourceIds":                      {Name: "ResourceId"},
+			"TagFieldSpecifications":           {Name: "TagFieldSpecification"},
+			"TagFieldSpecifications[].TagKeys": {Name: "TagKey"},
+			"TagSpecifications":                {Name: "TagSpecification"},
+			"TagSpecifications[].Tags":         {Name: "Tag"},
 		},
 		"CreateImage": {
 			"BlockDeviceMappings":      {Name: "BlockDeviceMapping"},
@@ -158,6 +171,13 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 			"TagSpecifications":                         {Name: "TagSpecification"},
 			"TagSpecifications[].Tags":                  {Name: "Tag"},
 		},
+		"CreateNetworkAcl": {
+			"TagSpecifications":        {Name: "TagSpecification"},
+			"TagSpecifications[].Tags": {Name: "Tag"},
+		},
+		"CreateNetworkAclEntry": {
+			"IcmpTypeCode": {Name: "Icmp"},
+		},
 		"CreatePlacementGroup": {
 			"TagSpecifications":        {Name: "TagSpecification"},
 			"TagSpecifications[].Tags": {Name: "Tag"},
@@ -199,6 +219,9 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 		"DeleteFleets": {
 			"FleetIds": {Name: "FleetId"},
 		},
+		"DeleteFlowLogs": {
+			"FlowLogIds": {Name: "FlowLogId"},
+		},
 		"DeleteLaunchTemplateVersions": {
 			"Versions": {Name: "LaunchTemplateVersion"},
 		},
@@ -223,10 +246,19 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 			"Filters":                {Name: "Filter"},
 			"Filters[].Values":       {Name: "Value"},
 		},
+		"DescribeDhcpOptions": {
+			"DhcpOptionsIds":   {Name: "DhcpOptionsId"},
+			"Filters":          {Name: "Filter"},
+			"Filters[].Values": {Name: "Value"},
+		},
 		"DescribeFleets": {
 			"Filters":          {Name: "Filter"},
 			"Filters[].Values": {Name: "Value"},
 			"FleetIds":         {Name: "FleetId"},
+		},
+		"DescribeFlowLogs": {
+			"Filter[].Values": {Name: "Value"},
+			"FlowLogIds":      {Name: "FlowLogId"},
 		},
 		"DescribeImages": {
 			"ExecutableUsers":  {Name: "ExecutableBy"},
@@ -279,6 +311,11 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 		"DescribeNatGateways": {
 			"Filter[].Values": {Name: "Value"},
 			"NatGatewayIds":   {Name: "NatGatewayId"},
+		},
+		"DescribeNetworkAcls": {
+			"Filters":          {Name: "Filter"},
+			"Filters[].Values": {Name: "Value"},
+			"NetworkAclIds":    {Name: "NetworkAclId"},
 		},
 		"DescribeNetworkInterfaces": {
 			"Filters":             {Name: "Filter"},
@@ -382,6 +419,9 @@ var schedQueryModel = map[string]map[string]map[string]schedQueryHint{ //nolint:
 			"BlockDeviceMappings":      {Name: "BlockDeviceMapping"},
 			"TagSpecifications":        {Name: "TagSpecification"},
 			"TagSpecifications[].Tags": {Name: "Tag"},
+		},
+		"ReplaceNetworkAclEntry": {
+			"IcmpTypeCode": {Name: "Icmp"},
 		},
 		"RequestSpotInstances": {
 			"LaunchSpecification.BlockDeviceMappings":              {Name: "BlockDeviceMapping"},
