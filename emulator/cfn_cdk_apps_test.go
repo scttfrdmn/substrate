@@ -26,7 +26,7 @@ import (
 //   - DdbApp: a provisioned table with read and write autoscaling;
 //   - UrlApp: a function with a function URL and an S3 notification.
 //
-// The last two use types substrate cannot deploy, and are pinned as refused, naming them.
+// The last one uses types substrate cannot deploy, and is pinned as refused, naming them.
 
 func cfnCDKApp(t *testing.T, name string) string {
 	t.Helper()
@@ -37,7 +37,7 @@ func cfnCDKApp(t *testing.T, name string) string {
 
 // TestCFN_OrdinaryCDKAppsDeployInStrictMode deploys and deletes each supported app over the wire.
 func TestCFN_OrdinaryCDKAppsDeployInStrictMode(t *testing.T) {
-	for _, app := range []string{"VpcApp", "LambdaApp", "ApiApp", "SnsApp", "EcsApp"} {
+	for _, app := range []string{"VpcApp", "LambdaApp", "ApiApp", "SnsApp", "EcsApp", "DdbApp"} {
 		t.Run(app, func(t *testing.T) {
 			ts := emulator.StartTestServer(t)
 			ssmPutBootstrapVersion(t, ts)
@@ -66,11 +66,10 @@ func ssmPutBootstrapVersion(t *testing.T, ts *emulator.TestServer) {
 	require.Equal(t, http.StatusOK, code, "%s", body)
 }
 
-// TestCFN_CDKAppsWithUnsupportedTypesAreRefusedByName pins the two apps strict mode refuses, and
-// which types it names.
+// TestCFN_CDKAppsWithUnsupportedTypesAreRefusedByName pins the app strict mode refuses, and which
+// types it names.
 func TestCFN_CDKAppsWithUnsupportedTypesAreRefusedByName(t *testing.T) {
 	for app, types := range map[string][]string{
-		"DdbApp": {"AWS::ApplicationAutoScaling::ScalableTarget", "AWS::ApplicationAutoScaling::ScalingPolicy"},
 		"UrlApp": {"AWS::Lambda::Url", "Custom::S3BucketNotifications"},
 	} {
 		_, err := newStrictDeployer(t).Deploy(context.Background(), cfnCDKApp(t, app), app, map[string]string{"BootstrapVersion": "21"})

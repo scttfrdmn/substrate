@@ -17,6 +17,10 @@
       "apiVersion": "2018-11-29",
       "operations": 35
     },
+    "application-autoscaling": {
+      "apiVersion": "2016-02-06",
+      "operations": 13
+    },
     "appsync": {
       "apiVersion": "2017-07-25",
       "operations": 23

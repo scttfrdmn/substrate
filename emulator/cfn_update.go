@@ -109,6 +109,9 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::ServiceDiscovery::PrivateDnsNamespace": cfnUpdateServiceDiscoveryNamespace("AWS::ServiceDiscovery::PrivateDnsNamespace"),
 	"AWS::ServiceDiscovery::PublicDnsNamespace":  cfnUpdateServiceDiscoveryNamespace("AWS::ServiceDiscovery::PublicDnsNamespace"),
 	"AWS::ServiceDiscovery::Service":             (*StackDeployer).updateServiceDiscoveryService,
+	// Application Auto Scaling (#1661): both operations update in place.
+	"AWS::ApplicationAutoScaling::ScalableTarget": (*StackDeployer).updateApplicationAutoScalingScalableTarget,
+	"AWS::ApplicationAutoScaling::ScalingPolicy":  (*StackDeployer).updateApplicationAutoScalingScalingPolicy,
 }
 
 // cfnUpdateUnmodelled maps a type to why a change to one of its updatable properties cannot be

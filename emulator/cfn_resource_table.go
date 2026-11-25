@@ -192,6 +192,9 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	"AWS::ServiceDiscovery::PublicDnsNamespace":  cfnDeployServiceDiscoveryNamespace("AWS::ServiceDiscovery::PublicDnsNamespace"),
 	"AWS::ServiceDiscovery::Service":             (*StackDeployer).deployServiceDiscoveryService,
 	"AWS::ServiceDiscovery::Instance":            (*StackDeployer).deployServiceDiscoveryInstance,
+	// v0.135.0 — DynamoDB and ECS autoscaling, which the CDK emits (#1661).
+	"AWS::ApplicationAutoScaling::ScalableTarget": (*StackDeployer).deployApplicationAutoScalingScalableTarget,
+	"AWS::ApplicationAutoScaling::ScalingPolicy":  (*StackDeployer).deployApplicationAutoScalingScalingPolicy,
 }
 
 // cfnEmulatedType reports whether substrate's CloudFormation emulates a resource type.

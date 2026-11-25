@@ -70,6 +70,9 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::DynamoDB::Table":                       jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
 	"AWS::Kinesis::Stream":                       cfnKinesisStreamDeleter,
 	"AWS::Kinesis::StreamConsumer":               jsonBodyDeleter("kinesis", "DeregisterStreamConsumer", "ConsumerARN"),
+	// Application Auto Scaling (#1661).
+	"AWS::ApplicationAutoScaling::ScalableTarget": cfnScalableTargetDeleter,
+	"AWS::ApplicationAutoScaling::ScalingPolicy":  cfnScalingPolicyDeleter,
 	"AWS::KinesisFirehose::DeliveryStream": jsonBodyDeleter("firehose", "DeleteDeliveryStream",
 		"DeliveryStreamName"),
 	"AWS::EFS::FileSystem":  pathDeleter("efs", "/2015-02-01/file-systems/"),
@@ -1098,6 +1101,7 @@ var cfnDeleteAbsentCodes = map[string]bool{
 	"NamespaceNotFound":                    true, // Cloud Map.
 	"ServiceNotFound":                      true, // Cloud Map.
 	"InstanceNotFound":                     true, // Cloud Map.
+	"ObjectNotFoundException":              true, // Application Auto Scaling.
 	"ParameterNotFound":                    true,
 	"QueueDoesNotExist":                    true,
 	"ReplicationGroupNotFoundFault":        true,

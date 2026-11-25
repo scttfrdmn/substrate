@@ -201,6 +201,10 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	// Route53AutoNaming_v20170314. The plugin speaks the json protocol (#1733).
 	"servicediscovery": errProtoJSONRPC,
 
+	// Application Auto Scaling: "protocol": "json", jsonVersion 1.1, target prefix
+	// AnyScaleFrontendService.
+	"application-autoscaling": errProtoJSONRPC,
+
 	// REST-JSON.
 	"account":         errProtoRESTJSON,
 	"apigateway":      errProtoRESTJSON,

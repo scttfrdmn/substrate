@@ -83,6 +83,7 @@ emulator/apigatewayv2_types.go	V2RouteState	AccountID	AccountID
 emulator/apigatewayv2_types.go	V2RouteState	Region	Region
 emulator/apigatewayv2_types.go	V2StageState	AccountID	AccountID
 emulator/apigatewayv2_types.go	V2StageState	Region	Region
+emulator/appautoscaling_types.go	aasTarget	EverTagged	ever_tagged,omitempty
 emulator/appsync_types.go	AppSyncGraphQLApi	AccountID	accountId,omitempty
 emulator/appsync_types.go	AppSyncGraphQLApi	Region	region,omitempty
 emulator/athena_plugin.go	AthenaQuery	AccountID	AccountID

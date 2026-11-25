@@ -426,6 +426,11 @@ var targetServiceAliases = map[string]string{
 	// DiscoverInstances' model gives it the endpoint hostPrefix "data-", so its host is
 	// "data-servicediscovery.{region}.amazonaws.com", whose first label is not the plugin name.
 	"data-servicediscovery": "servicediscovery",
+	// "AnyScaleFrontendService" → no "Amazon" to strip, no "_" version suffix → lowercase →
+	// "anyscalefrontendservice" → "application-autoscaling". AnyScale is Application Auto Scaling's
+	// internal code-name, so the target prefix bears no resemblance to the endpoint prefix; the host
+	// "application-autoscaling.*" and the signing name already yield the plugin name.
+	"anyscalefrontendservice": "application-autoscaling",
 }
 
 // extractServiceFromTarget parses an X-Amz-Target value such as

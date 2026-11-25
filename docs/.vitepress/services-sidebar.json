@@ -47,6 +47,10 @@
       "link": "/reference/apigatewayv2"
     },
     {
+      "text": "Application Auto Scaling",
+      "link": "/reference/application-autoscaling"
+    },
+    {
       "text": "AppSync",
       "link": "/reference/appsync"
     },

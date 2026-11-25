@@ -257,6 +257,9 @@ func RegisterDefaultPlugins(
 		{&SESPlugin{}, "ses", sesOpts},
 		// Cloud Map creates and deletes a DNS namespace's Route 53 hosted zone through the registry.
 		{&ServiceDiscoveryPlugin{}, "servicediscovery", registryOpt},
+		// Application Auto Scaling checks a DynamoDB or ECS target's resource and creates a target
+		// tracking policy's CloudWatch alarms, both through the registry.
+		{&ApplicationAutoScalingPlugin{}, "application-autoscaling", registryOpt},
 	}
 	for _, r := range registrations {
 		if err := w.register(ctx, r.plugin, r.name, r.extra); err != nil {

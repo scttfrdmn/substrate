@@ -104,6 +104,11 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::ServiceDiscovery::Service": {"HealthCheckCustomConfig": "Always", "Name": "Always", "NamespaceId": "Always",
 		"Type": "Always"},
 	"AWS::ServiceDiscovery::Instance": {"InstanceId": "Always", "ServiceId": "Always"},
+	// Application Auto Scaling (#1661), each from its own page.
+	"AWS::ApplicationAutoScaling::ScalableTarget": {"ResourceId": "Always", "ScalableDimension": "Always",
+		"ServiceNamespace": "Always"},
+	"AWS::ApplicationAutoScaling::ScalingPolicy": {"PolicyName": "Always", "ResourceId": "Always",
+		"ScalableDimension": "Always", "ScalingTargetId": "Always", "ServiceNamespace": "Always"},
 	// The IAM types v0.129.0 gives an update path (#1545, #1560), each from its own page.
 	"AWS::IAM::User":          {"UserName": "Always"},
 	"AWS::IAM::Group":         {"GroupName": "Always"},
