@@ -67,7 +67,7 @@
     },
     "cloudwatch": {
       "apiVersion": "2010-08-01",
-      "operations": 14
+      "operations": 18
     },
     "codebuild": {
       "apiVersion": "2016-10-06",
@@ -219,7 +219,7 @@
     },
     "s3": {
       "apiVersion": "2006-03-01",
-      "operations": 54
+      "operations": 68
     },
     "sagemaker": {
       "apiVersion": "2017-07-24",

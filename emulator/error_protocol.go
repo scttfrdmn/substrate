@@ -541,7 +541,7 @@ func marshalAWSError(e *AWSError, wire errorWireContext) (body []byte, contentTy
 			Error     queryError `xml:"Error"`
 			RequestID string     `xml:"RequestId"`
 		}{
-			Error:     queryError{Type: queryFaultType(serverFault), Code: e.Code, Message: e.Message},
+			Error:     queryError{Type: queryFaultType(serverFault), Code: queryErrorCodeFor(wire.Service, e.Code), Message: e.Message},
 			RequestID: wire.requestID(),
 		})
 		if err != nil {

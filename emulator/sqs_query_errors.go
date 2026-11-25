@@ -31,14 +31,19 @@ var sqsQueryErrorCodes = map[string]string{
 	"UnsupportedOperation":         "AWS.SimpleQueueService.UnsupportedOperation",
 }
 
-// queryErrorCodeFor returns the Query-protocol code an x-amzn-query-error header carries for an
-// error service raised with code: the model's awsQueryError code where one differs, and code
-// itself otherwise.
+// queryErrorCodeFor returns the Query-protocol code for an error service raised with code: the
+// model's awsQueryError code where one differs, and code itself otherwise. It is what an
+// x-amzn-query-error header carries, and what a Query-protocol error document carries as <Code>.
 func queryErrorCodeFor(service, code string) string {
-	if service == "sqs" {
-		if q, ok := sqsQueryErrorCodes[code]; ok {
-			return q
-		}
+	var table map[string]string
+	switch service {
+	case "sqs":
+		table = sqsQueryErrorCodes
+	case "monitoring":
+		table = cloudWatchQueryErrorCodes
+	}
+	if q, ok := table[code]; ok {
+		return q
 	}
 	return code
 }

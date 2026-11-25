@@ -878,6 +878,20 @@ var operationActionOverrides = map[string]string{
 	// permission" — API_DeleteBucketOwnershipControls; there is no
 	// s3:DeleteBucketOwnershipControls action (#1445).
 	"s3:DeleteBucketOwnershipControls": "s3:PutBucketOwnershipControls",
+	// Each from its operation's page: "you must have permission to perform the
+	// s3:PutAccelerateConfiguration action" (and s3:GetAccelerateConfiguration for the Get),
+	// "This action requires permissions for the s3:GetReplicationConfiguration action", and
+	// PutBucketReplication and DeleteBucketReplication both require
+	// s3:PutReplicationConfiguration. GetObjectLockConfiguration and
+	// PutObjectLockConfiguration authorize as s3:GetBucketObjectLockConfiguration and
+	// s3:PutBucketObjectLockConfiguration (Service Authorization Reference, Amazon S3).
+	"s3:GetBucketAccelerateConfiguration": "s3:GetAccelerateConfiguration",
+	"s3:PutBucketAccelerateConfiguration": "s3:PutAccelerateConfiguration",
+	"s3:GetBucketReplication":             "s3:GetReplicationConfiguration",
+	"s3:PutBucketReplication":             "s3:PutReplicationConfiguration",
+	"s3:DeleteBucketReplication":          "s3:PutReplicationConfiguration",
+	"s3:GetObjectLockConfiguration":       "s3:GetBucketObjectLockConfiguration",
+	"s3:PutObjectLockConfiguration":       "s3:PutBucketObjectLockConfiguration",
 
 	// The multipart operations, from the S3 User Guide's "Multipart upload API and
 	// permissions" table (mpuoverview.html#mpuAndPermissions): "You must be allowed to

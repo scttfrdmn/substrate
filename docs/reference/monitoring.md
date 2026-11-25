@@ -28,7 +28,7 @@ closing tag was the operation's — not well-formed XML at all. `MetricAlarms` a
 omitted.
 
 **An operation with a `smithy.api#Unit` output answers with no body and no
-`Content-Type`.** Eight of the fourteen do: `PutMetricAlarm`, `DeleteAlarms`, `SetAlarmState`,
+`Content-Type`.** Eight of the eighteen do: `PutMetricAlarm`, `DeleteAlarms`, `SetAlarmState`,
 `EnableAlarmActions`, `DisableAlarmActions`, `PutMetricData`, `TagResource` and
 `UntagResource`. On the CBOR path they
 return HTTP 200 carrying only `Smithy-Protocol: rpc-v2-cbor` — the rule comes from the
@@ -148,6 +148,48 @@ Storing the configuration is not evaluating it. An alarm's `StateValue` moves on
 `SetAlarmState`, and evaluating alarms against stored datapoints is
 [#1637](https://github.com/scttfrdmn/substrate/issues/1637).
 
+## Dashboards
+
+`PutDashboard`, `GetDashboard`, `ListDashboards` and `DeleteDashboards` record a dashboard's
+body and answer it back byte for byte
+([#1613](https://github.com/scttfrdmn/substrate/issues/1613)). Substrate does not render a
+widget or evaluate the metrics a widget names: that is what the console does with a body,
+not what the API observes of it.
+
+- **Global.** "All dashboards in your account are global, not region-specific", so a
+  dashboard put through one Region is read through any other, and its ARN has an empty Region:
+  `arn:aws:cloudwatch::{account}:dashboard/{name}`.
+- **What a record carries.** The body, the ARN, `LastModified` on the simulated clock (every
+  `PutDashboard` sets it, since a put replaces the whole dashboard) and the `Tags` a creating
+  put sent. A put that updates an existing dashboard ignores `Tags`, as the reference says.
+  `ListDashboards` reports `Size` as the body's length in bytes.
+- **Validation.** `PutDashboard` refuses a body that is not a JSON object with
+  `InvalidParameterInput` (shape `DashboardInvalidInputError`), "The field DashboardBody must
+  be a valid JSON object", which is CloudWatch's own answer as boto3 and CloudFormation report
+  it. A missing or malformed `DashboardName` (at most 255 of `A-Z`, `a-z`, `0-9`, `-` and `_`)
+  or a missing body is refused with the same code and a message of substrate's own, and so is a
+  creating put's tag outside the alarm tags' limits (50 tags, a 1–128 character key, a value of
+  at most 256): `PutDashboard`'s model declares `DashboardInvalidInputError` as its one client
+  error, and AWS publishes no other code for a bad tag here. A body that
+  is a JSON object is accepted and answered with an empty `DashboardValidationMessages`:
+  substrate does not validate widgets, so it has no warning to report.
+- **Not found.** `GetDashboard` and `DeleteDashboards` answer an unknown name with
+  `ResourceNotFound` (404), "Dashboard {name} does not exist", which is the text the AWS
+  provider for Terraform reports. On the JSON and CBOR paths `__type` names
+  `DashboardNotFoundError`, the shape `GetDashboard` declares, and `x-amzn-query-error`
+  carries `ResourceNotFound`. `DeleteDashboards` deletes every named dashboard that exists
+  before reporting the first that does not ("the operation attempts to delete as many
+  dashboards as possible"). The current model no longer lists that error on
+  `DeleteDashboards`, though older SDK models did.
+- **Paging.** `ListDashboards` answers in name order, 1,000 a page. Its `NextToken` names the
+  last dashboard returned, so a dashboard created or deleted between pages does not shift the
+  walk. A token substrate did not issue for the same `DashboardNamePrefix` is
+  `InvalidParameterValue`, the only client error the page publishes; the message is
+  substrate's own.
+- **Tags.** `TagResource` and `ListTagsForResource` do not yet take a dashboard ARN; they
+  answer `ResourceNotFoundException`, as before dashboards were modeled
+  ([#1699](https://github.com/scttfrdmn/substrate/issues/1699)).
+
 ## Alarm tags
 
 `TagResource`, `UntagResource` and `ListTagsForResource` take an alarm ARN,
@@ -161,7 +203,8 @@ this parameter are ignored." The account and Region come from the ARN, never fro
   characters and a `Value` at most 256. The pages publish no code for exceeding the quota, so
   the refusal is the common `InvalidParameterValue`, with substrate's own message.
 - A well-formed dashboard, metric-stream or Contributor Insights rule ARN names a type AWS tags
-  and substrate does not model. It answers `ResourceNotFoundException` (404). Any other ARN is
+  and these operations do not: [dashboards](#dashboards) are modeled, their tags are not
+  reachable here. It answers `ResourceNotFoundException` (404). Any other ARN is
   `InvalidParameterValue`.
 - `ListTagsForResource` always returns `Tags`, in key order, and empty for an alarm with none.
 - The [tagging API](/reference/tagging) reports alarms, and its writes apply these
@@ -266,12 +309,17 @@ is a documented divergence from the reference writer's output and conformant eit
 | TagResource | Alarm ARNs; 50-tag quota over the merged set — see [Alarm tags](#alarm-tags) |
 | UntagResource | Alarm ARNs; a key the alarm does not carry is not an error |
 | ListTagsForResource | Alarm ARNs; `Tags` always present, in key order |
+| PutDashboard | Creates or replaces a dashboard; `InvalidParameterInput` unless `DashboardBody` is a JSON object; answers an empty `DashboardValidationMessages` — see [Dashboards](#dashboards) |
+| GetDashboard | `DashboardArn`, `DashboardBody` as it was put, `DashboardName`; `ResourceNotFound` (shape `DashboardNotFoundError`) for an unknown name — see [Dashboards](#dashboards) |
+| ListDashboards | Filters on `DashboardNamePrefix`; name order; pages 1,000 at a time; `Size` is the body's length in bytes — see [Dashboards](#dashboards) |
+| DeleteDashboards | Up to 100 names; deletes every one that exists, then reports the first that does not with `ResourceNotFound` — see [Dashboards](#dashboards) |
 
 ## CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::CloudWatch::Alarm | AlarmName | |
+| AWS::CloudWatch::Dashboard | DashboardName | `PutDashboard` on create, and again in place when `DashboardBody` changes; a changed `DashboardName` replaces it. A template without a name gets a generated one. A stack delete sends `DeleteDashboards` |
 
 ## Cost
 

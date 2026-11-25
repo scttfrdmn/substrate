@@ -333,6 +333,7 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 			Headers: map[string]string{},
 			Params:  map[string]string{"AlarmNames.member.1": dr.PhysicalID}}
 	},
+	"AWS::CloudWatch::Dashboard": cfnCloudWatchDashboardDeleter,
 
 	// --- Analytics and ETL ---------------------------------------------------
 	"AWS::Glue::Database":   jsonBodyDeleter("glue", "DeleteDatabase", "Name"),
@@ -1040,11 +1041,13 @@ var cfnDeleteAbsentCodes = map[string]bool{
 	"CacheSubnetGroupNotFoundFault": true,
 	"ClientException":               true, // ECS's code for an absent task definition.
 	"ClusterNotFoundException":      true,
-	"DBClusterNotFoundFault":        true,
-	"DBInstanceNotFound":            true,
-	"DBParameterGroupNotFound":      true,
-	"DBSubnetGroupNotFoundFault":    true,
-	"FileSystemNotFound":            true,
+	// CloudWatch DeleteDashboards; its Query code is ResourceNotFound (cloudWatchQueryErrorCodes).
+	"DashboardNotFoundError":     true,
+	"DBClusterNotFoundFault":     true,
+	"DBInstanceNotFound":         true,
+	"DBParameterGroupNotFound":   true,
+	"DBSubnetGroupNotFoundFault": true,
+	"FileSystemNotFound":         true,
 	// A VPCGatewayAttachment's detach when the gateway is attached to that VPC no longer: the
 	// attachment is what is gone (#1492).
 	"Gateway.NotAttached":               true,

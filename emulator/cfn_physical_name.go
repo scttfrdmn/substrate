@@ -111,6 +111,12 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// characters (CreateLogGroup).
 	"AWS::Logs::LogGroup": {maxLen: 512, nameProp: "LogGroupName"},
 
+	// A dashboard name is unique within an account — dashboards are global — and is at most 255
+	// characters of A-Z, a-z, 0-9, "-" and "_" (API_PutDashboard). The Template Reference says "If
+	// you do not specify a name, one will be generated automatically"; a generated name's letters,
+	// digits and hyphens are inside the rule.
+	"AWS::CloudWatch::Dashboard": {maxLen: 255, nameProp: "DashboardName"},
+
 	// Neither declares a name property, so CloudFormation always generates one (#1605). A cache
 	// parameter group name is 1–255 letters, digits and hyphens, beginning with a letter, and
 	// ElastiCache stores it lowercase (CreateCacheParameterGroup); an EFS creation token is 1–64

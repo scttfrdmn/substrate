@@ -25,8 +25,6 @@ var s3UnroutedBucketDeletes = map[string]string{
 	"metadataConfiguration": "DeleteBucketMetadataConfiguration",
 	"metadataTable":         "DeleteBucketMetadataTableConfiguration",
 	"metrics":               "DeleteBucketMetricsConfiguration",
-	"replication":           "DeleteBucketReplication",
-	"website":               "DeleteBucketWebsite",
 }
 
 // s3RequireNotImplemented requires that w is S3's NotImplemented/501 refusal.
@@ -100,7 +98,7 @@ func TestS3Subresource_UnroutedRequestsAreRefused(t *testing.T) {
 		{"ListBucketInventoryConfigurations", http.MethodGet, "/" + bucket + "?inventory"},
 		{"GetBucketInventoryConfiguration", http.MethodGet, "/" + bucket + "?inventory&id=one"},
 		{"CreateSession", http.MethodGet, "/" + bucket + "?session"},
-		{"PutBucketWebsite", http.MethodPut, "/" + bucket + "?website"},
+		{"PutBucketMetricsConfiguration", http.MethodPut, "/" + bucket + "?metrics&id=m1"},
 		{"CreateBucketMetadataTableConfiguration", http.MethodPost, "/" + bucket + "?metadataTable"},
 		{"GetObjectAttributes", http.MethodGet, "/" + bucket + "/key?attributes"},
 		{"GetObjectRetention", http.MethodGet, "/" + bucket + "/key?retention"},
@@ -126,11 +124,27 @@ func TestS3Subresource_ResolvesTheRealOperationName(t *testing.T) {
 		method, target, want string
 	}{
 		// Unrouted: named for what they are.
-		{http.MethodDelete, "/b?website", "DeleteBucketWebsite"},
+		{http.MethodDelete, "/b?metrics&id=m1", "DeleteBucketMetricsConfiguration"},
+		{http.MethodPut, "/b?analytics&id=a1", "PutBucketAnalyticsConfiguration"},
 		{http.MethodGet, "/b?metrics", "ListBucketMetricsConfigurations"},
 		{http.MethodGet, "/b?metrics&id=m1", "GetBucketMetricsConfiguration"},
 		{http.MethodPut, "/b/k?retention", "PutObjectRetention"},
 		{http.MethodPost, "/b/k?restore", "RestoreObject"},
+		// Routed (#1613), including the two DELETEs #1349 kept from reaching DeleteBucket.
+		{http.MethodDelete, "/b?website", "DeleteBucketWebsite"},
+		{http.MethodDelete, "/b?replication=", "DeleteBucketReplication"},
+		{http.MethodGet, "/b?website=", "GetBucketWebsite"},
+		{http.MethodPut, "/b?website", "PutBucketWebsite"},
+		{http.MethodGet, "/b?logging", "GetBucketLogging"},
+		{http.MethodPut, "/b?logging=", "PutBucketLogging"},
+		{http.MethodGet, "/b?accelerate", "GetBucketAccelerateConfiguration"},
+		{http.MethodPut, "/b?accelerate", "PutBucketAccelerateConfiguration"},
+		{http.MethodGet, "/b?requestPayment", "GetBucketRequestPayment"},
+		{http.MethodPut, "/b?requestPayment", "PutBucketRequestPayment"},
+		{http.MethodGet, "/b?replication", "GetBucketReplication"},
+		{http.MethodPut, "/b?replication", "PutBucketReplication"},
+		{http.MethodGet, "/b?object-lock=", "GetObjectLockConfiguration"},
+		{http.MethodPut, "/b?object-lock", "PutObjectLockConfiguration"},
 		// Routed. ?location is routed since #1606.
 		{http.MethodGet, "/b?location", "GetBucketLocation"},
 		{http.MethodGet, "/b?location=", "GetBucketLocation"},

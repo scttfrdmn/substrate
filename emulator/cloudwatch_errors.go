@@ -76,12 +76,15 @@ func (m modeledError) ShapeID() string {
 //
 // Two shapes share the Query code "ResourceNotFound" — DashboardNotFoundError and
 // ResourceNotFound — so that key can only name one of them, and it names the shape of
-// the same name. The collision is harmless in practice: both are @error("client") with
-// status 404 and a lowercase "message" member, so a client distinguishing them by
-// __type is the only caller that could tell, and substrate raises neither. The code
-// substrate does raise for a missing metric or alarm is
-// "ResourceNotFoundException" (cloudwatch_plugin.go), whose own row is unambiguous.
+// the same name. A missing dashboard is raised under the code "DashboardNotFoundError"
+// instead, which names its own shape here and which [cloudWatchQueryErrorCodes]
+// translates back to "ResourceNotFound" for the Query document and the
+// x-amzn-query-error header. GetDashboard declares DashboardNotFoundError, so a typed
+// client matching that shape matches. The code
+// substrate raises for a missing alarm is "ResourceNotFoundException"
+// (cloudwatch_tags.go), whose own row is unambiguous.
 var cloudWatchErrorShapes = map[string]modeledError{
+	"DashboardNotFoundError":          {Shape: "DashboardNotFoundError", MessageMember: "message", HTTPStatus: 404},
 	"ConcurrentModificationException": {Shape: "ConcurrentModificationException", MessageMember: "Message", HTTPStatus: 429},
 	"ConflictException":               {Shape: "ConflictException", MessageMember: "Message", HTTPStatus: 409},
 	"InternalServiceError":            {Shape: "InternalServiceFault", MessageMember: "Message", ServerFault: true, HTTPStatus: 500},
@@ -104,6 +107,13 @@ var cloudWatchErrorShapes = map[string]modeledError{
 	"KmsAccessDeniedException": {Shape: "KmsAccessDeniedException", MessageMember: "Message", HTTPStatus: 400},
 	"KmsKeyDisabledException":  {Shape: "KmsKeyDisabledException", MessageMember: "Message", HTTPStatus: 400},
 	"KmsKeyNotFoundException":  {Shape: "KmsKeyNotFoundException", MessageMember: "Message", HTTPStatus: 400},
+}
+
+// cloudWatchQueryErrorCodes maps each code a CloudWatch handler raises that is not its shape's
+// Query code to that Query code, read off the shape's aws.protocols#awsQueryError trait. It is the
+// one entry the shared Query code above cannot express; see [cloudWatchErrorShapes].
+var cloudWatchQueryErrorCodes = map[string]string{
+	"DashboardNotFoundError": "ResourceNotFound",
 }
 
 // cwInvalidNextToken reports that a pagination token is not one substrate issued.

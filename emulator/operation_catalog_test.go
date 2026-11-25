@@ -29,7 +29,7 @@ const (
 	// place. Updating this figure is the deliberate half of adding or removing an
 	// operation; `make operation-catalog` regenerates the catalog and this test then says
 	// by how much the total moved.
-	routedOperationTotal = 1144
+	routedOperationTotal = 1162
 
 	// routedPluginTotal is the number of plugins RegisterDefaultPlugins registers. The
 	// coverage matrix in docs/services.md reports the same figure from the same source.
@@ -100,7 +100,7 @@ func TestOperationCatalog_ReportsTheOperationsTheDispatchSwitchRoutes(t *testing
 		"ec2":                  100,
 		"cloudfront":           17,
 		"iam":                  79,
-		"s3":                   54,
+		"s3":                   68,
 		"apigateway":           41,
 		"organizations":        39,
 		"config":               25,

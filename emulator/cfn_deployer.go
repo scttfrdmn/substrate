@@ -3366,6 +3366,12 @@ func (d *StackDeployer) deployS3Bucket(
 		Headers:   map[string]string{},
 		Params:    map[string]string{},
 	}
+	// ObjectLockEnabled is CreateBucket's x-amz-bucket-object-lock-enabled (#1658); an update that
+	// turns it on goes through PutObjectLockConfiguration instead (configureS3Bucket).
+	// ObjectLockConfiguration's default retention Rule is not modeled (#1693).
+	if enabled, ok := cfnBoolValue(cfnResolveStructured(props["ObjectLockEnabled"], cctx)); ok && enabled {
+		req.Headers["x-amz-bucket-object-lock-enabled"] = "true"
+	}
 
 	_, cost, routeErr := d.dispatch(ctx, req, streamID)
 
