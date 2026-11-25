@@ -29,7 +29,7 @@ const (
 	// place. Updating this figure is the deliberate half of adding or removing an
 	// operation; `make operation-catalog` regenerates the catalog and this test then says
 	// by how much the total moved.
-	routedOperationTotal = 1237
+	routedOperationTotal = 1241
 
 	// routedPluginTotal is the number of plugins RegisterDefaultPlugins registers. The
 	// coverage matrix in docs/services.md reports the same figure from the same source.
@@ -110,7 +110,7 @@ func TestOperationCatalog_ReportsTheOperationsTheDispatchSwitchRoutes(t *testing
 		"autoscaling":          17,
 		"ecr":                  26,
 		"cloudformation":       20,
-		"lambda":               38,
+		"lambda":               42,
 	}
 	for service, want := range counts {
 		assert.Len(t, emulator.RoutedOperations(service), want, "%s", service)

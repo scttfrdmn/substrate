@@ -333,6 +333,11 @@ func lambdaVersionNumber(v string) int {
 // lambdaFunctionFingerprint identifies a function's code and the configuration a version snapshots,
 // so two publishes of the same $LATEST can be told apart from two of different ones. It leaves out
 // what changes without the function changing: RevisionId, LastModified and tags.
+//
+// ImageConfig, EphemeralStorage and LoggingConfig are omitted when empty, and the record keeps each
+// empty when it is the default (lambda_function_config.go), so a function with all three at their
+// defaults fingerprints as a version published before they were recorded did: a PublishVersion
+// after an upgrade mints no new version for an unchanged function.
 func lambdaFunctionFingerprint(fn LambdaFunction) string {
 	data, err := json.Marshal(struct {
 		Runtime, Role, Handler, Description, PackageType, ImageURI, TracingMode, CodeSha256 string
@@ -341,8 +346,12 @@ func lambdaFunctionFingerprint(fn LambdaFunction) string {
 		CodeSize                                                                            int64
 		Environment                                                                         map[string]string
 		Architectures                                                                       []string
+		ImageConfig                                                                         *LambdaImageConfig   `json:",omitempty"`
+		EphemeralStorage                                                                    int                  `json:",omitempty"`
+		LoggingConfig                                                                       *LambdaLoggingConfig `json:",omitempty"`
 	}{fn.Runtime, fn.Role, fn.Handler, fn.Description, fn.PackageType, fn.ImageURI, fn.TracingMode, fn.CodeSha256,
-		fn.CodeS3Location, fn.Timeout, fn.MemorySize, fn.CodeSize, fn.Environment, fn.Architectures})
+		fn.CodeS3Location, fn.Timeout, fn.MemorySize, fn.CodeSize, fn.Environment, fn.Architectures,
+		fn.ImageConfig, fn.EphemeralStorageSize, fn.LoggingConfig})
 	if err != nil {
 		// A struct of strings, numbers, a string map and a string slice always marshals.
 		panic(fmt.Sprintf("lambda fingerprint marshal: %v", err))
@@ -568,9 +577,10 @@ func (p *LambdaPlugin) getFunctionCodeSigningConfig(ctx *RequestContext, name st
 	}{FunctionName: fn.FunctionName})
 }
 
-// deleteFunctionVersion deletes one published version and its resource policy. A version an alias
-// still routes to is refused: "You can't delete a version that an alias references." The page names
-// ResourceConflictException for a conflicting operation; the message is substrate's own.
+// deleteFunctionVersion deletes one published version, its resource policy and its event-invoke
+// configuration. A version an alias still routes to is refused: "You can't delete a version that an
+// alias references." The page names ResourceConflictException for a conflicting operation; the
+// message is substrate's own.
 func (p *LambdaPlugin) deleteFunctionVersion(accountID, region string, fn LambdaFunction, version string) (*AWSResponse, error) {
 	p.versionMu.Lock()
 	defer p.versionMu.Unlock()
@@ -598,18 +608,23 @@ func (p *LambdaPlugin) deleteFunctionVersion(accountID, region string, fn Lambda
 	if err := p.state.Delete(goCtx, lambdaNamespace, lambdaQualifiedPolicyStateKey(accountID, region, fn.FunctionName, version)); err != nil {
 		return nil, fmt.Errorf("lambda deleteFunctionVersion policy state.Delete: %w", err)
 	}
+	if err := p.state.Delete(goCtx, lambdaNamespace, lambdaQualifiedInvokeConfigStateKey(accountID, region, fn.FunctionName, version)); err != nil {
+		return nil, fmt.Errorf("lambda deleteFunctionVersion invoke config state.Delete: %w", err)
+	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}}, nil
 }
 
 // deleteFunctionChildren deletes everything a function holds besides its own record: every
-// published version, every alias, every version's and alias's resource policy, and the version
-// counter — DeleteFunction without a Qualifier deletes "all versions and aliases".
+// published version, every alias, every version's and alias's resource policy and event-invoke
+// configuration, and the version counter — DeleteFunction without a Qualifier deletes "all versions
+// and aliases".
 func (p *LambdaPlugin) deleteFunctionChildren(accountID, region, name string) error {
 	goCtx := context.Background()
 	for _, prefix := range []string{
 		lambdaVersionKeyPrefix(accountID, region, name),
 		lambdaAliasKeyPrefix(accountID, region, name),
 		lambdaPolicyStateKey(accountID, region, name) + ":",
+		lambdaInvokeConfigStateKey(accountID, region, name) + ":",
 	} {
 		keys, err := p.state.List(goCtx, lambdaNamespace, prefix)
 		if err != nil {

@@ -6802,12 +6802,16 @@ func (d *StackDeployer) deployLambdaEventSourceMapping(
 ) (DeployedResource, float64, error) {
 	functionName := resolveStringProp(props, "FunctionName", "", cctx)
 	eventSourceArn := resolveStringProp(props, "EventSourceArn", "", cctx)
-	startingPosition := resolveStringProp(props, "StartingPosition", "TRIM_HORIZON", cctx)
+	// StartingPosition is forwarded only when the template sets it: Lambda refuses one on an SQS
+	// source, and defaults a stream source's itself (#1659).
+	startingPosition := resolveStringProp(props, "StartingPosition", "", cctx)
 
 	bodyMap := map[string]interface{}{
-		"FunctionName":     functionName,
-		"EventSourceArn":   eventSourceArn,
-		"StartingPosition": startingPosition,
+		"FunctionName":   functionName,
+		"EventSourceArn": eventSourceArn,
+	}
+	if startingPosition != "" {
+		bodyMap["StartingPosition"] = startingPosition
 	}
 	if batchSize, ok := props["BatchSize"]; ok {
 		bodyMap["BatchSize"] = batchSize

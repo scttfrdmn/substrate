@@ -28,7 +28,7 @@ import "strings"
 //     event source mappings;
 //   - `2017-03-31` — `TagResource`, `UntagResource` and `ListTags`;
 //   - `2018-10-31` — the nine layer operations (#1272), dated in lambda_layers.go;
-//   - `2019-09-25` — `PutFunctionEventInvokeConfig`;
+//   - `2019-09-25` — the five event-invoke configuration operations (#1685);
 //   - `2020-06-30` — `GetFunctionCodeSigningConfig` (#1519).
 //
 // `aws-sdk-go-v2/service/lambda`'s serializer is the mechanical check on that list: its
@@ -74,7 +74,7 @@ const (
 	// lambdaTagsAPIVersion dates TagResource, UntagResource and ListTags.
 	lambdaTagsAPIVersion = "2017-03-31"
 
-	// lambdaEventInvokeAPIVersion dates PutFunctionEventInvokeConfig.
+	// lambdaEventInvokeAPIVersion dates the event-invoke configuration operations.
 	lambdaEventInvokeAPIVersion = "2019-09-25"
 
 	// lambdaCodeSigningAPIVersion dates GetFunctionCodeSigningConfig.
@@ -208,11 +208,11 @@ func lambdaFunctionOperation(version, method, p string) (op, name, subResource s
 			return lambdaUnknownOperation, "", ""
 		}
 		return "InvokeAsync", fn, ""
-	case sub == "event-invoke-config" && method == "PUT":
+	case sub == "event-invoke-config" || sub == "event-invoke-config/list":
 		if version != lambdaEventInvokeAPIVersion {
 			return lambdaUnknownOperation, "", ""
 		}
-		return "PutFunctionEventInvokeConfig", fn, ""
+		return lambdaEventInvokeOperation(method, fn, sub == "event-invoke-config/list")
 	case sub == "code-signing-config" && method == "GET":
 		if version != lambdaCodeSigningAPIVersion {
 			return lambdaUnknownOperation, "", ""
@@ -254,6 +254,27 @@ func lambdaFunctionOperation(version, method, p string) (op, name, subResource s
 			}
 			return "RemovePermission", fn, stmtID
 		}
+	}
+	return lambdaUnknownOperation, "", ""
+}
+
+// lambdaEventInvokeOperation resolves the five operations under
+// `/2019-09-25/functions/{FunctionName}/event-invoke-config[/list]`, each by the method its page
+// publishes: PUT is Put, POST Update, GET Get, DELETE Delete, and GET on `/list` the listing.
+func lambdaEventInvokeOperation(method, fn string, list bool) (op, name, subResource string) {
+	switch {
+	case list && method == "GET":
+		return "ListFunctionEventInvokeConfigs", fn, ""
+	case list:
+		return lambdaUnknownOperation, "", ""
+	case method == "PUT":
+		return "PutFunctionEventInvokeConfig", fn, ""
+	case method == "POST":
+		return "UpdateFunctionEventInvokeConfig", fn, ""
+	case method == "GET":
+		return "GetFunctionEventInvokeConfig", fn, ""
+	case method == "DELETE":
+		return "DeleteFunctionEventInvokeConfig", fn, ""
 	}
 	return lambdaUnknownOperation, "", ""
 }
@@ -342,18 +363,21 @@ func lambdaAuthzResourceARN(method, path, qualifier, region, accountID string) s
 }
 
 // lambdaQualifiedOperations are the operations whose handler resolves the Qualifier parameter to a
-// version or alias and acts on it. Every other operation ignores the parameter: those whose page
-// publishes none (UpdateFunctionCode, UpdateFunctionConfiguration, GetFunctionCodeSigningConfig and
-// the rest), and PutFunctionEventInvokeConfig, whose page publishes one that substrate does not
-// model, since it keeps one event-invoke configuration per function.
+// version or alias and acts on it. Every other operation ignores the parameter, because its page
+// publishes none: UpdateFunctionCode, UpdateFunctionConfiguration, GetFunctionCodeSigningConfig,
+// ListFunctionEventInvokeConfigs and the rest.
 var lambdaQualifiedOperations = map[string]bool{ //nolint:gochecknoglobals // immutable lookup table
-	"GetFunction":              true,
-	"GetFunctionConfiguration": true,
-	"Invoke":                   true,
-	"DeleteFunction":           true,
-	"AddPermission":            true,
-	"RemovePermission":         true,
-	"GetPolicy":                true,
+	"GetFunction":                     true,
+	"GetFunctionConfiguration":        true,
+	"Invoke":                          true,
+	"DeleteFunction":                  true,
+	"AddPermission":                   true,
+	"RemovePermission":                true,
+	"GetPolicy":                       true,
+	"PutFunctionEventInvokeConfig":    true,
+	"UpdateFunctionEventInvokeConfig": true,
+	"GetFunctionEventInvokeConfig":    true,
+	"DeleteFunctionEventInvokeConfig": true,
 }
 
 // lambdaAuthzPathARN is [lambdaAuthzResourceARN]'s resource as the path alone names it.

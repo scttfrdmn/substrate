@@ -2107,3 +2107,15 @@ func EC2LookupSubnetNetworkACLAssociationForTest(state StateManager, accountID, 
 func (p *EC2Plugin) AssociateSubnetWithDefaultNetworkACLForTest(reqCtx *RequestContext, subnetID, vpcID string) error {
 	return p.associateSubnetWithDefaultNetworkACL(context.Background(), reqCtx, subnetID, vpcID)
 }
+
+// LambdaTaggedEventSourceMappingsForTest wraps lambdaTaggedEventSourceMappings, which the tagging
+// scan calls, and returns the ARN of each mapping it reports, so a test can hand it records no
+// request can write: another account's mapping in the shared key space, and an unreadable one.
+func LambdaTaggedEventSourceMappingsForTest(state StateManager, accountID, region string) ([]string, error) {
+	got, err := lambdaTaggedEventSourceMappings(context.Background(), state, accountID, region)
+	arns := make([]string, 0, len(got))
+	for _, m := range got {
+		arns = append(arns, m.ResourceARN)
+	}
+	return arns, err
+}

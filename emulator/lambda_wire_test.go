@@ -55,3 +55,50 @@ func TestLambdaWire_FunctionResponsesCarryNoBookkeepingMember(t *testing.T) {
 		}, anchor: `"FunctionName":"wire-fn"`},
 	})
 }
+
+// TestLambdaWire_EventSourceMappingResponsesCarryNoBookkeepingMember is the raw-bytes assertion
+// scripts/wire-bookkeeping-projected.txt cites for ESMConfig (#756, #1660).
+//
+// ESMConfig's bookkeeping member is EverTagged, set only by a tag write, so the mapping is tagged and
+// the flag read back before any response is walked. Its Tags are no member of
+// EventSourceMappingConfiguration either, so they are walked for too. Every operation that answers
+// the mapping is driven, DeleteEventSourceMapping last.
+func TestLambdaWire_EventSourceMappingResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p := &emulator.LambdaPlugin{}
+	ctx, state := wireSetup(t, p, "req-lambda-esm-wire")
+	call := func(method, path string, body map[string]any) []byte {
+		return wireREST(t, p, ctx, "lambda", method, path, body)
+	}
+
+	created := call(http.MethodPost, "/2015-03-31/event-source-mappings", map[string]any{
+		"FunctionName": "wire-fn", "EventSourceArn": "arn:aws:sqs:us-east-1:123456789012:wire-q",
+		"Tags": map[string]string{"team": "wire"},
+	})
+	var esm struct {
+		UUID                  string `json:"UUID"`
+		EventSourceMappingArn string `json:"EventSourceMappingArn"`
+	}
+	require.NoError(t, json.Unmarshal(created, &esm), "decode CreateEventSourceMapping: %s", created)
+	require.Equal(t, "arn:aws:lambda:us-east-1:123456789012:event-source-mapping:"+esm.UUID, esm.EventSourceMappingArn)
+
+	tagsPath := "/2017-03-31/tags/" + esm.EventSourceMappingArn
+	call(http.MethodPost, tagsPath, map[string]any{"Tags": map[string]string{"env": "test"}})
+	record := wireRequireHeld(t, state, "lambda", "esm:"+esm.UUID)
+	require.JSONEq(t, "true", string(record["ever_tagged"]), "the mapping must persist ever_tagged before an absence assertion on it means anything")
+	require.JSONEq(t, `{"team":"wire","env":"test"}`, string(record["Tags"]))
+
+	esmPath := "/2015-03-31/event-source-mappings/" + esm.UUID
+	anchor := `"UUID":"` + esm.UUID + `"`
+	wireRunJSON(t, []string{"EverTagged", "ever_tagged", "Tags"}, []wireCase{
+		{op: "CreateEventSourceMapping", held: created, anchor: anchor},
+		{op: "GetEventSourceMapping", call: func() []byte { return call(http.MethodGet, esmPath, nil) }, anchor: anchor},
+		{op: "ListEventSourceMappings", call: func() []byte {
+			return call(http.MethodGet, "/2015-03-31/event-source-mappings", nil)
+		}, anchor: anchor},
+		{op: "UpdateEventSourceMapping", call: func() []byte {
+			return call(http.MethodPut, esmPath, map[string]any{"BatchSize": 5})
+		}, anchor: anchor},
+		{op: "DeleteEventSourceMapping", call: func() []byte { return call(http.MethodDelete, esmPath, nil) }, anchor: anchor},
+	})
+}

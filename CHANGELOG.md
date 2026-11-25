@@ -9,10 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Lambda: functions record and answer `ImageConfig`, `EphemeralStorage` and `LoggingConfig`; mappings `FunctionResponseTypes`, `ScalingConfig` and `EventSourceMappingArn`, with SQS defaults and checks (#1659).
+- Lambda: event-source mappings take tags on create, `TagResource`, `UntagResource` and `ListTags`, and appear in Resource Groups Tagging `GetResources` (#1660).
+- Lambda: `Get`, `Update`, `Delete` and `ListFunctionEventInvokeConfigs`; `PutFunctionEventInvokeConfig` stores `DestinationConfig` and honours `Qualifier` (#1685).
 - EC2: network ACLs (a default per VPC), DHCP option sets (`dhcpOptionsId` on `DescribeVpcs`) and flow logs, recorded and described, never enforced or delivered (#1614).
+
+### Fixed
+
+- Lambda: `Configuration` no longer carries `Tags`; `GetFunction` answers them only beside it (#1660).
 
 ### Compatibility
 
+- Lambda: `CreateEventSourceMapping` on an SQS queue refuses `StartingPosition`; drop it from the request. An SQS mapping created without `BatchSize` now reads 10, not 100 (#1659).
+- Lambda: `LambdaEventInvokeConfig.MaximumRetryAttempts` and `MaximumEventAgeInSeconds` are `*int`; an embedder reading them dereferences the pointer (#1685).
 - EC2: `DeleteVpc` refuses a VPC holding a custom network ACL, so delete the ACL first, and removes the VPC's flow logs. A test counting a VPC's records sees its default ACL (#1614).
 
 ## [v0.134.0] - 2026-11-25
